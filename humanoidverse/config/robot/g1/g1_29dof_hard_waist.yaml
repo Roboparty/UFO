@@ -237,10 +237,9 @@ robot:
     angular_damping: 0.
     linear_damping: 0.
 
-    urdf_file: "g1/${robot.asset.robot_type}.urdf"
-    # usd_file: "g1/${robot.asset.robot_type}.usd"
-    usd_file: "hf://elijahgalahad/g1_xmls@main/g1-mode_13_15.urdf"
-    xml_file: "g1/${robot.asset.robot_type}.xml"
+    urdf_file: null
+    usd_file: null
+    xml_file: null
     robot_type: g1_29dof_fakehand
     self_collisions: 0 # 1 to disable, 0 to enable self collisions
     default_dof_drive_mode: 3
@@ -252,7 +251,7 @@ robot:
     asset:
       assetRoot: "humanoidverse/data/robots/g1/"
       assetFileName: "g1_29dof.xml"
-      urdfFileName: "g1_29dof_fakehand.urdf"
+      urdfFileName: null
 
     humanoid_type: g1_29dof_fakehand
     bias_offset: False
