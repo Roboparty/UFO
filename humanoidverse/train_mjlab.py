@@ -12,8 +12,8 @@ import os
 from pathlib import Path
 
 
-def _ensure_compile_cache_on_data(cache_root: str | Path | None = None) -> None:
-    root = Path(os.environ.get("BFMZERO_MJLAB_CACHE_DIR", cache_root or "/data/xue/bfmzero-mjlab/cache")).expanduser()
+def _ensure_compile_cache(cache_root: str | Path | None = None) -> None:
+    root = Path(os.environ.get("BFMZERO_MJLAB_CACHE_DIR", cache_root or Path.cwd() / "cache")).expanduser()
     for key, subdir in {
         "TMPDIR": "tmp",
         "TEMP": "tmp",
@@ -28,7 +28,7 @@ def _ensure_compile_cache_on_data(cache_root: str | Path | None = None) -> None:
         os.environ.setdefault(key, str(path))
 
 
-_ensure_compile_cache_on_data()
+_ensure_compile_cache()
 
 from humanoidverse.agents.envs.humanoidverse_mjlab import G1_MJLAB_MJCF_PATH, HumanoidVerseMjlabConfig
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import HumanoidVerseMjlabTrackingEvaluationConfig
