@@ -362,7 +362,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
 def launch(args: argparse.Namespace) -> None:
     log_dir = Path(args.work_dir).expanduser().resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_compile_cache_on_data()
+    _ensure_compile_cache()
     if args.gpu_ids in (None, "single"):
         run_train(args, log_dir)
         return
