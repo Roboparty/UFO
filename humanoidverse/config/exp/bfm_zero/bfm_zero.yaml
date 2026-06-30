@@ -5,7 +5,7 @@ defaults:
   - /simulator: mujoco
   - /domain_rand: domain_rand
   - /rewards: reward_bfm_zero
-  - /robot: g1/g1_29dof_new
+  - /robot: g1/g1_29dof_hard_waist
   - /terrain: terrain_locomotion_plane
   - /obs: bfm_zero_obs
   # - /opt: wandb
