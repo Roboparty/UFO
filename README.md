@@ -15,6 +15,14 @@ uv sync
 
 ## Train
 
+If you use W&B logging, log in before launching multi-GPU training. Do not rely on an interactive login prompt inside `torchrunx`:
+
+```bash
+uv run wandb login
+# or:
+export WANDB_API_KEY=your_wandb_api_key
+```
+
 8-GPU formal training; `--num-envs` is per GPU and `--num-env-steps` is the global step budget:
 
 ```bash
