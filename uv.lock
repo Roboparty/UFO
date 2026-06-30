@@ -1585,7 +1585,6 @@ dependencies = [
     { name = "exca" },
     { name = "hf-xet" },
     { name = "huggingface-hub" },
-    { name = "humenv" },
     { name = "hydra-core" },
     { name = "joblib" },
     { name = "loguru" },
@@ -1612,6 +1611,11 @@ dependencies = [
     { name = "xxhash" },
 ]
 
+[package.optional-dependencies]
+humenv = [
+    { name = "humenv" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "ruff" },
@@ -1623,7 +1627,7 @@ requires-dist = [
     { name = "exca", specifier = ">=0.2.5" },
     { name = "hf-xet", specifier = ">=1.1.2" },
     { name = "huggingface-hub", specifier = ">=0.30.2" },
-    { name = "humenv", git = "https://github.com/facebookresearch/humenv.git" },
+    { name = "humenv", marker = "extra == 'humenv'", git = "https://github.com/facebookresearch/humenv.git" },
     { name = "hydra-core", specifier = ">=1.2.0" },
     { name = "joblib", specifier = ">=1.4.2" },
     { name = "loguru", specifier = ">=0.7.3" },
@@ -1649,6 +1653,7 @@ requires-dist = [
     { name = "wandb", specifier = ">=0.26.0" },
     { name = "xxhash", specifier = ">=3.5.0" },
 ]
+provides-extras = ["humenv"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = "==0.9.6" }]

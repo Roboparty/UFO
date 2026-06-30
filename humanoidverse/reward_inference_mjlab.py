@@ -19,7 +19,6 @@ from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
 from humanoidverse.agents.buffers.transition import DictBuffer
 from humanoidverse.agents.envs.humanoidverse_mjlab import G1_MJLAB_MJCF_PATH
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
-from humanoidverse.envs.g1_env_helper.bench import RewardWrapperHV
 from humanoidverse.utils.helpers import export_meta_policy_as_onnx
 from humanoidverse.mjlab_inference_utils import (
     add_bool_arg,
@@ -87,6 +86,17 @@ def _export_model(model: torch.nn.Module, output_dir: Path) -> None:
         use_29dof=True,
     )
     print(f"[INFO] Exported model to {output_dir / f'{model_name}.onnx'}")
+
+
+def _load_reward_wrapper_hv():
+    try:
+        from humanoidverse.envs.g1_env_helper.bench import RewardWrapperHV
+    except ImportError as exc:
+        raise ImportError(
+            "reward_inference_mjlab requires optional dependency humenv for reward task relabeling. "
+            "Install it with: uv sync --extra humenv"
+        ) from exc
+    return RewardWrapperHV
 
 
 def _load_replay_buffer(
@@ -181,6 +191,7 @@ def run_reward_inference(
     video_dir.mkdir(parents=True, exist_ok=True)
     relabel_xml = write_g1_mjlab_relabel_xml(G1_xml, output_dir)
 
+    RewardWrapperHV = _load_reward_wrapper_hv()
     reward_eval_agent = RewardWrapperHV(
         model=model,
         inference_dataset=dataset,

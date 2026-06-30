@@ -2,7 +2,6 @@ easydict>=1.13
 exca>=0.2.5
 hf-xet>=1.1.2
 huggingface-hub>=0.30.2
-humenv
 hydra-core>=1.2.0
 joblib>=1.4.2
 loguru>=0.7.3
@@ -27,3 +26,6 @@ torchrunx>=0.3.4
 tyro>=0.9.18
 wandb>=0.26.0
 xxhash>=3.5.0
+
+[humenv]
+humenv

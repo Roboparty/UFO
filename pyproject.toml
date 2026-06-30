@@ -13,7 +13,6 @@ dependencies = [
     "exca>=0.2.5",
     "hf-xet>=1.1.2",
     "huggingface-hub>=0.30.2",
-    "humenv",
     "hydra-core>=1.2.0",
     "joblib>=1.4.2",
     "loguru>=0.7.3",
@@ -49,6 +48,11 @@ url = "https://pypi.nvidia.com/"
 #     "sshkeyboard>=2.3.1",
 #     "pygame>=2.0.0",
 # ]
+
+[project.optional-dependencies]
+humenv = [
+    "humenv",
+]
 
 [tool.uv.sources]
 # unitree-sdk2py = { path = "unitree_sdk2_python", editable = true }

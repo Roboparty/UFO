@@ -3,7 +3,6 @@ from typing import Callable
 import json
 
 import numpy as np
-from humenv.misc.motionlib import canonicalize, load_episode_based_h5
 from torch.utils._pytree import tree_map
 
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBuffer, TrajectoryDictBufferMultiDim
@@ -16,6 +15,14 @@ def load_expert_trajectories(
     device: str,
     obs_dict_mapper: Callable | None = None,
 ) -> TrajectoryDictBuffer:
+    try:
+        from humenv.misc.motionlib import canonicalize, load_episode_based_h5
+    except ImportError as exc:
+        raise ImportError(
+            "load_expert_trajectories() requires optional dependency humenv. "
+            "Install it with: uv sync --extra humenv"
+        ) from exc
+
     with open(motions, "r") as txtf:
         h5files = [el.strip().replace(" ", "") for el in txtf.readlines()]
     episodes = []
