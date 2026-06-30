@@ -319,7 +319,17 @@ def _init_distributed(local_rank: int, world_size: int) -> None:
 
     torch.cuda.set_device(local_rank)
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl", init_method="env://", timeout=timedelta(hours=2))
+        init_kwargs = {
+            "backend": "nccl",
+            "init_method": "env://",
+            "timeout": timedelta(hours=2),
+        }
+        try:
+            init_kwargs["device_id"] = torch.device(f"cuda:{local_rank}")
+            dist.init_process_group(**init_kwargs)
+        except TypeError:
+            init_kwargs.pop("device_id", None)
+            dist.init_process_group(**init_kwargs)
 
 
 def run_train(args: argparse.Namespace, log_dir: Path) -> None:

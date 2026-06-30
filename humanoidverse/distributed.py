@@ -22,7 +22,10 @@ def world_size() -> int:
 
 def barrier() -> None:
     if is_distributed():
-        dist.barrier()
+        if torch.cuda.is_available():
+            dist.barrier(device_ids=[torch.cuda.current_device()])
+        else:
+            dist.barrier()
 
 
 @torch.compiler.disable
