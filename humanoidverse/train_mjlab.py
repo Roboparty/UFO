@@ -199,6 +199,7 @@ def build_bfm_zero_mjlab_config(
     num_env_steps: int,
     seed: int,
     use_wandb: bool,
+    wandb_run_name: str | None,
     checkpoint_every_steps: int = 9600000,
     distributed_rank: int = 0,
     distributed_world_size: int = 1,
@@ -272,7 +273,7 @@ def build_bfm_zero_mjlab_config(
         wandb_ename="xuewangusst-1",
         wandb_gname="g1_lafan_mjlab",
         wandb_pname="bfmzero-g1",
-        wandb_run_name="g1_lafan_mjlab1024env",
+        wandb_run_name=wandb_run_name or "g1_lafan_mjlab1024env",
         load_expert_data_from_motion_lib=True,
         buffer_device="cuda" if device.startswith("cuda") else "cpu",
         disable_tqdm=True,
@@ -332,6 +333,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         num_env_steps=args.num_env_steps,
         seed=seed,
         use_wandb=bool(args.use_wandb and rank == 0),
+        wandb_run_name=args.wandb_run_name,
         checkpoint_every_steps=args.checkpoint_every_steps,
         distributed_rank=rank,
         distributed_world_size=world_size,
@@ -421,6 +423,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-every-steps", type=int, default=9600000)
     parser.add_argument("--seed", type=int, default=4728)
     parser.add_argument("--use-wandb", action="store_true")
+    parser.add_argument("--wandb-run-name", default=None)
     parser.add_argument(
         "--disable-eval-prioritization",
         action="store_true",
