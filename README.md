@@ -1,39 +1,390 @@
-# UFO Deploy
+# UFO-Deploy
 
-This branch is reserved for deployment and teleoperation code for UFO humanoid policies.
+Minimal deployment code for running a BFM-Zero-style Unitree G1 policy in:
 
-For training, MJLab inference, and policy export, use the `main` branch.
+- local MuJoCo sim2sim
+- local PICO/GMR teleop sim2sim
+- onboard G1 sim2real
+- teleop sim2real, where the workstation retargets PICO motion, encodes realtime latent `z`, and the robot subscribes over ZMQ
 
-## Branches
+This README is written for a new user cloning the repository from GitHub.
 
-- `main`: UFO training, MJLab inference, and export tooling.
-- `deploy`: real-world deployment, teleoperation, realtime latent control, and policy runners.
+## What You Need
 
-## Expected Artifacts
+Workstation:
 
-The deploy stack should consume exported artifacts produced from the `main` branch, for example:
+- Linux workstation with Conda
+- Python 3.10
+- MuJoCo
+- Optional CUDA-capable GPU for realtime `z` encoding
 
-```text
-artifacts/
-  policy.onnx
-  backward_encoder.onnx
-  normalizer.json
-  policy_config.yaml
-  robot_config.yaml
+Teleop workstation:
+
+- `general_motion_retargeting`
+- patched `xrobotoolkit_sdk` with callback APIs
+- PICO/XRobot runtime set up outside this repo
+
+Robot:
+
+- Unitree G1 onboard Jetson
+- Python 3.10 venv
+- Unitree SDK2 Python binding, including `g1_interface`
+- CycloneDDS runtime
+- low-level network interface configured in `config/robot/g1_real.yaml`
+
+## Clone And Install
+
+```bash
+git clone <YOUR_UFO_DEPLOY_REPO_URL> UFO-Deploy
+cd UFO-Deploy
+export UFO_ROOT=$PWD
+
+conda create -n ufo-deploy python=3.10 -y
+conda activate ufo-deploy
+pip install -r requirements.txt
 ```
 
-Large model artifacts are intentionally ignored by git. Keep them under `artifacts/` locally or download them from a release/checkpoint store.
+If you want CUDA ONNX Runtime on the workstation, install the GPU wheel that matches your CUDA setup. For CPU-only runs, the `onnxruntime` package from `requirements.txt` is enough.
 
-## Planned Layout
+Check the base Python dependencies:
 
-```text
-deploy/
-  scripts/      # realtime policy runner, z server, teleop clients
-  configs/      # robot and policy runtime configs
-  artifacts/    # local exported ONNX/checkpoint artifacts; ignored by git
-
-docs/
-  DEPLOYMENT_PLAN.md
+```bash
+python -c "import mujoco, onnxruntime, zmq, yaml, numpy; print('base deps ok')"
 ```
 
-The branch currently contains only the deployment scaffold. Add the actual teleop and robot runtime code here once the deployment stack is finalized.
+For the teleop environment, PICO/XRobot setup, and online GMR retargeting checks, follow [scripts/teleop/README.md](scripts/teleop/README.md).
+
+## Model Files
+
+The policy directory expected by the commands is:
+
+```text
+model/g1_policy/
+  exported/FBcprAuxModel.onnx
+  exported/backward_encoder.onnx
+  tracking_inference_mjlab/*.pkl
+  reward_inference_mjlab/*.pkl
+  goal_inference_mjlab/*.pkl
+```
+
+`model/` is ignored by git because the ONNX model is larger than GitHub's normal file limit. After cloning, put the released model artifact at `model/g1_policy`.
+
+Verify:
+
+```bash
+test -f model/g1_policy/exported/FBcprAuxModel.onnx
+test -f model/g1_policy/exported/backward_encoder.onnx
+test -f model/g1_policy/tracking_inference_mjlab/zs_7.pkl
+```
+
+## Repository Map
+
+```text
+config/policy/g1_policy.yaml
+config/robot/g1.yaml
+config/robot/g1_real.yaml
+config/scene/g1_29dof.yaml
+config/exp/tracking/tracking.yaml
+config/exp/tracking/teleop.yaml
+rl_policy/bfm_zero.py
+sim_env/base_sim.py
+scripts/realtime/realtime_z_server.py
+scripts/teleop/teleop_pose_50hz.sh
+scripts/teleop/xrobot_teleop_to_pose_zmq_server.py
+```
+
+The only kept shell launcher is `scripts/teleop/teleop_pose_50hz.sh`; all policy and simulator commands are explicit command lines.
+
+## Recommended Order
+
+Run in this order when bringing up a new machine, model, or teleop setup:
+
+```text
+1. ordinary sim2sim
+2. teleop sim2sim
+3. sync to robot and verify robot environment
+4. ordinary sim2real
+5. teleop sim2real
+```
+
+## 1. Ordinary Sim2Sim
+
+Terminal A, start MuJoCo:
+
+```bash
+cd "$UFO_ROOT"
+conda activate ufo-deploy
+python -m sim_env.base_sim \
+  --robot_config ./config/robot/g1.yaml \
+  --scene_config ./config/scene/g1_29dof.yaml
+```
+
+Terminal B, start the policy:
+
+```bash
+cd "$UFO_ROOT"
+conda activate ufo-deploy
+python rl_policy/bfm_zero.py \
+  --robot_config config/robot/g1.yaml \
+  --policy_config config/policy/g1_policy.yaml \
+  --model_path model/g1_policy/exported/FBcprAuxModel.onnx \
+  --task config/exp/tracking/tracking.yaml
+```
+
+Keyboard controls in the policy terminal:
+
+```text
+i   interpolate to default standing pose
+]   enable policy action
+[   start tracking motion
+p   reset tracking motion to stop frame
+o   stop policy action and hold current joints
+n   next reward/goal z for reward/goal tasks
+```
+
+## 2. Teleop Sim2Sim
+
+This runs all processes on the workstation. The policy reads realtime `z` from `tcp://127.0.0.1:28711`.
+
+Terminal A, MuJoCo:
+
+```bash
+cd "$UFO_ROOT"
+conda activate ufo-deploy
+python -m sim_env.base_sim \
+  --robot_config ./config/robot/g1.yaml \
+  --scene_config ./config/scene/g1_29dof.yaml
+```
+
+Terminal B, PICO/GMR retargeting server:
+
+```bash
+cd "$UFO_ROOT"
+conda activate ufo-deploy
+scripts/teleop/teleop_pose_50hz.sh
+```
+
+Terminal C, realtime latent `z` encoder:
+
+```bash
+cd "$UFO_ROOT"
+conda activate ufo-deploy
+python scripts/realtime/realtime_z_server.py \
+  --teleop_req tcp://127.0.0.1:28701 \
+  --teleop_rep tcp://127.0.0.1:28702 \
+  --teleop_ctrl tcp://127.0.0.1:28703 \
+  --enable-pico-control \
+  --z_bind tcp://*:28711 \
+  --hz 50 \
+  --mujoco_xml data/robots/g1/scene_29dof_freebase.xml \
+  --backward_onnx model/g1_policy/exported/backward_encoder.onnx \
+  --device cuda \
+  --root_height_obs \
+  --wall-clock-dt \
+  --fix-quat-continuity \
+  --angvel-delta-frame world \
+  --max-retarget-age-ms 200 \
+  --max-z-delta 0.75
+```
+
+Use `--device cpu` if CUDA ONNX Runtime is not installed.
+
+Terminal D, policy:
+
+```bash
+cd "$UFO_ROOT"
+conda activate ufo-deploy
+python rl_policy/bfm_zero.py \
+  --robot_config config/robot/g1.yaml \
+  --policy_config config/policy/g1_policy.yaml \
+  --model_path model/g1_policy/exported/FBcprAuxModel.onnx \
+  --task config/exp/tracking/teleop.yaml
+```
+
+PICO buttons consumed by the realtime `z` server:
+
+```text
+right_key_one  follow mode
+left_key_one   freeze current z
+```
+
+## 3. Prepare The Robot
+
+Copy the same repository and model to the robot:
+
+```bash
+export ROBOT_HOST=unitree@<ROBOT_IP>
+export ROBOT_ROOT=/home/unitree/UFO-Deploy
+
+ssh "$ROBOT_HOST" "mkdir -p $ROBOT_ROOT"
+rsync -avP \
+  --exclude '.git/' \
+  --exclude '__pycache__/' \
+  --exclude '*.pyc' \
+  "$UFO_ROOT"/ \
+  "$ROBOT_HOST":"$ROBOT_ROOT"/
+```
+
+On the robot, activate its runtime environment:
+
+```bash
+cd /home/unitree/UFO-Deploy
+source /home/unitree/bfm0real_venv/bin/activate
+
+export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
+export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=/home/unitree/unitree_sdk2_bfm/build/lib:$PYTHONPATH
+export BFM_RL_PROFILE=1
+```
+
+Check robot dependencies:
+
+```bash
+cat /sys/devices/system/cpu/online
+ip -br addr
+python -c "import g1_interface, onnxruntime; print(g1_interface.G1_NUM_MOTOR, onnxruntime.__version__)"
+python -c "import onnxruntime as ort; ort.InferenceSession('model/g1_policy/exported/FBcprAuxModel.onnx', providers=['CPUExecutionProvider']); ort.InferenceSession('model/g1_policy/exported/backward_encoder.onnx', providers=['CPUExecutionProvider']); print('onnx ok')"
+```
+
+If Jetson CPU online is not `0-7`, fix it before running policy:
+
+```bash
+sudo bash -lc 'for c in 4 5 6 7; do echo 1 > /sys/devices/system/cpu/cpu${c}/online; done'
+cat /sys/devices/system/cpu/online
+```
+
+Set the low-level interface in `config/robot/g1_real.yaml`:
+
+```yaml
+INTERFACE: "eth0"
+USE_JOYSTICK: True
+```
+
+Use the actual interface name reported by `ip -br addr`.
+
+## 4. Ordinary Sim2Real
+
+Run on the robot after the checks above:
+
+```bash
+cd /home/unitree/UFO-Deploy
+source /home/unitree/bfm0real_venv/bin/activate
+
+export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
+export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=/home/unitree/unitree_sdk2_bfm/build/lib:$PYTHONPATH
+export BFM_RL_PROFILE=1
+
+python rl_policy/bfm_zero.py \
+  --robot_config config/robot/g1_real.yaml \
+  --policy_config config/policy/g1_policy.yaml \
+  --model_path model/g1_policy/exported/FBcprAuxModel.onnx \
+  --task config/exp/tracking/tracking.yaml
+```
+
+G1 wireless controller sequence:
+
+```text
+A    interpolate to default standing pose, about 10 seconds at 50 Hz
+R1   enable policy action
+B    start tracking motion
+X    reset tracking motion to stop frame
+R2   stop policy action and hold current joints
+Y    next reward/goal z for reward/goal tasks
+```
+
+Use the physical e-stop for emergencies.
+
+## 5. Teleop Sim2Real
+
+The workstation publishes realtime `z`; the robot subscribes to it.
+
+On the workstation, find the IP reachable from the robot:
+
+```bash
+ip -br addr
+```
+
+On the robot copy, set the workstation address in the same teleop task file:
+
+```yaml
+# config/exp/tracking/teleop.yaml
+ctx_source: zmq
+ctx_zmq_addr: tcp://<WORKSTATION_IP>:28711
+ctx_norm_ref: 16.0
+```
+
+Workstation terminal A, PICO/GMR retargeting:
+
+```bash
+cd "$UFO_ROOT"
+conda activate ufo-deploy
+scripts/teleop/teleop_pose_50hz.sh
+```
+
+Workstation terminal B, realtime `z` publisher:
+
+```bash
+cd "$UFO_ROOT"
+conda activate ufo-deploy
+python scripts/realtime/realtime_z_server.py \
+  --teleop_req tcp://127.0.0.1:28701 \
+  --teleop_rep tcp://127.0.0.1:28702 \
+  --teleop_ctrl tcp://127.0.0.1:28703 \
+  --enable-pico-control \
+  --z_bind tcp://*:28711 \
+  --hz 50 \
+  --mujoco_xml data/robots/g1/scene_29dof_freebase.xml \
+  --backward_onnx model/g1_policy/exported/backward_encoder.onnx \
+  --device cuda \
+  --root_height_obs \
+  --wall-clock-dt \
+  --fix-quat-continuity \
+  --angvel-delta-frame world \
+  --max-retarget-age-ms 200 \
+  --max-z-delta 0.75
+```
+
+Robot terminal, policy subscriber:
+
+```bash
+cd /home/unitree/UFO-Deploy
+source /home/unitree/bfm0real_venv/bin/activate
+
+export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
+export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=/home/unitree/unitree_sdk2_bfm/build/lib:$PYTHONPATH
+export BFM_RL_PROFILE=1
+
+python rl_policy/bfm_zero.py \
+  --robot_config config/robot/g1_real.yaml \
+  --policy_config config/policy/g1_policy.yaml \
+  --model_path model/g1_policy/exported/FBcprAuxModel.onnx \
+  --task config/exp/tracking/teleop.yaml
+```
+
+Controller sequence:
+
+```text
+A -> wait for stable default stand -> R1 -> B
+X stops motion, R2 stops policy action.
+```
+
+If the robot does not react to teleop:
+
+- the workstation realtime server should print `pose ok`
+- `ctx_zmq_addr` must use the workstation IP, not `127.0.0.1`
+- robot and workstation must be on the same reachable network
+- TCP port `28711` must not be blocked
+
+## Quick Validation
+
+Run locally before pushing changes:
+
+```bash
+python -m py_compile \
+  rl_policy/bfm_zero.py \
+  scripts/realtime/realtime_z_server.py \
+  scripts/teleop/xrobot_teleop_to_pose_zmq_server.py \
+  sim_env/base_sim.py
+```

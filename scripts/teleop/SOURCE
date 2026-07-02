@@ -1,0 +1,2 @@
+PICO + GMR + ZMQ teleop bridge, vendored for Unitree G1 deployment.
+Runtime deps: general_motion_retargeting, xrobotoolkit_sdk, scipy, numpy, pyzmq.

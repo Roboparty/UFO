@@ -1,37 +1,15 @@
-# Python/runtime artifacts
-.venv/
+pyvicon-datatstream-module/
+unitree_sdk2_python/
 __pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-
-# Local experiment outputs
+*.pyc
+.cache/
+.debug/
+outputs/
 _wandb/
-wandb/
 _smoke_runs/
-runs/
-cache/
-checkpoint/
+*.egg-info/
 tea_debug.log
-*.log
 
-# OS/editor
-.DS_Store
-.vscode/
-.idea/
-# Generated inference media
+# The curated policy is present locally under model/, but the ONNX is >100 MB.
+# Keep it out of normal git history unless you publish it with Git LFS.
 model/
-
-# UFO deploy artifacts and runtime output
-/artifacts/
-deploy/artifacts/*
-!deploy/artifacts/.gitkeep
-runs/
-logs/
-*.onnx
-*.pt
-*.pth
-*.ckpt
-__pycache__/
-.venv/
