@@ -3,75 +3,22 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ufo-humanoid"
+name = "ufo-deploy"
 version = "0.1.0"
-description = "UFO: an unsupervised reinforcement learning framework for humanoid control"
+description = "Deployment and teleoperation tools for UFO humanoid policies"
 readme = "README.md"
 requires-python = "==3.10.*"
 dependencies = [
-    "dm-control>=1.0.20",
-    "easydict>=1.13",
-    "gymnasium>=0.29.0",
-    "h5py>=3.14.0",
-    "hydra-core>=1.2.0",
-    "joblib>=1.4.2",
-    "loguru>=0.7.3",
-    "lxml>=5.3.2",
-    "mediapy>=1.2.3",
-    "mjlab==1.4.0",
-    "mujoco~=3.8.0",
-    "numpy-stl>=3.2.0",
-    "onnx>=1.16.1",
-    "open3d>=0.19.0",
-    "pot>=0.9.5",
-    "pydantic>=2.11.3",
-    "rich>=14.0.0",
-    "safetensors>=0.5.3",
-    "tensordict>=0.8.3",
-    "termcolor>=3.0.1",
-    "torch>=2.7.0,<2.8.0",
-    "torchrunx>=0.3.4",
-    "wandb>=0.26.0",
+    "numpy>=1.26.0",
+    "onnxruntime>=1.18.0",
+    "pyyaml>=6.0.0",
+    "pyzmq>=26.0.0",
 ]
-
-[[tool.uv.index]]
-url = "https://pypi.nvidia.com/"
-
-# sim2real = [
-#     "unitree-sdk2py",
-#     "loop-rate-limiters>=1.1.0",
-#     "sshkeyboard>=2.3.1",
-#     "pygame>=2.0.0",
-# ]
-
-[tool.setuptools]
-include-package-data = true
-
-[tool.setuptools.package-data]
-humanoidverse = ["config/**/*", "data/**/*"]
-
-[tool.setuptools.packages.find]
-include = ["humanoidverse*"]
 
 [dependency-groups]
 dev = [
     "ruff==0.9.6",
 ]
 
-[tool.uv]
-index-strategy = "unsafe-best-match"
-override-dependencies = [
-    "dm-control>=1.0.20",
-    "wandb>=0.26.0",
-]
-
 [tool.ruff]
 line-length = 140
-extend-exclude = ["wandb"]
-
-[tool.ruff.lint]
-# E402: imports at the top of the files (but lazy import is useful to reduce memory use)
-# E731: Do not assign lambdas (but these are handy for functional programming, and used in tests to change logic)
-ignore = ["E402", "E731"]
-# Add import sorting to the linting
-extend-select = ["I"] # This is disabled as currently it causes different results on github and locally

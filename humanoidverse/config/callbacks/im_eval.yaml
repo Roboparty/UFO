@@ -1,3 +1,0 @@
-im_eval:
-  _target_: humanoidverse.trl.callbacks.im_eval_callback.ImEvalCallback
-  eval_frequency: 500

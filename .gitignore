@@ -22,3 +22,16 @@ tea_debug.log
 .idea/
 # Generated inference media
 model/
+
+# UFO deploy artifacts and runtime output
+/artifacts/
+deploy/artifacts/*
+!deploy/artifacts/.gitkeep
+runs/
+logs/
+*.onnx
+*.pt
+*.pth
+*.ckpt
+__pycache__/
+.venv/
