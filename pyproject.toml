@@ -3,9 +3,9 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bfmzero-mjlab"
+name = "ufo-humanoid"
 version = "0.1.0"
-description = "BFM-Zero MJLab training and inference"
+description = "UFO: an unsupervised reinforcement learning framework for humanoid control"
 readme = "README.md"
 requires-python = "==3.10.*"
 dependencies = [

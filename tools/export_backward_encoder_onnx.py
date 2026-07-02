@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export BFM-Zero backward latent encoder as a standalone ONNX model.
+"""Export the UFO FB backward latent encoder as a standalone ONNX model.
 
 The exported graph matches runtime logic:
   obs (state, last_action, privileged_state)

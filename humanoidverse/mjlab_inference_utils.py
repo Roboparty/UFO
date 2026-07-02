@@ -35,7 +35,7 @@ else:
     HUMANOIDVERSE_DIR = Path(__file__).resolve().parent
 
 PROJECT_ROOT = HUMANOIDVERSE_DIR.parent
-DEFAULT_INFERENCE_DATA_PATH = Path("/data/xue/bfmzero/data/lafan_29dof.pkl")
+DEFAULT_INFERENCE_DATA_PATH = Path("humanoidverse/data/lafan_29dof_10s-clipped.pkl")
 G1_MJLAB_DOF_NAMES = (
     "left_hip_pitch_joint",
     "left_hip_roll_joint",

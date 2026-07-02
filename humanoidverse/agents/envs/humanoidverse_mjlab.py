@@ -1,10 +1,10 @@
-"""MJLab/MuJoCo-Warp bridge for BFM-Zero.
+"""MJLab/MuJoCo-Warp bridge for UFO.
 
 This module intentionally mirrors the public surface of
 the old HumanoidVerse vector-env adapter so the existing FBcprAux training
 loop can be reused without replacing the algorithm with MJLab/RSL-RL PPO.
 MJLab owns batched physics stepping; this wrapper reconstructs the observation,
-reward, reset and info dictionaries expected by the original BFM-Zero code.
+reward, reset and info dictionaries expected by the original UFO code.
 """
 
 import os
@@ -66,10 +66,10 @@ _ARMATURE_5010 = _reflected_inertia_from_two_stage_planetary((0.084e-4, 0.015e-4
 
 
 def _g1_mjlab_mode15_actuator_params(dof_names: tp.Sequence[str]) -> dict[str, list[float]]:
-    """Return per-DOF G1 mode-15 motor params in BFM-Zero order.
+    """Return per-DOF G1 mode-15 motor params in UFO order.
 
     The constants are vendored here so training does not depend on an external
-    asset package or download path. Kp/Kd remain BFM-Zero values; this only
+    asset package or download path. Kp/Kd remain UFO values; this only
     supplies motor effort, velocity reference, armature and dry friction.
     """
 
@@ -149,7 +149,7 @@ def _default_joint_pos(config) -> torch.Tensor:
 def _action_target_scale(config) -> torch.Tensor:
     dof_names = tuple(_to_list(config.robot.dof_names))
     stiffness = _to_float_dict(config.robot.control.stiffness)
-    # BFM-Zero action_rescale uses the configured effort limits.  The Isaac
+    # UFO action_rescale uses the configured effort limits.  The Isaac
     # path does not apply dof_effort_limit_scale to those limits, so MJLab must
     # not do it either.
     effort_limits = [float(x) for x in _to_list(config.robot.dof_effort_limit_list)]
@@ -235,8 +235,8 @@ def _compose_humanoidverse_config(
     return cfg.env.config, unresolved_conf
 
 
-def make_mjlab_bfmzero_env_cfg(config, *, num_envs: int, seed: int | None, mjcf_path: str | None, auto_reset: bool):
-    """Create an MJLab ManagerBasedRlEnvCfg with original BFM-Zero G1 metadata."""
+def make_mjlab_ufo_env_cfg(config, *, num_envs: int, seed: int | None, mjcf_path: str | None, auto_reset: bool):
+    """Create an MJLab ManagerBasedRlEnvCfg with original UFO G1 metadata."""
     import mujoco
     from mjlab.actuator import DcMotorActuatorCfg
     from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
@@ -266,7 +266,7 @@ def make_mjlab_bfmzero_env_cfg(config, *, num_envs: int, seed: int | None, mjcf_
 
     def spec_fn():
         spec = mujoco.MjSpec.from_file(str(xml_path))
-        # The BFM-Zero Isaac path uses implicit position PD targets. XML motor
+        # The UFO Isaac path uses implicit position PD targets. XML motor
         # actuators are removed so MJLab adds equivalent position actuators.
         for actuator in list(spec.actuators):
             spec.delete(actuator)
@@ -309,7 +309,7 @@ def make_mjlab_bfmzero_env_cfg(config, *, num_envs: int, seed: int | None, mjcf_
         action_scale[joint_name] = scale
 
     if len(actuators) != len(dof_names):
-        raise ValueError(f"Expected one MJLab actuator per BFM-Zero dof, got {len(actuators)} for {len(dof_names)} dofs")
+        raise ValueError(f"Expected one MJLab actuator per UFO dof, got {len(actuators)} for {len(dof_names)} dofs")
     scaled_effort_limits = [float(x) * effort_scale for x in bfm_effort_limits]
     if effort_scale != 1.0 and any(abs(a - b) < 1.0e-6 for a, b in zip(effort_limits, scaled_effort_limits)):
         raise ValueError("MJLab actuator effort limits unexpectedly include dof_effort_limit_scale")
@@ -1124,7 +1124,7 @@ class HumanoidVerseMjlabConfig(BaseConfig):
             max_episode_length_s=self.max_episode_length_s,
             root_height_obs=self.root_height_obs,
         )
-        mjlab_cfg = make_mjlab_bfmzero_env_cfg(
+        mjlab_cfg = make_mjlab_ufo_env_cfg(
             hv_config,
             num_envs=num_envs,
             seed=self.seed,

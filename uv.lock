@@ -103,71 +103,6 @@ wheels = [
 ]
 
 [[package]]
-name = "bfmzero-mjlab"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "dm-control" },
-    { name = "easydict" },
-    { name = "gymnasium" },
-    { name = "h5py" },
-    { name = "hydra-core" },
-    { name = "joblib" },
-    { name = "loguru" },
-    { name = "lxml" },
-    { name = "mediapy" },
-    { name = "mjlab" },
-    { name = "mujoco" },
-    { name = "numpy-stl" },
-    { name = "onnx" },
-    { name = "open3d" },
-    { name = "pot" },
-    { name = "pydantic" },
-    { name = "rich" },
-    { name = "safetensors" },
-    { name = "tensordict" },
-    { name = "termcolor" },
-    { name = "torch" },
-    { name = "torchrunx" },
-    { name = "wandb" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "dm-control", specifier = ">=1.0.20" },
-    { name = "easydict", specifier = ">=1.13" },
-    { name = "gymnasium", specifier = ">=0.29.0" },
-    { name = "h5py", specifier = ">=3.14.0" },
-    { name = "hydra-core", specifier = ">=1.2.0" },
-    { name = "joblib", specifier = ">=1.4.2" },
-    { name = "loguru", specifier = ">=0.7.3" },
-    { name = "lxml", specifier = ">=5.3.2" },
-    { name = "mediapy", specifier = ">=1.2.3" },
-    { name = "mjlab", specifier = "==1.4.0" },
-    { name = "mujoco", specifier = "~=3.8.0" },
-    { name = "numpy-stl", specifier = ">=3.2.0" },
-    { name = "onnx", specifier = ">=1.16.1" },
-    { name = "open3d", specifier = ">=0.19.0" },
-    { name = "pot", specifier = ">=0.9.5" },
-    { name = "pydantic", specifier = ">=2.11.3" },
-    { name = "rich", specifier = ">=14.0.0" },
-    { name = "safetensors", specifier = ">=0.5.3" },
-    { name = "tensordict", specifier = ">=0.8.3" },
-    { name = "termcolor", specifier = ">=3.0.1" },
-    { name = "torch", specifier = ">=2.7.0,<2.8.0" },
-    { name = "torchrunx", specifier = ">=0.3.4" },
-    { name = "wandb", specifier = ">=0.26.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "ruff", specifier = "==0.9.6" }]
-
-[[package]]
 name = "blinker"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2359,6 +2294,71 @@ sdist = { url = "https://files.pythonhosted.org/packages/95/32/1a225d6164441be76
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5c/23/c7abc0ca0a1526a0774eca151daeb8de62ec457e77262b66b359c3c7679e/tzdata-2025.2-py2.py3-none-any.whl", hash = "sha256:1a403fada01ff9221ca8044d701868fa132215d84beb92242d9acd2147f667a8", size = 347839, upload-time = "2025-03-23T13:54:41.845Z" },
 ]
+
+[[package]]
+name = "ufo-humanoid"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "dm-control" },
+    { name = "easydict" },
+    { name = "gymnasium" },
+    { name = "h5py" },
+    { name = "hydra-core" },
+    { name = "joblib" },
+    { name = "loguru" },
+    { name = "lxml" },
+    { name = "mediapy" },
+    { name = "mjlab" },
+    { name = "mujoco" },
+    { name = "numpy-stl" },
+    { name = "onnx" },
+    { name = "open3d" },
+    { name = "pot" },
+    { name = "pydantic" },
+    { name = "rich" },
+    { name = "safetensors" },
+    { name = "tensordict" },
+    { name = "termcolor" },
+    { name = "torch" },
+    { name = "torchrunx" },
+    { name = "wandb" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dm-control", specifier = ">=1.0.20" },
+    { name = "easydict", specifier = ">=1.13" },
+    { name = "gymnasium", specifier = ">=0.29.0" },
+    { name = "h5py", specifier = ">=3.14.0" },
+    { name = "hydra-core", specifier = ">=1.2.0" },
+    { name = "joblib", specifier = ">=1.4.2" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "lxml", specifier = ">=5.3.2" },
+    { name = "mediapy", specifier = ">=1.2.3" },
+    { name = "mjlab", specifier = "==1.4.0" },
+    { name = "mujoco", specifier = "~=3.8.0" },
+    { name = "numpy-stl", specifier = ">=3.2.0" },
+    { name = "onnx", specifier = ">=1.16.1" },
+    { name = "open3d", specifier = ">=0.19.0" },
+    { name = "pot", specifier = ">=0.9.5" },
+    { name = "pydantic", specifier = ">=2.11.3" },
+    { name = "rich", specifier = ">=14.0.0" },
+    { name = "safetensors", specifier = ">=0.5.3" },
+    { name = "tensordict", specifier = ">=0.8.3" },
+    { name = "termcolor", specifier = ">=3.0.1" },
+    { name = "torch", specifier = ">=2.7.0,<2.8.0" },
+    { name = "torchrunx", specifier = ">=0.3.4" },
+    { name = "wandb", specifier = ">=0.26.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ruff", specifier = "==0.9.6" }]
 
 [[package]]
 name = "urllib3"

@@ -40,7 +40,7 @@ else:
     HUMANOIDVERSE_DIR = Path(__file__).resolve().parent
 
 PROJECT_ROOT = HUMANOIDVERSE_DIR.parent
-DEFAULT_INFERENCE_DATA_PATH = Path("/data/xue/bfmzero/data/lafan_29dof.pkl")
+DEFAULT_INFERENCE_DATA_PATH = Path("humanoidverse/data/lafan_29dof_10s-clipped.pkl")
 
 
 def _str2bool(value: str | bool) -> bool:

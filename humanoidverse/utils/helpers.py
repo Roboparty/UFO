@@ -224,12 +224,12 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
                     ref_ang_vel], dim=-1)
         last_action = bogus_actions
         # TODO get obs from raw obs instead of the obs
-        bfmzero_obs = {
+        ufo_obs = {
             "state": state,
             "last_action": last_action,
             "privileged_state": max_local_self_obs
         }
-        return bfmzero_obs, ref_dict
+        return ufo_obs, ref_dict
     else:
         ref_dict = {
             "max_local_self_obs": max_local_self_obs,

@@ -6,16 +6,22 @@ from .fb.agent import FBAgent, FBModel
 from .fb_cpr.agent import FBcprAgent, FBcprModel
 from .fb_cpr_aux.agent import FBcprAuxAgent
 from .fb_cpr_aux.model import FBcprAuxModel
+from .gcr_rl_dist_aux.agent import GcrRlDistAuxAgent
+from .gcr_rl_dist_aux.model import GcrRlDistAuxModel
+from .tldr_dist_aux.agent import TldrDistAuxAgent
 
 AGENT_NAME_TO_CLASS = {
     "FBAgent": FBAgent,
     "FBcprAgent": FBcprAgent,
     "FBcprAuxAgent": FBcprAuxAgent,
+    "GcrRlDistAuxAgent": GcrRlDistAuxAgent,
+    "TldrDistAuxAgent": TldrDistAuxAgent,
 }
 MODEL_NAME_TO_CLASS = {
     "FBModel": FBModel,
     "FBcprModel": FBcprModel,
-    "FBcprAuxModel": FBcprAuxModel
+    "FBcprAuxModel": FBcprAuxModel,
+    "GcrRlDistAuxModel": GcrRlDistAuxModel,
 }
 
 
