@@ -41,6 +41,7 @@ from humanoidverse.agents.buffers.transition import DictBuffer, dtype_numpytotor
 from humanoidverse.agents.fb_cpr.agent import FBcprAgentConfig
 from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentConfig
 from humanoidverse.agents.misc.loggers import CSVLogger
+from humanoidverse.agents.tldr_dist_aux.agent import TldrDistAuxAgentConfig
 from humanoidverse.agents.utils import EveryNStepsChecker, get_local_workdir, set_seed_everywhere
 from humanoidverse.distributed import average_metrics, barrier, broadcast_agent_state, broadcast_object, module_sync_report, sync_floating_buffers
 
@@ -58,7 +59,7 @@ Evaluation = tp.Annotated[
     pydantic.Field(discriminator="name"),
 ]
 
-Agent = FBcprAgentConfig | FBcprAuxAgentConfig
+Agent = FBcprAgentConfig | FBcprAuxAgentConfig | TldrDistAuxAgentConfig
 
 
 class TrainConfig(BaseConfig):
