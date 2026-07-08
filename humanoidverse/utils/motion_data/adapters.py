@@ -182,6 +182,8 @@ def _pose_from_named_columns(fieldnames: list[str], rows: list[dict[str, str]], 
         return None
 
     joint_indices = sorted(grouped)
+    if joint_indices != list(range(len(joint_indices))):
+        raise ValueError(f"csv_ufo file={path} pose_aa joint indices must be contiguous from 0")
     pose = np.zeros((len(rows), len(joint_indices), 3), dtype=np.float32)
     axis_to_idx = {"x": 0, "y": 1, "z": 2}
     for out_joint_idx, joint_idx in enumerate(joint_indices):
