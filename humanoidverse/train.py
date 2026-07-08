@@ -395,6 +395,7 @@ def build_ufo_mjlab_config(
     lr_scale: float = 1.0,
     clip_grad_norm: float = 0.0,
     cartwheel_aux_safe: bool = False,
+    num_agent_updates: int | None = None,
 ) -> TrainConfig:
     evaluations = []
     run_eval_and_prioritization = not smoke and not disable_eval_prioritization
@@ -456,7 +457,11 @@ def build_ufo_mjlab_config(
     agent_cfg = selected["agent_cfg"]
     wandb_group = selected["wandb_group"]
     wandb_project = selected["wandb_project"]
-    train_runtime = selected["train_runtime"]
+    train_runtime = dict(selected["train_runtime"])
+    if num_agent_updates is not None:
+        if num_agent_updates <= 0:
+            raise ValueError("num_agent_updates must be positive")
+        train_runtime["num_agent_updates"] = int(num_agent_updates)
     hydra_overrides = [
         "robot=g1/g1_29dof_hard_waist",
         "robot.control.action_scale=0.25",
@@ -608,6 +613,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         lr_scale=args.lr_scale,
         clip_grad_norm=args.clip_grad_norm,
         cartwheel_aux_safe=bool(args.cartwheel_aux_safe),
+        num_agent_updates=args.num_agent_updates,
     )
     print(
         "[INFO] UFO train: "
@@ -615,6 +621,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"mjcf_path={cfg.env.mjcf_path}, data_path={cfg.env.lafan_tail_path}, data_mix_weights={cfg.env.data_mix_weights}, "
         f"num_envs_per_rank={args.num_envs}, global_parallel_envs={args.num_envs * world_size}, "
         f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, "
+        f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
         f"compile={cfg.agent.compile}",
@@ -710,6 +717,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--update-z-every-step", type=int, default=DEFAULT_UPDATE_Z_EVERY_STEP)
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="Replay capacity per rank/GPU.")
+    parser.add_argument(
+        "--num-agent-updates",
+        type=int,
+        default=None,
+        help=(
+            "Override optimizer updates per update trigger. For fair env-scaling ablations, use 32 with "
+            "2048 envs/GPU and 64 with 4096 envs/GPU to match the 1024 envs/GPU update density."
+        ),
+    )
     parser.add_argument("--disable-dr", action="store_true", help="Disable domain randomization for training.")
     parser.add_argument("--disable-obs-noise", action="store_true", help="Disable observation noise for training.")
     parser.add_argument("--lr-scale", type=float, default=1.0, help="Scale FB learning rates. TLDR preset ignores this value.")
@@ -752,6 +768,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--update-z-every-step must be positive")
     if args.buffer_size <= 0:
         raise ValueError("--buffer-size must be positive")
+    if args.num_agent_updates is not None and args.num_agent_updates <= 0:
+        raise ValueError("--num-agent-updates must be positive")
     if args.lr_scale <= 0:
         raise ValueError("--lr-scale must be positive")
     if args.clip_grad_norm < 0:
