@@ -1,0 +1,28 @@
+name: g1_29dof
+xml_path: humanoidverse/data/robots/g1_mjlab/g1_29dof.xml
+
+base_body: pelvis
+root_quat_order: xyzw
+coordinate_system: z_up
+dof_unit: rad
+
+control_joints:
+  mode: all_actuated
+
+feet:
+  - left_ankle_roll_link
+  - right_ankle_roll_link
+
+hands:
+  - left_wrist_yaw_link
+  - right_wrist_yaw_link
+
+key_bodies:
+  - pelvis
+  - torso_link
+  - left_ankle_roll_link
+  - right_ankle_roll_link
+  - left_wrist_yaw_link
+  - right_wrist_yaw_link
+
+default_dof_pos: {}
