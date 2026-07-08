@@ -103,7 +103,7 @@ class RewardWrapperHV(BaseMjlabRewardWrapper):
     max_workers: int
     process_executor: bool = False
     process_context: str = "spawn"
-    env_model: str | mujoco.MjModel = "humanoidverse/data/robots/g1/scene_29dof_freebase_mujoco.xml"
+    env_model: str | mujoco.MjModel = "humanoidverse/data/robots/g1_mjlab/g1_29dof.xml"
 
     def reward_inference(self, task: str) -> torch.Tensor:
         if isinstance(self.env_model, str):
