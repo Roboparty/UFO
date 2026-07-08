@@ -27,6 +27,7 @@ from humanoidverse.mjlab_inference_utils import (
     resolve_project_path,
 )
 from humanoidverse.utils.helpers import export_meta_policy_as_onnx, get_backward_observation
+from humanoidverse.utils.motion_data import prepare_manifest_dataset_path
 
 
 def _resize_nearest(frame: np.ndarray, height: int, width: int) -> np.ndarray:
@@ -212,6 +213,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="UFO tracking inference with MuJoCo expert rendering.")
     parser.add_argument("--model-folder", type=Path, required=True)
     parser.add_argument("--data-path", type=Path, default=None)
+    parser.add_argument("--data-manifest", type=Path, default=None, help="Motion data manifest. Use with --dataset.")
+    parser.add_argument("--dataset", default=None, help="Dataset name inside --data-manifest for tracking inference.")
+    parser.add_argument("--rebuild-motion-cache", action="store_true", help="Rebuild manifest-generated motion pkl cache.")
     add_bool_arg(parser, "--headless", True, "Run MuJoCo in headless mode.")
     parser.add_argument("--device", default="cuda:0")
     add_bool_arg(parser, "--save-mp4", False, "Save side-by-side expert/policy MP4.")
@@ -227,7 +231,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every-steps", type=int, default=100, help="Print rollout/render progress every N steps; 0 disables periodic logs.")
     parser.add_argument("--max-episode-length-s", type=float, default=10000.0)
     add_bool_arg(parser, "--export-onnx", True, "Export ONNX next to the checkpoint before inference.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.data_manifest is not None:
+        if args.data_path is not None:
+            parser.error("--data-manifest and --data-path cannot be used together")
+        if args.dataset is None:
+            parser.error("--dataset is required when --data-manifest is provided")
+        args.data_path = Path(
+            prepare_manifest_dataset_path(
+                args.data_manifest,
+                args.dataset,
+                split="inference",
+                rebuild_cache=bool(args.rebuild_motion_cache),
+            )
+        )
+    return args
 
 
 def main() -> None:

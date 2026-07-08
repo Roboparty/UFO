@@ -45,6 +45,7 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import G1_MJLAB_MJCF_PATH, Hu
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import HumanoidVerseMjlabTrackingEvaluationConfig
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.training.workspace import TrainConfig
+from humanoidverse.utils.motion_data import prepare_motion_manifest
 
 
 def build_ufo_mjlab_config(
@@ -361,6 +362,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Source-level sampling weights for multiple --data-path entries, e.g. 0.95 0.05.",
     )
+    parser.add_argument(
+        "--data-manifest",
+        type=Path,
+        default=None,
+        help="YAML manifest describing weighted motion data sources. Cannot be combined with --data-path.",
+    )
+    parser.add_argument(
+        "--rebuild-motion-cache",
+        action="store_true",
+        help="Rebuild manifest-generated motion pkl caches instead of reusing existing cache files.",
+    )
     parser.add_argument("--update-z-every-step", type=int, default=DEFAULT_UPDATE_Z_EVERY_STEP)
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="Replay capacity per rank/GPU.")
     parser.add_argument(
@@ -395,7 +407,13 @@ def parse_args() -> argparse.Namespace:
         args.num_envs = min(args.num_envs, 16)
         args.num_env_steps = min(args.num_env_steps, 2048)
         args.use_wandb = False
-    if args.data_path is not None:
+    if args.data_manifest is not None:
+        if args.data_path is not None:
+            parser.error("--data-manifest and --data-path cannot be used together")
+        manifest_data = prepare_motion_manifest(args.data_manifest, rebuild_cache=bool(args.rebuild_motion_cache))
+        args.data_path = manifest_data.train_data_paths
+        args.data_mix_weights = manifest_data.train_data_weights
+    elif args.data_path is not None:
         data_path_count = len(args.data_path)
         if args.data_mix_weights is not None:
             if len(args.data_mix_weights) != data_path_count:

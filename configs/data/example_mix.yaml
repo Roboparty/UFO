@@ -1,0 +1,5 @@
+datasets:
+  - name: lafan
+    format: ufo_pkl
+    train_path: humanoidverse/data/lafan_29dof_10s-clipped.pkl
+    weight: 1.0
