@@ -70,6 +70,75 @@ class MotionLibBase():
         return
         
     def load_data(self, motion_file, min_length=-1, im_eval = False):
+        self._motion_source_ids_np = None
+        self._motion_source_names = None
+        self._motion_source_weights = None
+
+        is_mixed_motion_file = isinstance(motion_file, (list, tuple))
+        if not is_mixed_motion_file and not isinstance(motion_file, (str, bytes, Path)):
+            try:
+                motion_file = list(motion_file)
+                is_mixed_motion_file = True
+            except TypeError:
+                is_mixed_motion_file = False
+
+        if is_mixed_motion_file:
+            self.mode = MotionlibMode.file
+            data_values = []
+            data_keys = []
+            source_ids = []
+            source_names = []
+            for source_idx, source_path in enumerate(motion_file):
+                source_path = str(source_path)
+                source_names.append(Path(source_path).stem or source_path)
+                if osp.isfile(source_path):
+                    source_data = joblib.load(source_path)
+                    if not isinstance(source_data, dict):
+                        raise ValueError(f"Mixed motion pkl must contain a dict: {source_path}")
+                    if min_length != -1:
+                        source_data = {
+                            k: v for k, v in list(source_data.items()) if len(v["pose_quat_global"]) >= min_length
+                        }
+                    elif im_eval:
+                        source_data = {
+                            item[0]: item[1]
+                            for item in sorted(
+                                source_data.items(), key=lambda entry: len(entry[1]["pose_quat_global"]), reverse=True
+                            )
+                        }
+                    items = list(source_data.items())
+                    data_keys.extend([k for k, _ in items])
+                    data_values.extend([v for _, v in items])
+                    source_ids.extend([source_idx] * len(items))
+                else:
+                    source_files = sorted(glob.glob(osp.join(source_path, "*.pkl")))
+                    data_keys.extend(source_files)
+                    data_values.extend(source_files)
+                    source_ids.extend([source_idx] * len(source_files))
+
+            weights = self.m_cfg.get("motion_file_weights", None)
+            if weights is None:
+                weights = [1.0 / len(motion_file)] * len(motion_file)
+            else:
+                weights = [float(w) for w in weights]
+            if len(weights) != len(motion_file):
+                raise ValueError(
+                    f"motion_file_weights length ({len(weights)}) must match motion_file length ({len(motion_file)})"
+                )
+            if sum(weights) <= 0:
+                raise ValueError("motion_file_weights must sum to a positive value")
+
+            self._motion_data_load = data_values
+            self._motion_data_list = np.array(data_values, dtype=object)
+            self._motion_data_keys = np.array(data_keys)
+            self._motion_source_ids_np = np.array(source_ids, dtype=np.int64)
+            self._motion_source_names = source_names
+            self._motion_source_weights = torch.tensor(weights, device=self._device, dtype=torch.float32)
+            self._motion_source_weights = self._motion_source_weights / self._motion_source_weights.sum()
+            self._num_unique_motions = len(self._motion_data_list)
+            logger.info(f"Loaded {self._num_unique_motions} motions")
+            return
+
         if osp.isfile(motion_file):
             self.mode = MotionlibMode.file
             self._motion_data_load = joblib.load(motion_file)
@@ -94,6 +163,9 @@ class MotionLibBase():
             self._motion_data_keys = np.array(self._motion_data_load)
         
         self._num_unique_motions = len(self._motion_data_list)
+        self._motion_source_ids_np = np.zeros(self._num_unique_motions, dtype=np.int64)
+        self._motion_source_names = [Path(str(motion_file)).stem or str(motion_file)]
+        self._motion_source_weights = torch.ones(1, device=self._device, dtype=torch.float32)
         if self.mode == MotionlibMode.directory:
             self._motion_data_load = joblib.load(self._motion_data_load[0]) # set self._motion_data_load to a sample of the data 
         logger.info(f"Loaded {self._num_unique_motions} motions")
@@ -107,7 +179,96 @@ class MotionLibBase():
         self._termination_history = torch.zeros(self._num_unique_motions).to(self._device)
         self._success_rate = torch.zeros(self._num_unique_motions).to(self._device)
         self._sampling_history = torch.zeros(self._num_unique_motions).to(self._device)
-        self._sampling_prob = torch.ones(self._num_unique_motions).to(self._device) / self._num_unique_motions  # For use in sampling batches
+        self._motion_source_ids = torch.tensor(self._motion_source_ids_np, device=self._device, dtype=torch.long)
+        self._sampling_prob = self._source_mixed_prob(torch.ones(self._num_unique_motions, device=self._device))
+        mix_summary = ", ".join(
+            f"{name}:{float(weight):.4f}/n={int((self._motion_source_ids == idx).sum().item())}"
+            for idx, (name, weight) in enumerate(zip(self._motion_source_names, self._motion_source_weights))
+        )
+        logger.info(f"Motion source mix: {mix_summary}")
+
+    def _source_counts(self, n, weights, exact_counts):
+        if exact_counts:
+            expected = weights * int(n)
+            counts = torch.floor(expected).to(torch.long)
+            remainder = int(n) - int(counts.sum().item())
+            if remainder > 0:
+                order = torch.argsort(expected - counts.to(expected.dtype), descending=True)
+                counts[order[:remainder]] += 1
+            return counts
+        source_samples = torch.multinomial(weights, num_samples=int(n), replacement=True)
+        return torch.bincount(source_samples, minlength=len(weights))
+
+    def _source_mixed_prob(self, priorities):
+        priorities = torch.as_tensor(priorities, device=self._device, dtype=torch.float32)
+        priorities = torch.where(torch.isfinite(priorities), priorities, torch.zeros_like(priorities))
+        priorities = priorities.clamp_min(0.0)
+        if priorities.numel() != self._num_unique_motions:
+            raise ValueError(f"Expected {self._num_unique_motions} priorities, got {priorities.numel()}")
+
+        probs = torch.zeros(self._num_unique_motions, device=self._device, dtype=torch.float32)
+        for source_idx, source_weight in enumerate(self._motion_source_weights):
+            mask = self._motion_source_ids == source_idx
+            if not bool(mask.any()) or float(source_weight) <= 0.0:
+                continue
+            source_priorities = priorities[mask]
+            source_total = source_priorities.sum()
+            if not torch.isfinite(source_total) or float(source_total) <= 0.0:
+                source_priorities = torch.ones_like(source_priorities)
+                source_total = source_priorities.sum()
+            probs[mask] = source_priorities / source_total * source_weight
+
+        total = probs.sum()
+        if not torch.isfinite(total) or float(total) <= 0.0:
+            probs = torch.ones(self._num_unique_motions, device=self._device, dtype=torch.float32)
+            total = probs.sum()
+        return probs / total
+
+    def _refresh_sampling_batch_prob(self):
+        if self._curr_motion_ids is None:
+            return
+        batch_prob = self._sampling_prob[self._curr_motion_ids]
+        total = batch_prob.sum()
+        if not torch.isfinite(total) or float(total) <= 0.0:
+            batch_prob = torch.ones_like(batch_prob)
+            total = batch_prob.sum()
+        self._sampling_batch_prob = batch_prob / total
+
+    def _sample_indices_with_source_mix(self, probabilities, source_ids, n, exact_counts):
+        probabilities = torch.as_tensor(probabilities, device=self._device, dtype=torch.float32)
+        probabilities = torch.where(torch.isfinite(probabilities), probabilities, torch.zeros_like(probabilities)).clamp_min(0.0)
+        source_ids = torch.as_tensor(source_ids, device=self._device, dtype=torch.long)
+
+        available_weights = self._motion_source_weights.clone()
+        for source_idx in range(len(available_weights)):
+            if not bool((source_ids == source_idx).any()):
+                available_weights[source_idx] = 0.0
+        if float(available_weights.sum()) <= 0.0:
+            total = probabilities.sum()
+            if not torch.isfinite(total) or float(total) <= 0.0:
+                probabilities = torch.ones_like(probabilities)
+                total = probabilities.sum()
+            return torch.multinomial(probabilities / total, num_samples=int(n), replacement=True).to(self._device)
+
+        available_weights = available_weights / available_weights.sum()
+        counts = self._source_counts(n, available_weights, exact_counts=exact_counts)
+        sampled = []
+        for source_idx, count in enumerate(counts.tolist()):
+            if count <= 0:
+                continue
+            candidate_ids = (source_ids == source_idx).nonzero(as_tuple=False).flatten()
+            source_prob = probabilities[candidate_ids]
+            source_total = source_prob.sum()
+            if not torch.isfinite(source_total) or float(source_total) <= 0.0:
+                source_prob = torch.ones_like(source_prob)
+                source_total = source_prob.sum()
+            local_samples = torch.multinomial(source_prob / source_total, num_samples=count, replacement=True)
+            sampled.append(candidate_ids[local_samples])
+
+        sample_idxes = torch.cat(sampled) if sampled else torch.empty(0, device=self._device, dtype=torch.long)
+        if sample_idxes.numel() != int(n):
+            raise RuntimeError(f"Source-stratified sampler produced {sample_idxes.numel()} samples, expected {n}")
+        return sample_idxes[torch.randperm(sample_idxes.numel(), device=self._device)]
         
     def update_soft_sampling_weight(self, failed_keys):
         # sampling weight based on evaluation, only "mostly" trained on "failed" sequences. Auto PMCP. 
@@ -122,16 +283,13 @@ class MotionLibBase():
             print(self._motion_data_keys[self._sampling_prob.cpu().nonzero()].flatten())
             print(f"###############################################################################################################################")
         else:
-            all_keys = self._motion_data_keys.tolist()
-            self._sampling_prob = torch.ones(self._num_unique_motions).to(self._device) / self._num_unique_motions  # For use in sampling batches
+            self._sampling_prob = self._source_mixed_prob(torch.ones(self._num_unique_motions, device=self._device))
+            self._refresh_sampling_batch_prob()
             
     def update_sampling_prob(self, termination_history):
         if len(termination_history) == len(self._termination_history) and termination_history.sum() > 0:
-            self._sampling_prob[:] = termination_history/termination_history.sum()
-            if self._sampling_prob[self._curr_motion_ids].sum() == 0:
-                self._sampling_prob[self._curr_motion_ids] += 1e-6
-                self._sampling_prob[:] = self._sampling_prob[:] / self._sampling_prob[:].sum()
-            self._sampling_batch_prob = self._sampling_prob[self._curr_motion_ids] / self._sampling_prob[self._curr_motion_ids].sum()
+            self._sampling_prob = self._source_mixed_prob(termination_history)
+            self._refresh_sampling_batch_prob()
             self._termination_history = termination_history
             return True
         else:
@@ -140,34 +298,40 @@ class MotionLibBase():
     def update_sampling_weight_by_id(self, priorities: list, motions_id: list, file_name: list | None = None) -> None:
         """
         Update sampling probabilities (_sampling_prob) given motion keys and their priorities.
-        This replaces the distribution with the normalized values.
+        This replaces the distribution with source-stratified values. If multiple motion files
+        were configured, importance sampling is only allowed to rebalance motions within each
+        file; the total probability mass of each file remains fixed.
         """
         assert len(motions_id) == len(priorities), "motions_id and priorities must have the same length"
-        total = sum(priorities)
-        assert total > 0, "Sum of priorities must be greater than zero"
-        
-        # Normalize priorities
-        normalized_priorities = [p / total for p in priorities]
-        assert all(torch.isfinite(torch.tensor(normalized_priorities))), "Priorities should be finite"
+        priority_values = torch.as_tensor(priorities, device=self._device, dtype=torch.float32)
+        assert torch.isfinite(priority_values).all(), "Priorities should be finite"
+        priority_values = priority_values.clamp_min(0.0)
+        assert float(priority_values.sum()) > 0, "Sum of priorities must be greater than zero"
         
         # Get all motion keys
         all_keys = self._motion_data_keys.tolist()
-        new_sampling_prob = torch.zeros(self._num_unique_motions, device=self._device)
+        new_sampling_priorities = torch.zeros(self._num_unique_motions, device=self._device)
 
-        for m, p in zip(motions_id, normalized_priorities):
-            # idx = all_keys.index(m)
-            new_sampling_prob[m] = p
+        for offset, (m, p) in enumerate(zip(motions_id, priority_values)):
+            m = int(m)
+            new_sampling_priorities[m] = p
             if file_name is not None:
-                assert all_keys[m] == file_name[m], f"Motion ID {m} does not match file name {file_name[m]}"
+                expected_file = None
+                if isinstance(file_name, dict):
+                    expected_file = file_name.get(m)
+                elif len(file_name) == self._num_unique_motions:
+                    expected_file = file_name[m]
+                elif offset < len(file_name):
+                    expected_file = file_name[offset]
+                if expected_file is not None and all_keys[m] != expected_file:
+                    print(f"[Warning] Motion ID {m} expected file {expected_file}, got {all_keys[m]}; continuing without file-name assertion.")
 
-        if new_sampling_prob.sum() == 0:
+        if new_sampling_priorities.sum() == 0:
             print("[Warning] No valid motions updated. Falling back to uniform sampling.")
-            new_sampling_prob = torch.ones(self._num_unique_motions, device=self._device) / self._num_unique_motions
-        else:
-            new_sampling_prob /= new_sampling_prob.sum()
+            new_sampling_priorities = torch.ones(self._num_unique_motions, device=self._device)
 
-        self._sampling_prob = new_sampling_prob
-        self._sampling_batch_prob = self._sampling_prob[self._curr_motion_ids] / self._sampling_prob[self._curr_motion_ids].sum()
+        self._sampling_prob = self._source_mixed_prob(new_sampling_priorities)
+        self._refresh_sampling_batch_prob()
     def get_motion_actions(self, motion_ids, motion_times):
         motion_len = self._motion_lengths[motion_ids]
         num_frames = self._motion_num_frames[motion_ids]
@@ -357,7 +521,9 @@ class MotionLibBase():
             num_motion_to_load = num_motions_to_load
 
         if random_sample:
-            sample_idxes = torch.multinomial(self._sampling_prob, num_samples=num_motion_to_load, replacement=True).to(self._device)
+            sample_idxes = self._sample_indices_with_source_mix(
+                self._sampling_prob, self._motion_source_ids, num_motion_to_load, exact_counts=True
+            )
         else: # start_idx only used for non-random sampling. 
             sample_idxes = torch.clamp(torch.arange(num_motion_to_load) + start_idx, max = self._num_unique_motions - 1 ).to(self._device)
         
@@ -365,7 +531,7 @@ class MotionLibBase():
         # sample_idxes = torch.tensor([self._motion_data_keys.tolist().index("0-KIT_8_WalkInClockwiseCircle04_poses")]).to(self._device)
         self._curr_motion_ids = sample_idxes
         self.curr_motion_keys = [self._motion_data_keys[sample_idxes.cpu()]] if sample_idxes.numel() == 1 else self._motion_data_keys[sample_idxes.cpu()].tolist()
-        self._sampling_batch_prob = self._sampling_prob[self._curr_motion_ids] / self._sampling_prob[self._curr_motion_ids].sum()
+        self._refresh_sampling_batch_prob()
 
         logger.info(f"Loading {num_motion_to_load} motions...")
         logger.info(f"Sampling motion: {sample_idxes[:10]}, ....")
@@ -582,7 +748,10 @@ class MotionLibBase():
         return motion_time.to(self._device)
     
     def sample_motions(self, n):
-        motion_ids = torch.multinomial(self._sampling_batch_prob, num_samples=n, replacement=True).to(self._device)
+        source_ids = self._motion_source_ids[self._curr_motion_ids]
+        motion_ids = self._sample_indices_with_source_mix(
+            self._sampling_batch_prob, source_ids, n, exact_counts=False
+        ).to(self._device)
 
         return motion_ids
     

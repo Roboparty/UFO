@@ -1,6 +1,6 @@
 # UFO
 
-UFO is an unsupervised reinforcement learning framework for humanoid control. This repository focuses on MJLab/MuJoCo-Warp training and inference for Unitree G1-style humanoid policies.
+UFO is an unsupervised reinforcement learning framework for humanoid control, with training and inference tools for Unitree G1-style humanoid policies.
 
 The codebase provides two training presets in one project:
 
@@ -25,12 +25,12 @@ export WANDB_API_KEY=your_wandb_api_key
 
 ## Training Defaults
 
-Core defaults live in `humanoidverse/train_mjlab.py` and can still be overridden from the command line:
+Core defaults live in `humanoidverse/train.py` and can still be overridden from the command line:
 
 - `--num-envs`: `1024` environments per GPU.
 - `--num-env-steps`: `192000000` global environment steps.
 - `--data-path`: `humanoidverse/data/lafan_29dof_10s-clipped.pkl`.
-- `--work-dir`: `runs/ufo_mjlab`.
+- `--work-dir`: `runs/ufo`.
 - `--checkpoint-every-steps`: `3200000` global environment steps.
 - `--buffer-size`: `5120000` transitions per GPU.
 
@@ -40,7 +40,7 @@ FB is the default agent, so the minimal 8-GPU command is:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-./run_mjlab.sh \
+./run_train.sh \
   --agent fb \
   --gpu-ids all \
   --use-wandb \
@@ -51,7 +51,7 @@ Override defaults only when needed:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 \
-./run_mjlab.sh \
+./run_train.sh \
   --agent fb \
   --gpu-ids all \
   --data-path path/to/motions.pkl \
@@ -64,7 +64,7 @@ CUDA_VISIBLE_DEVICES=0,1 \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-./run_mjlab.sh \
+./run_train.sh \
   --agent tldr \
   --gpu-ids all \
   --use-wandb \
@@ -75,8 +75,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-uv run python -m humanoidverse.tracking_inference_mjlab \
-  --model-folder runs/ufo_mjlab \
+uv run python -m humanoidverse.tracking_inference \
+  --model-folder runs/ufo \
   --device cuda:0 \
   --headless \
   --disable-dr \
@@ -85,14 +85,14 @@ uv run python -m humanoidverse.tracking_inference_mjlab \
   --motion-list 20
 ```
 
-Outputs are written to `<model-folder>/tracking_inference_mjlab/`.
+Outputs are written to `<model-folder>/tracking_inference/`.
 
 ## Goal Inference
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-uv run python -m humanoidverse.goal_inference_mjlab \
-  --model-folder runs/ufo_mjlab \
+uv run python -m humanoidverse.goal_inference \
+  --model-folder runs/ufo \
   --device cuda:0 \
   --headless \
   --disable-dr \
@@ -101,7 +101,7 @@ uv run python -m humanoidverse.goal_inference_mjlab \
   --export-onnx
 ```
 
-Outputs are written to `<model-folder>/goal_inference_mjlab/`.
+Outputs are written to `<model-folder>/goal_inference/`.
 
 ## Reward Inference
 
@@ -109,8 +109,8 @@ Reward inference reads a rank-local replay buffer shard from the training run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
-uv run python -m humanoidverse.reward_inference_mjlab \
-  --model-folder runs/ufo_mjlab \
+uv run python -m humanoidverse.reward_inference \
+  --model-folder runs/ufo \
   --device cuda:0 \
   --headless \
   --disable-dr \
@@ -122,4 +122,4 @@ uv run python -m humanoidverse.reward_inference_mjlab \
   --export-onnx
 ```
 
-Outputs are written to `<model-folder>/reward_inference_mjlab/`.
+Outputs are written to `<model-folder>/reward_inference/`.

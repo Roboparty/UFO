@@ -179,7 +179,8 @@ def _compose_humanoidverse_config(
     num_envs: int,
     relative_config_path: str,
     hydra_overrides: list[str],
-    lafan_tail_path: str,
+    lafan_tail_path: str | list[str],
+    data_mix_weights: list[float] | None,
     disable_obs_noise: bool,
     disable_domain_randomization: bool,
     max_episode_length_s: float | None,
@@ -197,10 +198,12 @@ def _compose_humanoidverse_config(
     cfg.env.config.headless = True
     cfg.robot.asset.asset_root = cfg.robot.asset.asset_root.replace("humanoidverse", HUMANOIDVERSE_DIR)
     cfg.robot.motion.asset.assetRoot = cfg.robot.motion.asset.assetRoot.replace("humanoidverse", HUMANOIDVERSE_DIR)
+    OmegaConf.set_struct(cfg, False)
     cfg.robot.motion.motion_file = lafan_tail_path
+    if data_mix_weights is not None:
+        cfg.robot.motion.motion_file_weights = data_mix_weights
 
     pre_process_config(cfg)
-    OmegaConf.set_struct(cfg, False)
 
     if disable_obs_noise:
         for key in cfg.obs.noise_scales.keys():
@@ -1095,7 +1098,8 @@ class HumanoidVerseMjlabConfig(BaseConfig):
     name: tp.Literal["humanoidverse_mjlab"] = "humanoidverse_mjlab"
 
     device: str = "cuda:0"
-    lafan_tail_path: str
+    lafan_tail_path: str | list[str]
+    data_mix_weights: list[float] | None = None
     mjcf_path: str | None = None
     max_episode_length_s: float | None = None
     disable_obs_noise: bool = False
@@ -1119,6 +1123,7 @@ class HumanoidVerseMjlabConfig(BaseConfig):
             relative_config_path=self.relative_config_path,
             hydra_overrides=list(self.hydra_overrides),
             lafan_tail_path=self.lafan_tail_path,
+            data_mix_weights=self.data_mix_weights,
             disable_obs_noise=self.disable_obs_noise,
             disable_domain_randomization=self.disable_domain_randomization,
             max_episode_length_s=self.max_episode_length_s,
