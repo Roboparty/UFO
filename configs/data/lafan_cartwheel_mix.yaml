@@ -1,0 +1,12 @@
+datasets:
+  - name: lafan
+    format: ufo_pkl
+    train_path: /data/xue/bfmzero/data/lafan_29dof_10s-clipped.pkl
+    inference_path: /data/xue/bfmzero/data/lafan_29dof.pkl
+    weight: 0.95
+
+  - name: cartwheel
+    format: ufo_pkl
+    train_path: /data/xue/bfmzero/data/soma_cartwheel_near10s.pkl
+    inference_path: /data/xue/bfmzero/data/soma_cartwheel_near10s.pkl
+    weight: 0.05
