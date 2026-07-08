@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UFO Demo Gallery</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="identity">
+          <div class="mark">UFO</div>
+          <div>
+            <h1>UFO Demo Gallery</h1>
+            <p>Unsupervised reinforcement learning for humanoid control</p>
+          </div>
+        </div>
+        <nav class="tabs" aria-label="Demo categories">
+          <button class="tab is-active" type="button" data-category="tracking">Tracking</button>
+          <button class="tab" type="button" data-category="prompts">Prompts</button>
+          <button class="tab" type="button" data-category="goals">Goals</button>
+        </nav>
+      </header>
+
+      <main class="workspace">
+        <section class="viewer" aria-label="Selected demo">
+          <div class="viewer-header">
+            <div>
+              <p class="eyebrow" id="clip-kicker">Tracking</p>
+              <h2 id="clip-title">Cartwheel tracking</h2>
+            </div>
+            <div class="badges" id="clip-badges"></div>
+          </div>
+
+          <div class="stage">
+            <video id="main-video" autoplay muted loop playsinline controls></video>
+            <div class="media-missing" id="media-missing">
+              <strong>Media not synced</strong>
+              <span>Run <code>tools/sync_website_media.sh</code> from the repo root.</span>
+            </div>
+          </div>
+        </section>
+
+        <aside class="inspector" aria-label="Demo details">
+          <div class="metric-grid" id="metric-grid"></div>
+          <div class="command-block">
+            <div class="command-head">
+              <span>Inference Command</span>
+              <button class="icon-button" type="button" id="copy-command" aria-label="Copy command" title="Copy command">Copy</button>
+            </div>
+            <pre id="command-text"></pre>
+          </div>
+        </aside>
+      </main>
+
+      <section class="gallery" aria-label="Demo clips">
+        <div class="gallery-head">
+          <h2 id="gallery-title">Tracking Clips</h2>
+          <span id="clip-count">0 clips</span>
+        </div>
+        <div class="clip-grid" id="clip-grid"></div>
+      </section>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
