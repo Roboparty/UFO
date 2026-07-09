@@ -1,7 +1,7 @@
 """Tracking inference and video export for UFO policies.
 
 Policy rollout is rendered from the training environment, while the reference
-motion is rendered from the local G1 MJCF with pure MuJoCo qpos playback.
+motion is rendered from the configured robot MJCF with pure MuJoCo qpos playback.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from torch.utils._pytree import tree_map
 
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
 from humanoidverse.mjlab_inference_utils import (
-    G1_MJLAB_MJCF_PATH,
     MujocoQposRenderer,
     add_bool_arg,
     checkpoint_load_device,
@@ -28,6 +27,7 @@ from humanoidverse.mjlab_inference_utils import (
 )
 from humanoidverse.utils.helpers import export_meta_policy_as_onnx, get_backward_observation
 from humanoidverse.utils.motion_data import prepare_manifest_dataset_path
+from humanoidverse.utils.robot_spec import load_robot_training_spec
 
 
 def _resize_nearest(frame: np.ndarray, height: int, width: int) -> np.ndarray:
@@ -38,17 +38,18 @@ def _resize_nearest(frame: np.ndarray, height: int, width: int) -> np.ndarray:
     return frame[y_idx[:, None], x_idx[None, :]]
 
 
-def _expert_qpos_from_obs(obs_dict: dict[str, torch.Tensor]) -> np.ndarray:
+def _expert_qpos_from_obs(obs_dict: dict[str, torch.Tensor], *, num_dof: int) -> np.ndarray:
     root_pos = obs_dict["ref_body_pos"][:, 0].detach().cpu().numpy()
     root_quat_wxyz = np.roll(obs_dict["ref_body_rots"][:, 0].detach().cpu().numpy(), 1, axis=-1)
     dof_pos = obs_dict["dof_pos"].detach().cpu().numpy()
     qpos = np.concatenate([root_pos, root_quat_wxyz, dof_pos], axis=-1)
-    if qpos.shape[-1] != 36:
-        raise ValueError(f"Expected expert qpos shape (*, 36), got {qpos.shape}")
+    expected = 7 + int(num_dof)
+    if qpos.shape[-1] != expected:
+        raise ValueError(f"Expected expert qpos shape (*, {expected}), got {qpos.shape}")
     return qpos
 
 
-def _target_states_from_obs(obs_dict: dict[str, torch.Tensor], device: str) -> dict[str, torch.Tensor]:
+def _target_states_from_obs(obs_dict: dict[str, torch.Tensor], device: str, *, num_dof: int) -> dict[str, torch.Tensor]:
     root_state_xyzw = torch.cat(
         [
             obs_dict["ref_body_pos"][0, 0],
@@ -58,7 +59,7 @@ def _target_states_from_obs(obs_dict: dict[str, torch.Tensor], device: str) -> d
         ],
         dim=-1,
     ).to(device=device, dtype=torch.float32)
-    dof_state = torch.zeros((29, 2), device=device, dtype=torch.float32)
+    dof_state = torch.zeros((int(num_dof), 2), device=device, dtype=torch.float32)
     dof_state[:, 0] = obs_dict["dof_pos"][0].to(device=device, dtype=torch.float32)
     dof_state[:, 1] = obs_dict["ref_dof_vel"][0].to(device=device, dtype=torch.float32)
     return {"root_states": root_state_xyzw.unsqueeze(0), "dof_states": dof_state.unsqueeze(0)}
@@ -92,6 +93,7 @@ def run_tracking_inference(
     *,
     model_folder: Path,
     data_path: Path | None,
+    robot_config: Path | None,
     headless: bool,
     device: str,
     save_mp4: bool,
@@ -113,21 +115,28 @@ def run_tracking_inference(
     if not checkpoint_dir.exists():
         raise FileNotFoundError(f"Missing checkpoint directory: {checkpoint_dir}")
 
-    G1_xml = resolve_project_path(G1_MJLAB_MJCF_PATH)
-    if not G1_xml.exists():
-        raise FileNotFoundError(f"Missing G1 XML: {G1_xml}")
+    default_robot_config = resolve_project_path("configs/robots/g1_29dof.yaml")
+    robot_training = load_robot_training_spec(robot_config or default_robot_config)
+    robot_xml = Path(robot_training.robot.xml_path).expanduser().resolve()
+    if not robot_xml.exists():
+        raise FileNotFoundError(f"Missing robot XML: {robot_xml}")
+    control_joint_names = list(robot_training.robot.control_joint_names)
+    num_dof = len(control_joint_names)
 
     model_load_device = checkpoint_load_device(device)
     model = load_model_from_checkpoint_dir(checkpoint_dir, device=model_load_device)
     model.to(device)
     model.eval()
 
+    if export_onnx and num_dof != 29:
+        raise ValueError("ONNX export currently supports only G1 29-DOF policies; rerun with --no-export-onnx for other robots.")
     if export_onnx:
         _export_model(model, model_folder / "exported")
 
     env_cfg, use_root_height_obs = load_mjlab_env_cfg(
         model_folder,
         data_path=data_path,
+        robot_config=robot_config,
         device=device,
         headless=headless,
         disable_dr=disable_dr,
@@ -143,18 +152,19 @@ def run_tracking_inference(
     print(f"[INFO] UFO tracking inference model_folder={model_folder}")
     print(f"[INFO] Rollout XML={env_cfg.mjcf_path}")
     print(f"[INFO] Motion data={env_cfg.lafan_tail_path}")
-    print(f"[INFO] Expert renderer XML={G1_xml}")
+    print(f"[INFO] Expert renderer XML={robot_xml}")
     print(f"[INFO] device={device} disable_dr={disable_dr} disable_obs_noise={disable_obs_noise} save_mp4={save_mp4}")
 
     env._motion_lib.load_all_motions()
     env.is_evaluating = True
     expert_renderer = (
         MujocoQposRenderer(
-            G1_xml,
+            robot_xml,
             render_size=render_size,
             camera_distance=camera_distance,
             camera_azimuth=camera_azimuth,
             camera_elevation=camera_elevation,
+            expected_qpos_size=7 + num_dof,
         )
         if save_mp4
         else None
@@ -166,12 +176,12 @@ def run_tracking_inference(
             joblib.dump(z.detach().cpu().numpy(), output_dir / f"zs_{motion_id}.pkl")
             print(f"[INFO] Saved z embedding: {output_dir / f'zs_{motion_id}.pkl'}")
 
-            target_states = _target_states_from_obs(obs_dict, device=device)
+            target_states = _target_states_from_obs(obs_dict, device=device, num_dof=num_dof)
             observation, _ = wrapped_env.reset(to_numpy=False, target_states=target_states)
             episode_len = int(z.shape[0])
             if max_steps is not None:
                 episode_len = min(episode_len, int(max_steps))
-            expert_qpos = _expert_qpos_from_obs(obs_dict)
+            expert_qpos = _expert_qpos_from_obs(obs_dict, num_dof=num_dof)
             frames: list[np.ndarray] = []
             use_env_render = True
 
@@ -213,6 +223,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="UFO tracking inference with MuJoCo expert rendering.")
     parser.add_argument("--model-folder", type=Path, required=True)
     parser.add_argument("--data-path", type=Path, default=None)
+    parser.add_argument("--robot-config", type=Path, default=None, help="Robot YAML for rollout and expert rendering.")
     parser.add_argument("--data-manifest", type=Path, default=None, help="Motion data manifest. Use with --dataset.")
     parser.add_argument("--dataset", default=None, help="Dataset name inside --data-manifest for tracking inference.")
     parser.add_argument("--rebuild-motion-cache", action="store_true", help="Rebuild manifest-generated motion pkl cache.")
@@ -253,6 +264,7 @@ def main() -> None:
     run_tracking_inference(
         model_folder=args.model_folder,
         data_path=args.data_path,
+        robot_config=args.robot_config,
         headless=args.headless,
         device=args.device,
         save_mp4=args.save_mp4,

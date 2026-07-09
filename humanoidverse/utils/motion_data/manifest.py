@@ -30,6 +30,9 @@ class ManifestMotionData:
     train_data_paths: list[str]
     train_data_weights: list[float]
     inference_paths: dict[str, str]
+    robot_config_path: str | None = None
+    robot_name: str | None = None
+    robot_xml_path: str | None = None
 
 
 def _safe_dataset_name(name: str) -> str:
@@ -125,6 +128,13 @@ def _load_manifest_robot_spec(config: dict[str, Any], manifest_path: Path, datas
     spec = load_robot_spec(robot_config_path)
     logger.info(f"[motion-manifest] robot={spec.name} xml={spec.xml_path}")
     return spec
+
+
+def _manifest_robot_config_path(config: dict[str, Any], manifest_path: Path) -> Path | None:
+    robot_config = config.get("robot_config")
+    if not robot_config:
+        return None
+    return _resolve_existing_path(robot_config, manifest_path.parent)
 
 
 def _source_path_for_split(dataset: dict[str, Any], split: str, *, fallback_to_train: bool) -> tuple[Any, bool]:
@@ -282,6 +292,7 @@ def prepare_motion_manifest(
     cache_dir = _default_cache_dir(manifest_path, cache_root)
     weights = _normalize_weights(datasets)
     robot_spec = _load_manifest_robot_spec(config, manifest_path, datasets)
+    robot_config_path = _manifest_robot_config_path(config, manifest_path)
 
     train_paths: list[str] = []
     inference_paths: dict[str, str] = {}
@@ -316,6 +327,9 @@ def prepare_motion_manifest(
         train_data_paths=train_paths,
         train_data_weights=weights,
         inference_paths=inference_paths,
+        robot_config_path=str(robot_config_path) if robot_config_path is not None else None,
+        robot_name=robot_spec.name if robot_spec is not None else None,
+        robot_xml_path=robot_spec.xml_path if robot_spec is not None else None,
     )
 
 

@@ -26,3 +26,102 @@ key_bodies:
   - right_wrist_yaw_link
 
 default_dof_pos: {}
+
+training:
+  hydra_robot: g1/g1_29dof_hard_waist
+  hydra_overrides:
+    - env.config.lie_down_init=True
+    - env.config.lie_down_init_prob=0.3
+  semantics:
+    contact_bodies:
+      - left_ankle_roll_link
+      - right_ankle_roll_link
+    undesired_contact_bodies:
+      - pelvis
+      - shoulder
+      - hip
+    torso_name: torso_link
+    left_ankle_dof_names:
+      - left_ankle_pitch_joint
+      - left_ankle_roll_joint
+    right_ankle_dof_names:
+      - right_ankle_pitch_joint
+      - right_ankle_roll_joint
+  init_state:
+    pos: [0.0, 0.0, 0.8]
+    rot: [0.0, 0.0, 0.0, 1.0]
+    lin_vel: [0.0, 0.0, 0.0]
+    ang_vel: [0.0, 0.0, 0.0]
+    default_joint_angles:
+      left_hip_pitch_joint: -0.1
+      left_hip_roll_joint: 0.0
+      left_hip_yaw_joint: 0.0
+      left_knee_joint: 0.3
+      left_ankle_pitch_joint: -0.2
+      left_ankle_roll_joint: 0.0
+      right_hip_pitch_joint: -0.1
+      right_hip_roll_joint: 0.0
+      right_hip_yaw_joint: 0.0
+      right_knee_joint: 0.3
+      right_ankle_pitch_joint: -0.2
+      right_ankle_roll_joint: 0.0
+      waist_yaw_joint: 0.0
+      waist_roll_joint: 0.0
+      waist_pitch_joint: 0.0
+      left_shoulder_pitch_joint: 0.0
+      left_shoulder_roll_joint: 0.0
+      left_shoulder_yaw_joint: 0.0
+      left_elbow_joint: 0.0
+      left_wrist_roll_joint: 0.0
+      left_wrist_pitch_joint: 0.0
+      left_wrist_yaw_joint: 0.0
+      right_shoulder_pitch_joint: 0.0
+      right_shoulder_roll_joint: 0.0
+      right_shoulder_yaw_joint: 0.0
+      right_elbow_joint: 0.0
+      right_wrist_roll_joint: 0.0
+      right_wrist_pitch_joint: 0.0
+      right_wrist_yaw_joint: 0.0
+  control:
+    action_scale: 0.25
+    action_clip_value: 5.0
+    normalize_action_to: 5.0
+    effort_limit_scale: 0.8
+    effort_limit: [139.0, 139.0, 88.0, 139.0, 50.0, 50.0, 139.0, 139.0, 88.0, 139.0, 50.0, 50.0, 88.0, 50.0, 50.0, 25.0, 25.0, 25.0, 25.0, 25.0, 13.4, 13.4, 25.0, 25.0, 25.0, 25.0, 25.0, 13.4, 13.4]
+    velocity_limit: [20.0, 20.0, 32.0, 20.0, 37.0, 37.0, 20.0, 20.0, 32.0, 20.0, 37.0, 37.0, 32.0, 37.0, 37.0, 37.0, 37.0, 37.0, 37.0, 37.0, 27.0, 27.0, 37.0, 37.0, 37.0, 37.0, 37.0, 27.0, 27.0]
+    stiffness:
+      hip_yaw: 40.17924
+      hip_roll: 99.09843
+      hip_pitch: 99.09843
+      knee: 99.09843
+      ankle_pitch: 28.50125
+      ankle_roll: 28.50125
+      waist_yaw: 300.0
+      waist_roll: 300.0
+      waist_pitch: 300.0
+      shoulder_pitch: 14.25062
+      shoulder_roll: 14.25062
+      shoulder_yaw: 14.25062
+      elbow: 14.25062
+      wrist_roll: 14.25062
+      wrist_pitch: 8.61103
+      wrist_yaw: 8.61103
+    damping:
+      hip_yaw: 2.55789
+      hip_roll: 6.3088
+      hip_pitch: 6.3088
+      knee: 6.3088
+      ankle_pitch: 1.81445
+      ankle_roll: 1.81445
+      waist_yaw: 5.0
+      waist_roll: 5.0
+      waist_pitch: 5.0
+      shoulder_pitch: 0.90722
+      shoulder_roll: 0.90722
+      shoulder_yaw: 0.90722
+      elbow: 0.90722
+      wrist_roll: 0.90722
+      wrist_pitch: 0.5482
+      wrist_yaw: 0.5482
+  actuator:
+    source: g1_mode15

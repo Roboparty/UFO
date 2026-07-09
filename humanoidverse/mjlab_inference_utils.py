@@ -27,6 +27,7 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     HumanoidVerseMjlabConfig,
     G1_MJLAB_MJCF_PATH,
 )
+from humanoidverse.utils.robot_spec import load_robot_training_spec
 
 
 if getattr(humanoidverse, "__file__", None) is not None:
@@ -178,6 +179,7 @@ def load_mjlab_env_cfg(
     model_folder: Path,
     *,
     data_path: Path | None,
+    robot_config: Path | None = None,
     device: str,
     headless: bool,
     disable_dr: bool,
@@ -190,7 +192,15 @@ def load_mjlab_env_cfg(
     env_config = dict(config["env"])
     use_root_height_obs = bool(env_config.get("root_height_obs", False))
     env_config["device"] = device
-    env_config["mjcf_path"] = G1_MJLAB_MJCF_PATH
+    if robot_config is not None:
+        training_spec = load_robot_training_spec(robot_config)
+        env_config["mjcf_path"] = training_spec.robot.xml_path
+        env_config["robot_config_path"] = str(training_spec.config_path)
+        env_config["robot_training"] = training_spec.to_env_dict()
+    elif env_config.get("robot_training"):
+        env_config["mjcf_path"] = env_config["robot_training"]["robot"]["xml_path"]
+    else:
+        env_config["mjcf_path"] = G1_MJLAB_MJCF_PATH
     env_config["disable_domain_randomization"] = disable_dr
     env_config["disable_obs_noise"] = disable_obs_noise
     env_config["auto_reset"] = False
@@ -257,7 +267,7 @@ def to_rgb_uint8(frame: Any) -> np.ndarray:
 
 
 class MujocoQposRenderer:
-    """Pure MuJoCo renderer for 36-D qpos from the MJLab G1 MJCF."""
+    """Pure MuJoCo renderer for qpos playback from an MJCF."""
 
     def __init__(
         self,
@@ -267,6 +277,7 @@ class MujocoQposRenderer:
         camera_distance: float = 3.0,
         camera_azimuth: float = 135.0,
         camera_elevation: float = -18.0,
+        expected_qpos_size: int | None = None,
     ):
         spec = mujoco.MjSpec.from_file(str(xml_path))
         spec.worldbody.add_geom(
@@ -296,8 +307,8 @@ class MujocoQposRenderer:
         self.camera.distance = float(camera_distance)
         self.camera.azimuth = float(camera_azimuth)
         self.camera.elevation = float(camera_elevation)
-        if self.model.nq != 36:
-            raise ValueError(f"Expected G1 nq=36, got nq={self.model.nq}")
+        if expected_qpos_size is not None and self.model.nq != int(expected_qpos_size):
+            raise ValueError(f"Expected renderer nq={expected_qpos_size}, got nq={self.model.nq}")
 
     def render_qpos(self, qpos: np.ndarray) -> np.ndarray:
         qpos = np.asarray(qpos, dtype=np.float64).reshape(-1)
@@ -314,14 +325,14 @@ class MujocoQposRenderer:
         self.renderer.close()
 
 
-def policy_qpos_from_env(wrapped_env: Any) -> np.ndarray:
+def policy_qpos_from_env(wrapped_env: Any, *, expected_qpos_size: int) -> np.ndarray:
     qpos, _qvel = wrapped_env._get_qpos_qvel(to_numpy=True)
     qpos = np.asarray(qpos)
     if qpos.ndim == 2:
         qpos = qpos[0]
     qpos = qpos.reshape(-1)
-    if qpos.size != 36:
-        raise ValueError(f"Expected MJLab policy qpos size 36, got shape {qpos.shape}")
+    if qpos.size != int(expected_qpos_size):
+        raise ValueError(f"Expected MJLab policy qpos size {expected_qpos_size}, got shape {qpos.shape}")
     return qpos
 
 
@@ -339,4 +350,4 @@ def render_policy_frame(
                 "[INFO] wrapped_env.render() did not return an RGB frame; "
                 f"falling back to MJLab qpos rendering for policy frames ({exc})."
             )
-    return renderer.render_qpos(policy_qpos_from_env(wrapped_env)), False
+    return renderer.render_qpos(policy_qpos_from_env(wrapped_env, expected_qpos_size=renderer.model.nq)), False

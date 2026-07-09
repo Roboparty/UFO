@@ -40,12 +40,27 @@ DEFAULT_WORK_DIR = "runs/ufo"
 DEFAULT_BUFFER_SIZE = 5120000
 DEFAULT_UPDATE_Z_EVERY_STEP = 100
 DEFAULT_WANDB_PROJECT = "ufo-humanoid"
+DEFAULT_ROBOT_CONFIG = "configs/robots/g1_29dof.yaml"
 
-from humanoidverse.agents.envs.humanoidverse_mjlab import G1_MJLAB_MJCF_PATH, HumanoidVerseMjlabConfig
+from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import HumanoidVerseMjlabTrackingEvaluationConfig
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.training.workspace import TrainConfig
 from humanoidverse.utils.motion_data import prepare_motion_manifest
+from humanoidverse.utils.robot_spec import assert_robot_configs_compatible, load_robot_training_spec, resolve_robot_config_path
+
+
+def _resolve_training_robot_config(
+    cli_robot_config: str | Path | None,
+    manifest_robot_config: str | Path | None,
+) -> Path:
+    if cli_robot_config is not None and manifest_robot_config is not None:
+        return assert_robot_configs_compatible(cli_robot_config, manifest_robot_config)
+    if cli_robot_config is not None:
+        return resolve_robot_config_path(cli_robot_config)
+    if manifest_robot_config is not None:
+        return resolve_robot_config_path(manifest_robot_config)
+    return resolve_robot_config_path(DEFAULT_ROBOT_CONFIG)
 
 
 def build_ufo_mjlab_config(
@@ -73,7 +88,9 @@ def build_ufo_mjlab_config(
     clip_grad_norm: float = 0.0,
     cartwheel_aux_safe: bool = False,
     num_agent_updates: int | None = None,
+    robot_config: str | Path | None = None,
 ) -> TrainConfig:
+    robot_training = load_robot_training_spec(robot_config or DEFAULT_ROBOT_CONFIG)
     evaluations = []
     run_eval_and_prioritization = not smoke and not disable_eval_prioritization
     distributed_sync = distributed_world_size > 1
@@ -110,12 +127,11 @@ def build_ufo_mjlab_config(
             raise ValueError("num_agent_updates must be positive")
         train_runtime["num_agent_updates"] = int(num_agent_updates)
     hydra_overrides = [
-        "robot=g1/g1_29dof_hard_waist",
-        "robot.control.action_scale=0.25",
-        "robot.control.action_clip_value=5.0",
-        "robot.control.normalize_action_to=5.0",
-        "env.config.lie_down_init=True",
-        "env.config.lie_down_init_prob=0.3",
+        f"robot={robot_training.hydra_robot}",
+        f"robot.control.action_scale={robot_training.action_scale}",
+        f"robot.control.action_clip_value={robot_training.action_clip_value}",
+        f"robot.control.normalize_action_to={robot_training.normalize_action_to}",
+        *robot_training.hydra_overrides,
     ]
     if cartwheel_aux_safe:
         hydra_overrides.extend(
@@ -139,7 +155,9 @@ def build_ufo_mjlab_config(
             device=device,
             lafan_tail_path=data_path or DEFAULT_DATA_PATH,
             data_mix_weights=data_mix_weights,
-            mjcf_path=G1_MJLAB_MJCF_PATH,
+            mjcf_path=robot_training.robot.xml_path,
+            robot_config_path=str(robot_training.config_path),
+            robot_training=robot_training.to_env_dict(),
             max_episode_length_s=None,
             disable_obs_noise=disable_obs_noise,
             disable_domain_randomization=disable_dr,
@@ -261,11 +279,13 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         clip_grad_norm=args.clip_grad_norm,
         cartwheel_aux_safe=bool(args.cartwheel_aux_safe),
         num_agent_updates=args.num_agent_updates,
+        robot_config=args.robot_config,
     )
     print(
         "[INFO] UFO train: "
         f"agent={args.agent}, device={device}, rank={rank}/{world_size}, seed={seed}, work_dir={log_dir}, "
-        f"mjcf_path={cfg.env.mjcf_path}, data_path={cfg.env.lafan_tail_path}, data_mix_weights={cfg.env.data_mix_weights}, "
+        f"robot_config={cfg.env.robot_config_path}, mjcf_path={cfg.env.mjcf_path}, "
+        f"data_path={cfg.env.lafan_tail_path}, data_mix_weights={cfg.env.data_mix_weights}, "
         f"num_envs_per_rank={args.num_envs}, global_parallel_envs={args.num_envs * world_size}, "
         f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, "
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
@@ -346,6 +366,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent", default=DEFAULT_AGENT, choices=["fb", "tldr"], help="Training agent preset: fb (default) or tldr.")
     parser.add_argument("--gpu-ids", default="single", help="'single', 'all', or a comma-separated GPU id list relative to CUDA_VISIBLE_DEVICES.")
     parser.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
+    parser.add_argument(
+        "--robot-config",
+        type=Path,
+        default=None,
+        help=(
+            "Robot YAML used for training metadata. Defaults to configs/robots/g1_29dof.yaml. "
+            "If omitted and --data-manifest declares robot_config, the manifest robot config is used."
+        ),
+    )
     parser.add_argument("--num-envs", type=int, default=DEFAULT_NUM_ENVS)
     parser.add_argument("--num-env-steps", type=int, default=DEFAULT_NUM_ENV_STEPS)
     parser.add_argument("--checkpoint-every-steps", type=int, default=DEFAULT_CHECKPOINT_EVERY_STEPS)
@@ -407,12 +436,14 @@ def parse_args() -> argparse.Namespace:
         args.num_envs = min(args.num_envs, 16)
         args.num_env_steps = min(args.num_env_steps, 2048)
         args.use_wandb = False
+    manifest_robot_config = None
     if args.data_manifest is not None:
         if args.data_path is not None:
             parser.error("--data-manifest and --data-path cannot be used together")
         manifest_data = prepare_motion_manifest(args.data_manifest, rebuild_cache=bool(args.rebuild_motion_cache))
         args.data_path = manifest_data.train_data_paths
         args.data_mix_weights = manifest_data.train_data_weights
+        manifest_robot_config = manifest_data.robot_config_path
     elif args.data_path is not None:
         data_path_count = len(args.data_path)
         if args.data_mix_weights is not None:
@@ -427,6 +458,8 @@ def parse_args() -> argparse.Namespace:
         if data_path_count == 1:
             args.data_path = args.data_path[0]
             args.data_mix_weights = None
+
+    args.robot_config = _resolve_training_robot_config(args.robot_config, manifest_robot_config)
 
     if args.update_z_every_step <= 0:
         raise ValueError("--update-z-every-step must be positive")
