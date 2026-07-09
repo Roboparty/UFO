@@ -10,6 +10,16 @@ The available commands are:
 
 These tools generate and check configuration files, then call the existing `RobotSpec`, motion adapters, and manifest auto-build path. They do not change FB/TLDR algorithms, MotionLib sampling, or the training environment.
 
+## Supported Public Motion Formats
+
+UFO's public data manifests intentionally expose only three motion formats:
+
+- `ufo_pkl`: already processed UFO motion dictionaries, usually produced by UFO tools or existing retargeting pipelines.
+- `robot_state_csv`: robot-state CSV files containing root pose and joint positions, interpreted with a robot YAML config.
+- `robot_state_npz`: robot-state NPZ files containing root pose and joint positions, interpreted with a robot YAML config.
+
+For new datasets, prefer `robot_state_csv` or `robot_state_npz` with the import wizard. For data that has already been converted into UFO's internal motion dictionary schema, use `ufo_pkl`.
+
 ## Recommended Flow
 
 1. Generate a draft robot config from a MuJoCo XML:
