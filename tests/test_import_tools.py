@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from humanoidverse.tools.data_build import build_manifest_config, write_manifest
 from humanoidverse.tools.data_inspect import inspect_data_source
 from humanoidverse.tools.robot_inspect import infer_robot_semantics, inspect_mujoco_xml, write_robot_yaml
@@ -98,6 +100,18 @@ def _write_robot_state_csv(path: Path, *, named_joints: bool, frames: int) -> No
             writer.writerow(row)
 
 
+def _write_robot_state_npz(path: Path, *, frames: int) -> None:
+    idx = np.arange(frames, dtype=np.float32)
+    np.savez(
+        path,
+        root_pos=np.zeros((frames, 3), dtype=np.float32),
+        root_quat=np.tile(np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32), (frames, 1)),
+        dof_pos=np.stack([0.1 * idx, 0.2 * idx], axis=1).astype(np.float32),
+        joint_names=np.asarray(["joint1", "joint2"]),
+        fps=np.asarray(50),
+    )
+
+
 class ImportToolsTest(unittest.TestCase):
     def test_robot_inspect_writes_valid_robot_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -183,6 +197,32 @@ class ImportToolsTest(unittest.TestCase):
             self.assertTrue(full_path.exists())
             self.assertTrue(train_path.name.endswith("_train_near10s_ufo.pkl"))
             self.assertTrue(full_path.name.endswith("_full_ufo.pkl"))
+
+    def test_data_build_manifest_builds_npz_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            xml_path = _write_import_robot(root)
+            robot_yaml = root / "tiny_import.yaml"
+            inspection = inspect_mujoco_xml(xml_path, name="tiny_import")
+            write_robot_yaml(robot_yaml, inspection, infer_robot_semantics(inspection))
+            npz_path = root / "state.npz"
+            _write_robot_state_npz(npz_path, frames=60)
+
+            manifest_config = build_manifest_config(
+                robot=str(robot_yaml),
+                source=str(npz_path),
+                fmt="robot_state_npz",
+                name="tiny_motion_npz",
+                weight=1.0,
+                fps=50,
+                clip_seconds=10,
+            )
+            manifest_path = write_manifest(manifest_config, root / "tiny_motion_npz.yaml")
+            result = prepare_motion_manifest(manifest_path, cache_root=root / "cache", rebuild_cache=True)
+
+            self.assertEqual(len(result.train_data_paths), 1)
+            self.assertTrue(Path(result.train_data_paths[0]).exists())
+            self.assertTrue(Path(result.inference_paths["tiny_motion_npz"]).exists())
 
 
 if __name__ == "__main__":

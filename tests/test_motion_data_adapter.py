@@ -8,9 +8,17 @@ from pathlib import Path
 import joblib
 import numpy as np
 
-from humanoidverse.utils.motion_data.adapters import SUPPORTED_FORMATS, load_robot_state_csv, load_robot_state_npz
+from humanoidverse.utils.motion_data.adapters import (
+    SUPPORTED_FORMATS,
+    load_motion_data_by_format,
+    load_robot_state_csv,
+    load_robot_state_npz,
+)
 from humanoidverse.utils.motion_data.clip import clip_ufo_motion_dict
 from humanoidverse.utils.motion_data.manifest import prepare_manifest_dataset_path, prepare_motion_manifest
+from humanoidverse.utils.motion_data.robot_state import RobotStateMotion, reorder_dof_by_joint_names, validate_robot_state_motion
+from humanoidverse.utils.motion_data.robot_state_convert import robot_state_dict_to_ufo_motion_dict, robot_state_to_ufo_motion
+from humanoidverse.utils.motion_data.robot_state_readers import read_robot_state_csv, read_robot_state_npz
 from humanoidverse.utils.motion_data.schema import validate_ufo_motion_dict
 from humanoidverse.utils.robot_spec import load_robot_spec
 
@@ -36,6 +44,30 @@ def _long_motion_dict(seconds: float, fps: float = 50.0) -> dict[str, dict]:
             "fps": fps,
         }
     }
+
+
+def _robot_state_motion(
+    *,
+    frames: int = 4,
+    dof_pos: np.ndarray | None = None,
+    joint_names: list[str] | None = None,
+    zero_quat: bool = False,
+) -> RobotStateMotion:
+    root_quat = np.zeros((frames, 4), dtype=np.float32) if zero_quat else np.tile(
+        np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32), (frames, 1)
+    )
+    if dof_pos is None:
+        dof_pos = np.zeros((frames, 2), dtype=np.float32)
+    return RobotStateMotion(
+        motion_key="state",
+        root_pos=np.zeros((frames, 3), dtype=np.float32),
+        root_quat=root_quat,
+        dof_pos=dof_pos,
+        fps=50.0,
+        joint_names=joint_names,
+        source="unit",
+        metadata={"test": True},
+    )
 
 
 def _write_tiny_robot(root: Path) -> tuple[Path, Path]:
@@ -134,6 +166,24 @@ def _write_robot_state_csv(path: Path, *, named_joints: bool = True, frames: int
             writer.writerow(row)
 
 
+def _write_robot_state_npz(path: Path, *, frames: int = 4, swapped_joint_names: bool = True) -> None:
+    idx = np.arange(frames, dtype=np.float32)
+    if swapped_joint_names:
+        dof_pos = np.stack([idx + 1.0, 0.1 * (idx + 1.0)], axis=1).astype(np.float32)
+        joint_names = np.asarray(["joint2", "joint1"])
+    else:
+        dof_pos = np.stack([0.1 * (idx + 1.0), idx + 1.0], axis=1).astype(np.float32)
+        joint_names = np.asarray(["joint1", "joint2"])
+    np.savez(
+        path,
+        root_pos=np.zeros((frames, 3), dtype=np.float32),
+        root_quat=np.tile(np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32), (frames, 1)),
+        dof_pos=dof_pos,
+        joint_names=joint_names,
+        fps=np.asarray(50),
+    )
+
+
 class MotionDataAdapterTest(unittest.TestCase):
     def test_validate_ufo_motion_dict(self) -> None:
         data = validate_ufo_motion_dict(_motion_dict(), "unit")
@@ -158,6 +208,103 @@ class MotionDataAdapterTest(unittest.TestCase):
             self.assertEqual(spec.control_joint_names, ["joint1", "joint2"])
             self.assertEqual(spec.joint_axes["joint1"], [0.0, 0.0, 1.0])
             self.assertGreaterEqual(spec.joint_qpos_addr["joint1"], 7)
+
+    def test_robot_state_motion_validate_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, robot_config = _write_tiny_robot(Path(tmpdir))
+            spec = load_robot_spec(robot_config)
+            motion = validate_robot_state_motion(_robot_state_motion(), spec, "unit")
+            self.assertEqual(motion.root_pos.shape, (4, 3))
+            self.assertEqual(motion.dof_pos.shape, (4, 2))
+            self.assertAlmostEqual(motion.fps, 50.0)
+
+    def test_robot_state_motion_rejects_mismatched_time_dimension(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, robot_config = _write_tiny_robot(Path(tmpdir))
+            spec = load_robot_spec(robot_config)
+            motion = RobotStateMotion(
+                motion_key="bad",
+                root_pos=np.zeros((3, 3), dtype=np.float32),
+                root_quat=np.tile(np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32), (4, 1)),
+                dof_pos=np.zeros((4, 2), dtype=np.float32),
+                fps=50.0,
+            )
+            with self.assertRaisesRegex(ValueError, "must share T"):
+                validate_robot_state_motion(motion, spec, "unit")
+
+    def test_robot_state_motion_rejects_zero_root_quat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, robot_config = _write_tiny_robot(Path(tmpdir))
+            spec = load_robot_spec(robot_config)
+            with self.assertRaisesRegex(ValueError, "root_quat contains zero"):
+                validate_robot_state_motion(_robot_state_motion(zero_quat=True), spec, "unit")
+
+    def test_robot_state_joint_names_reorder_correctly(self) -> None:
+        dof = np.asarray([[10.0, 1.0], [20.0, 2.0]], dtype=np.float32)
+        reordered = reorder_dof_by_joint_names(dof, ["joint2", "joint1"], ["joint1", "joint2"], "unit")
+        np.testing.assert_allclose(reordered, np.asarray([[1.0, 10.0], [2.0, 20.0]], dtype=np.float32))
+
+    def test_robot_state_joint_names_rejects_unexpected_entries(self) -> None:
+        dof = np.asarray([[10.0, 1.0, 99.0], [20.0, 2.0, 88.0]], dtype=np.float32)
+        with self.assertRaisesRegex(ValueError, "unexpected joint_names entries"):
+            reorder_dof_by_joint_names(dof, ["joint2", "joint1", "joint3"], ["joint1", "joint2"], "unit")
+
+    def test_robot_state_validation_reorders_joint_named_motion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, robot_config = _write_tiny_robot(Path(tmpdir))
+            spec = load_robot_spec(robot_config)
+            dof = np.asarray([[1.0, 0.1], [2.0, 0.2], [3.0, 0.3], [4.0, 0.4]], dtype=np.float32)
+            motion = validate_robot_state_motion(_robot_state_motion(dof_pos=dof, joint_names=["joint2", "joint1"]), spec, "unit")
+            self.assertEqual(motion.joint_names, ["joint1", "joint2"])
+            self.assertAlmostEqual(float(motion.dof_pos[1, 0]), 0.2)
+            self.assertAlmostEqual(float(motion.dof_pos[1, 1]), 2.0)
+
+    def test_robot_state_csv_reader_returns_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _, robot_config = _write_tiny_robot(root)
+            spec = load_robot_spec(robot_config)
+            path = root / "state.csv"
+            _write_robot_state_csv(path, named_joints=False, frames=4)
+            data = read_robot_state_csv(
+                str(path),
+                source_name="robot_csv",
+                robot_spec=spec,
+                columns={
+                    "root_pos": ["root_pos_x", "root_pos_y", "root_pos_z"],
+                    "root_quat": ["root_quat_x", "root_quat_y", "root_quat_z", "root_quat_w"],
+                    "dof_pos": "xml_order",
+                },
+            )
+            self.assertIsInstance(data["state"], RobotStateMotion)
+            self.assertEqual(data["state"].dof_pos.shape, (4, 2))
+            self.assertAlmostEqual(data["state"].fps, 50.0)
+
+    def test_robot_state_npz_reader_returns_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _, robot_config = _write_tiny_robot(root)
+            spec = load_robot_spec(robot_config)
+            path = root / "state.npz"
+            _write_robot_state_npz(path, swapped_joint_names=True)
+            data = read_robot_state_npz(str(path), source_name="robot_npz", robot_spec=spec)
+            self.assertIsInstance(data["state"], RobotStateMotion)
+            self.assertEqual(data["state"].joint_names, ["joint1", "joint2"])
+            self.assertAlmostEqual(float(data["state"].dof_pos[1, 0]), 0.2)
+
+    def test_robot_state_converter_outputs_ufo_motion_dict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, robot_config = _write_tiny_robot(Path(tmpdir))
+            spec = load_robot_spec(robot_config)
+            dof = np.asarray([[0.1, 1.0], [0.2, 2.0], [0.3, 3.0], [0.4, 4.0]], dtype=np.float32)
+            motion = _robot_state_motion(dof_pos=dof)
+            converted = robot_state_to_ufo_motion(motion, spec, "unit")
+            self.assertEqual(converted["root_trans_offset"].shape, (4, 3))
+            self.assertEqual(converted["pose_aa"].shape, (4, 3, 3))
+            self.assertAlmostEqual(float(converted["pose_aa"][1, 1, 2]), 0.2)
+            self.assertAlmostEqual(float(converted["pose_aa"][1, 2, 1]), 2.0)
+            as_dict = robot_state_dict_to_ufo_motion_dict({"state": motion}, spec, "unit")
+            self.assertIn("state", as_dict)
 
     def test_robot_state_csv_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -187,20 +334,20 @@ class MotionDataAdapterTest(unittest.TestCase):
             _, robot_config = _write_tiny_robot(root)
             spec = load_robot_spec(robot_config)
             path = root / "state.npz"
-            np.savez(
-                path,
-                root_pos=np.zeros((4, 3), dtype=np.float32),
-                root_quat=np.tile(np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32), (4, 1)),
-                dof_pos=np.asarray([[1.0, 0.1], [2.0, 0.2], [3.0, 0.3], [4.0, 0.4]], dtype=np.float32),
-                joint_names=np.asarray(["joint2", "joint1"]),
-                fps=np.asarray(50),
-            )
+            _write_robot_state_npz(path, swapped_joint_names=True)
             data = load_robot_state_npz(str(path), source_name="robot_npz", robot_spec=spec)
             motion = data["state"]
             self.assertEqual(motion["pose_aa"].shape, (4, 3, 3))
             self.assertAlmostEqual(float(motion["dof_pos"][1, 0]), 0.2)
             self.assertAlmostEqual(float(motion["pose_aa"][1, 1, 2]), 0.2)
             self.assertAlmostEqual(float(motion["pose_aa"][1, 2, 1]), 2.0)
+
+    def test_ufo_pkl_old_path_continues_to_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sample.pkl"
+            joblib.dump(_motion_dict(fps=50), path)
+            data = load_motion_data_by_format("ufo_pkl", str(path), source_name="legacy")
+            self.assertEqual(list(data), ["tiny"])
 
     def test_clip_25_seconds_keeps_tail(self) -> None:
         clipped = clip_ufo_motion_dict(
@@ -309,7 +456,7 @@ class MotionDataAdapterTest(unittest.TestCase):
             path = prepare_manifest_dataset_path(manifest_path, "pkl", split="inference", cache_root=root / "cache")
             self.assertEqual(Path(path), train_path.resolve())
 
-    def test_manifest_auto_build_robot_state_source(self) -> None:
+    def test_manifest_auto_build_robot_state_csv_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             _, robot_config = _write_tiny_robot(root)
@@ -346,6 +493,36 @@ class MotionDataAdapterTest(unittest.TestCase):
             inference_path = prepare_manifest_dataset_path(manifest_path, "robot", split="inference", cache_root=root / "cache")
             self.assertTrue(inference_path.endswith("robot_full_ufo.pkl"))
             self.assertTrue(Path(inference_path).exists())
+
+    def test_manifest_auto_build_robot_state_npz_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _, robot_config = _write_tiny_robot(root)
+            npz_path = root / "state.npz"
+            _write_robot_state_npz(npz_path, frames=60, swapped_joint_names=True)
+            manifest_path = root / "robot_state_npz.yaml"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        f"robot_config: {robot_config.name}",
+                        "datasets:",
+                        "  - name: robot_npz",
+                        "    format: robot_state_npz",
+                        "    source_path: state.npz",
+                        "    weight: 1",
+                        "    auto_build:",
+                        "      train_clip_seconds: 10.0",
+                        "      clip_stride_seconds: 10.0",
+                        "      keep_short: true",
+                        "      min_clip_seconds: 1.0",
+                    ]
+                )
+            )
+            result = prepare_motion_manifest(manifest_path, cache_root=root / "cache")
+            self.assertEqual(len(result.train_data_paths), 1)
+            full_path = prepare_manifest_dataset_path(manifest_path, "robot_npz", split="inference", cache_root=root / "cache")
+            full_data = joblib.load(full_path)
+            self.assertAlmostEqual(float(full_data["state"]["dof_pos"][1, 0]), 0.2)
 
 
 if __name__ == "__main__":

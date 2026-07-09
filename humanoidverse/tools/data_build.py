@@ -81,6 +81,8 @@ def main(argv: list[str] | None = None) -> None:
         keep_short=args.keep_short,
         min_clip_seconds=args.min_clip_seconds,
     )
+    dataset = config["datasets"][0]
+    print(f"Detected RobotState schema via {dataset['format']} reader")
     manifest_path = write_manifest(config, args.out, force=args.force)
     print(f"Wrote data manifest: {manifest_path}")
 

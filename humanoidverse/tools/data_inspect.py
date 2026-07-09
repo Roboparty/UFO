@@ -426,8 +426,8 @@ def inspect_data_source(
 def _print_report(result: DataInspection) -> None:
     duration_min, duration_max = result.duration_range
     fps_values = result.fps_values
-    print("Motion data inspection")
-    print(f"  format: {result.format}")
+    print("Detected RobotState schema")
+    print(f"  reader: {result.format}")
     print(f"  files: {len(result.source_paths)}")
     print(f"  fps range: {min(fps_values):.6g} - {max(fps_values):.6g}")
     print(f"  duration range: {duration_min:.3f}s - {duration_max:.3f}s")

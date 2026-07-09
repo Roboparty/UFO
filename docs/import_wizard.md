@@ -14,6 +14,8 @@ These tools generate and check configuration files, then call the existing `Robo
 
 UFO's public data manifests intentionally expose only three motion formats:
 
+UFO's recommended import path is based on a RobotState schema: `root_pos`, `root_quat`, `dof_pos`, and `fps` or `time`. CSV and NPZ are currently supported file readers for this schema.
+
 - `ufo_pkl`: already processed UFO motion dictionaries, usually produced by UFO tools or existing retargeting pipelines.
 - `robot_state_csv`: robot-state CSV files containing root pose and joint positions, interpreted with a robot YAML config.
 - `robot_state_npz`: robot-state NPZ files containing root pose and joint positions, interpreted with a robot YAML config.
