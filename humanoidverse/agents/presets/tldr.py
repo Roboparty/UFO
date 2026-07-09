@@ -19,11 +19,11 @@ TRAIN_RUNTIME = {
     "log_every_updates": 384000,
     "update_agent_every": 1024,
     "num_seed_steps": 10240,
-    "num_agent_updates": 16,
+    "num_agent_updates": 128,
     "checkpoint_buffer": True,
     "use_trajectory_buffer": True,
     "buffer_size": 5120000,
-    "eval_every_steps": 9600000,
+    "eval_every_steps": 3200000,
 }
 
 
