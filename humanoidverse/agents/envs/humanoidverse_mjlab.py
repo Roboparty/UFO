@@ -347,7 +347,7 @@ def make_mjlab_ufo_env_cfg(
     auto_reset: bool,
     robot_training: dict[str, Any] | None = None,
 ):
-    """Create an MJLab ManagerBasedRlEnvCfg with original UFO G1 metadata."""
+    """Create an MJLab ManagerBasedRlEnvCfg with UFO robot metadata."""
     import mujoco
     from mjlab.actuator import DcMotorActuatorCfg
     from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
@@ -373,7 +373,7 @@ def make_mjlab_ufo_env_cfg(
     if not xml_path.exists():
         raise FileNotFoundError(f"MJCF asset not found: {xml_path}")
     if "actuatorfrcrange" in xml_path.read_text():
-        raise ValueError(f"MJLab G1 XML must not contain actuatorfrcrange: {xml_path}")
+        raise ValueError(f"MJLab robot XML must not contain actuatorfrcrange: {xml_path}")
 
     def spec_fn():
         spec = mujoco.MjSpec.from_file(str(xml_path))
@@ -513,7 +513,7 @@ def make_mjlab_ufo_env_cfg(
             mode="startup",
             func=mjlab_dr.body_com_offset,
             params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
+                "asset_cfg": SceneEntityCfg("robot", body_names=(str(config.robot.torso_name),)),
                 "operation": "add",
                 "ranges": {
                     0: tuple(float(x) for x in _to_list(base_com_range.x)),
@@ -622,9 +622,9 @@ class HumanoidVerseMjlabCore:
         missing_joints = [name for name in self.dof_names if name not in mjlab_joint_names]
         missing_bodies = [name for name in self.body_names if name not in mjlab_body_names]
         if missing_joints:
-            raise ValueError(f"MJLab G1 asset is missing joints from HumanoidVerse config: {missing_joints}")
+            raise ValueError(f"MJLab robot asset is missing joints from HumanoidVerse config: {missing_joints}")
         if missing_bodies:
-            raise ValueError(f"MJLab G1 asset is missing bodies from HumanoidVerse config: {missing_bodies}")
+            raise ValueError(f"MJLab robot asset is missing bodies from HumanoidVerse config: {missing_bodies}")
         self._joint_ids = torch.tensor([mjlab_joint_names.index(name) for name in self.dof_names], device=self.device, dtype=torch.long)
         self._body_ids = torch.tensor([mjlab_body_names.index(name) for name in self.body_names], device=self.device, dtype=torch.long)
 
@@ -654,6 +654,8 @@ class HumanoidVerseMjlabCore:
         self.rew_buf = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.extras: dict[str, Any] = {"aux_rewards": {}}
 
+        self._init_reward_scales()
+        self._validate_aux_reward_semantics(hv_config)
         self.feet_indices = torch.tensor([self.body_names.index(name) for name in hv_config.robot.contact_bodies], device=self.device, dtype=torch.long)
         self.torso_index = self.body_names.index(hv_config.robot.torso_name)
         penalized = []
@@ -664,7 +666,6 @@ class HumanoidVerseMjlabCore:
         self.right_ankle_dof_indices = torch.tensor([self.dof_names.index(n) for n in hv_config.robot.right_ankle_dof_names], device=self.device)
 
         self._init_motion_extend()
-        self._init_reward_scales()
         self.is_evaluating = False
         self.average_episode_length = 0.0
         self.last_episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -686,6 +687,26 @@ class HumanoidVerseMjlabCore:
         self.reward_penalty_reward_names = set(_to_list(self.config.rewards.reward_penalty_reward_names))
         self.use_reward_penalty_curriculum = bool(self.config.rewards.reward_penalty_curriculum)
         self.reward_penalty_scale = float(self.config.rewards.reward_initial_penalty_scale)
+
+    def _validate_aux_reward_semantics(self, hv_config) -> None:
+        contact_bodies = _to_list(hv_config.robot.get("contact_bodies", None))
+        foot_rewards = ("penalty_feet_ori", "penalty_slippage", "feet_heading_alignment")
+        for reward_name in foot_rewards:
+            if reward_name in self.reward_scales and len(contact_bodies) < 2:
+                raise ValueError(
+                    f"robot.contact_bodies must contain at least 2 bodies because reward '{reward_name}' is enabled"
+                )
+
+        if "penalty_ankle_roll" in self.reward_scales:
+            missing_fields = []
+            if len(_to_list(hv_config.robot.get("left_ankle_dof_names", None))) < 2:
+                missing_fields.append("robot.left_ankle_dof_names")
+            if len(_to_list(hv_config.robot.get("right_ankle_dof_names", None))) < 2:
+                missing_fields.append("robot.right_ankle_dof_names")
+            if missing_fields:
+                raise ValueError(
+                    f"{', '.join(missing_fields)} must contain at least 2 joints because reward 'penalty_ankle_roll' is enabled"
+                )
 
     def _update_average_episode_length(self, env_ids: torch.Tensor) -> None:
         if self.is_evaluating or len(env_ids) == 0:

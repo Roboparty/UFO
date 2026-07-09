@@ -23,11 +23,13 @@ from humanoidverse.mjlab_inference_utils import (
     checkpoint_load_device,
     load_mjlab_env_cfg,
     render_policy_frame,
-    resolve_project_path,
 )
 from humanoidverse.utils.helpers import export_meta_policy_as_onnx, get_backward_observation
-from humanoidverse.utils.motion_data import prepare_manifest_dataset_path
-from humanoidverse.utils.robot_spec import load_robot_training_spec
+from humanoidverse.utils.motion_data import prepare_manifest_dataset_path, prepare_manifest_robot_config_path
+from humanoidverse.utils.robot_spec import assert_robot_configs_compatible, load_robot_training_spec, resolve_robot_config_path
+
+
+DEFAULT_ROBOT_CONFIG = "configs/robots/g1_29dof.yaml"
 
 
 def _resize_nearest(frame: np.ndarray, height: int, width: int) -> np.ndarray:
@@ -89,6 +91,19 @@ def _export_model(model: torch.nn.Module, output_dir: Path) -> None:
     print(f"[INFO] Exported model to {output_dir / output_name}")
 
 
+def _resolve_tracking_robot_config(
+    cli_robot_config: str | Path | None,
+    manifest_robot_config: str | Path | None,
+) -> Path:
+    if cli_robot_config is not None and manifest_robot_config is not None:
+        return assert_robot_configs_compatible(cli_robot_config, manifest_robot_config)
+    if cli_robot_config is not None:
+        return resolve_robot_config_path(cli_robot_config)
+    if manifest_robot_config is not None:
+        return resolve_robot_config_path(manifest_robot_config)
+    return resolve_robot_config_path(DEFAULT_ROBOT_CONFIG)
+
+
 def run_tracking_inference(
     *,
     model_folder: Path,
@@ -115,8 +130,8 @@ def run_tracking_inference(
     if not checkpoint_dir.exists():
         raise FileNotFoundError(f"Missing checkpoint directory: {checkpoint_dir}")
 
-    default_robot_config = resolve_project_path("configs/robots/g1_29dof.yaml")
-    robot_training = load_robot_training_spec(robot_config or default_robot_config)
+    robot_config = _resolve_tracking_robot_config(robot_config, None)
+    robot_training = load_robot_training_spec(robot_config)
     robot_xml = Path(robot_training.robot.xml_path).expanduser().resolve()
     if not robot_xml.exists():
         raise FileNotFoundError(f"Missing robot XML: {robot_xml}")
@@ -243,11 +258,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-episode-length-s", type=float, default=10000.0)
     add_bool_arg(parser, "--export-onnx", True, "Export ONNX next to the checkpoint before inference.")
     args = parser.parse_args()
+    manifest_robot_config = None
     if args.data_manifest is not None:
         if args.data_path is not None:
             parser.error("--data-manifest and --data-path cannot be used together")
         if args.dataset is None:
             parser.error("--dataset is required when --data-manifest is provided")
+        manifest_robot_config = prepare_manifest_robot_config_path(args.data_manifest)
         args.data_path = Path(
             prepare_manifest_dataset_path(
                 args.data_manifest,
@@ -256,6 +273,7 @@ def parse_args() -> argparse.Namespace:
                 rebuild_cache=bool(args.rebuild_motion_cache),
             )
         )
+    args.robot_config = _resolve_tracking_robot_config(args.robot_config, manifest_robot_config)
     return args
 
 

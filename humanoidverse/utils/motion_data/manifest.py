@@ -137,6 +137,12 @@ def _manifest_robot_config_path(config: dict[str, Any], manifest_path: Path) -> 
     return _resolve_existing_path(robot_config, manifest_path.parent)
 
 
+def prepare_manifest_robot_config_path(manifest_path: str | Path) -> str | None:
+    manifest_path, config, _datasets = _load_manifest(manifest_path)
+    robot_config_path = _manifest_robot_config_path(config, manifest_path)
+    return str(robot_config_path) if robot_config_path is not None else None
+
+
 def _source_path_for_split(dataset: dict[str, Any], split: str, *, fallback_to_train: bool) -> tuple[Any, bool]:
     if split == "train":
         return dataset["train_path"], False

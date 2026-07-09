@@ -7,9 +7,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 import torch
+from omegaconf import OmegaConf
 
-from humanoidverse.train import _resolve_training_robot_config, build_ufo_mjlab_config, parse_args
-from humanoidverse.tracking_inference import _expert_qpos_from_obs, _target_states_from_obs
+from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabCore
+from humanoidverse.train import _resolve_training_robot_config, build_ufo_mjlab_config, parse_args as parse_train_args
+from humanoidverse.tracking_inference import (
+    _expert_qpos_from_obs,
+    _resolve_tracking_robot_config,
+    _target_states_from_obs,
+    parse_args as parse_tracking_args,
+)
 from humanoidverse.utils.robot_spec import load_robot_training_spec
 
 
@@ -147,7 +154,7 @@ class RobotConfigTrainingTest(unittest.TestCase):
             "--smoke",
         ]
         with patch.object(sys, "argv", argv):
-            args = parse_args()
+            args = parse_train_args()
         self.assertTrue(str(args.robot_config).endswith("configs/robots/g1_29dof.yaml"))
 
     def test_cli_manifest_robot_config_mismatch_errors(self) -> None:
@@ -155,6 +162,61 @@ class RobotConfigTrainingTest(unittest.TestCase):
             tiny_robot = _write_tiny_robot_with_training(Path(tmpdir))
             with self.assertRaisesRegex(ValueError, "does not match data manifest robot_config"):
                 _resolve_training_robot_config(tiny_robot, "configs/robots/g1_29dof.yaml")
+
+    def test_tracking_manifest_robot_config_is_used_when_cli_missing(self) -> None:
+        argv = [
+            "tracking_inference.py",
+            "--model-folder",
+            "/tmp/ufo_unit_model",
+            "--data-manifest",
+            "configs/data/example_robot_state_auto_build.yaml",
+            "--dataset",
+            "g1_robot_state_sample",
+            "--export-onnx",
+            "false",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = parse_tracking_args()
+        self.assertTrue(str(args.robot_config).endswith("configs/robots/g1_29dof.yaml"))
+
+    def test_tracking_cli_manifest_robot_config_mismatch_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tiny_robot = _write_tiny_robot_with_training(Path(tmpdir))
+            with self.assertRaisesRegex(ValueError, "does not match data manifest robot_config"):
+                _resolve_tracking_robot_config(tiny_robot, "configs/robots/g1_29dof.yaml")
+
+    def test_aux_foot_rewards_require_contact_bodies(self) -> None:
+        core = object.__new__(HumanoidVerseMjlabCore)
+        core.reward_scales = {"penalty_feet_ori": -1.0}
+        cfg = OmegaConf.create(
+            {
+                "robot": {
+                    "contact_bodies": ["left_foot"],
+                    "left_ankle_dof_names": ["left_ankle_pitch_joint", "left_ankle_roll_joint"],
+                    "right_ankle_dof_names": ["right_ankle_pitch_joint", "right_ankle_roll_joint"],
+                }
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "robot.contact_bodies.*penalty_feet_ori"):
+            core._validate_aux_reward_semantics(cfg)
+
+    def test_aux_ankle_reward_requires_both_ankle_fields(self) -> None:
+        core = object.__new__(HumanoidVerseMjlabCore)
+        core.reward_scales = {"penalty_ankle_roll": -1.0}
+        cfg = OmegaConf.create(
+            {
+                "robot": {
+                    "contact_bodies": ["left_foot", "right_foot"],
+                    "left_ankle_dof_names": ["left_ankle_pitch_joint"],
+                    "right_ankle_dof_names": [],
+                }
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "robot.left_ankle_dof_names, robot.right_ankle_dof_names.*penalty_ankle_roll",
+        ):
+            core._validate_aux_reward_semantics(cfg)
 
     def test_yaml_actuator_missing_joint_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
