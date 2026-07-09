@@ -690,12 +690,11 @@ class HumanoidVerseMjlabCore:
 
     def _validate_aux_reward_semantics(self, hv_config) -> None:
         contact_bodies = _to_list(hv_config.robot.get("contact_bodies", None))
-        foot_rewards = ("penalty_feet_ori", "penalty_slippage", "feet_heading_alignment")
-        for reward_name in foot_rewards:
-            if reward_name in self.reward_scales and len(contact_bodies) < 2:
-                raise ValueError(
-                    f"robot.contact_bodies must contain at least 2 bodies because reward '{reward_name}' is enabled"
-                )
+        if len(contact_bodies) < 2:
+            raise ValueError(
+                "robot.contact_bodies must contain at least 2 bodies because the current MJLab reward "
+                "implementation computes biped foot auxiliary terms unconditionally"
+            )
 
         if "penalty_ankle_roll" in self.reward_scales:
             missing_fields = []

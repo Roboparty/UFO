@@ -185,9 +185,9 @@ class RobotConfigTrainingTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not match data manifest robot_config"):
                 _resolve_tracking_robot_config(tiny_robot, "configs/robots/g1_29dof.yaml")
 
-    def test_aux_foot_rewards_require_contact_bodies(self) -> None:
+    def test_aux_rewards_require_two_contact_bodies_unconditionally(self) -> None:
         core = object.__new__(HumanoidVerseMjlabCore)
-        core.reward_scales = {"penalty_feet_ori": -1.0}
+        core.reward_scales = {}
         cfg = OmegaConf.create(
             {
                 "robot": {
@@ -197,7 +197,7 @@ class RobotConfigTrainingTest(unittest.TestCase):
                 }
             }
         )
-        with self.assertRaisesRegex(ValueError, "robot.contact_bodies.*penalty_feet_ori"):
+        with self.assertRaisesRegex(ValueError, "robot.contact_bodies.*biped foot auxiliary terms unconditionally"):
             core._validate_aux_reward_semantics(cfg)
 
     def test_aux_ankle_reward_requires_both_ankle_fields(self) -> None:
