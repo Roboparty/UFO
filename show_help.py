@@ -4,6 +4,15 @@
 
 
 def main() -> None:
+    title = [
+        " _    _   ______   ____ ",
+        "| |  | | |  ____| / __ \\",
+        "| |  | | | |__   | |  | |",
+        "| |  | | |  __|  | |  | |",
+        "| |__| | | |     | |__| |",
+        " \\____/  |_|      \\____/ ",
+    ]
+
     ufo = [
         "                 .-\"\"\"-.",
         "               .'  .-.  '.",
@@ -18,6 +27,8 @@ def main() -> None:
         "            /_/           \\_\\",
     ]
 
+    print("\n".join(title))
+    print()
     print("\n".join(ufo))
     print()
     print("UFO is coming, start your training now!")
