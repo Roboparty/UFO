@@ -1,8 +1,9 @@
-# UFO:
+# UFO: An **U**nsupervised Reinforcement Learning **F**ramework for Humanoid **CO**ntrol
 
-UFO is an unsupervised reinforcement learning framework for humanoid control,
-with training, motion-data import, and inference tools for MJLab-based humanoid
-policies.
+
+
+
+UFO is an unsupervised reinforcement learning framework for humanoid control, with training, motion-data import, and inference tools for MJLab-based humanoid policies.
 
 The codebase provides two training presets in one project:
 
