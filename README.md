@@ -3,9 +3,7 @@
 <p align="center">
   <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" width="420" />
 </p>
-<p align="center">
-  <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" width="420" />
-</p>
+
 
 UFO is an unsupervised reinforcement learning framework for humanoid control, with training, motion-data import, and inference tools for MJLab-based humanoid policies.
 
