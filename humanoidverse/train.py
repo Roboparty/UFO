@@ -272,8 +272,8 @@ def _init_distributed(device_index: int, world_size: int) -> None:
 
 
 def run_train(args: argparse.Namespace, log_dir: Path) -> None:
-    device, _local_rank, rank, world_size = _select_device_and_rank(args.seed)
-    _init_distributed(_local_rank, world_size)
+    device, device_index, rank, world_size = _select_device_and_rank(args.seed)
+    _init_distributed(device_index, world_size)
     seed = args.seed + rank
     cfg = build_ufo_mjlab_config(
         device=device,
