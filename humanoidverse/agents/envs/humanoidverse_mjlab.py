@@ -213,6 +213,14 @@ def _patch_humanoidverse_robot_config(config, robot_training: dict[str, Any] | N
         config.robot.motion.asset.assetRoot = str(xml_path.parent)
         config.robot.motion.asset.assetFileName = xml_path.name
         config.robot.motion.asset.urdfFileName = None
+    if "motion" in config.robot:
+        extend_config = []
+        for item in _to_list(config.robot.motion.get("extend_config", [])):
+            parent_name = str(item.get("parent_name", ""))
+            if parent_name in body_names:
+                extend_config.append(dict(item))
+        config.robot.motion.extend_config = extend_config
+        config.robot.motion.nums_extend_bodies = len(extend_config)
 
 
 def _actuator_params_from_training(dof_names: tp.Sequence[str], robot_training: dict[str, Any] | None) -> tuple[str, dict[str, list[float]]]:
