@@ -1,8 +1,8 @@
 # UFO: An **U**nsupervised Reinforcement Learning **F**ramework for Humanoid **CO**ntrol
 
-
-
-
+<p align="center">
+  <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" width="420" />
+</p>
 UFO is an unsupervised reinforcement learning framework for humanoid control, with training, motion-data import, and inference tools for MJLab-based humanoid policies.
 
 The codebase provides two training presets in one project:
@@ -15,6 +15,9 @@ The codebase provides two training presets in one project:
 Run commands from the repository root:
 
 ```bash
+git clone git@github.com:Xuewang01/UFO.git
+cd UFO
+python show_help.py
 uv sync
 ```
 
