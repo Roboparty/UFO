@@ -12,7 +12,7 @@ UFO is an unsupervised reinforcement learning framework for humanoid control, wi
 Run commands from the repository root:
 
 ```bash
-git clone [git@github.com:Xuewang01/UFO.git](https://github.com/Xuewang01/UFO.git)
+git clone https://github.com/Xuewang01/UFO.git
 cd BFMZero-mjlab
 uv sync
 ```
