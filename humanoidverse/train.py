@@ -209,6 +209,25 @@ def build_ufo_mjlab_config(
     )
 
 
+def _resolve_cuda_device_index(local_rank: int) -> int:
+    import torch
+
+    visible_device_count = torch.cuda.device_count()
+    if visible_device_count <= 0:
+        raise RuntimeError("CUDA_VISIBLE_DEVICES is set but PyTorch sees no CUDA devices.")
+    if visible_device_count == 1:
+        # Some launchers expose exactly one GPU per worker. In that mode each
+        # process must use cuda:0 even when LOCAL_RANK is greater than zero.
+        return 0
+    if local_rank < visible_device_count:
+        return local_rank
+    raise RuntimeError(
+        "LOCAL_RANK exceeds visible CUDA device count: "
+        f"local_rank={local_rank}, visible_device_count={visible_device_count}, "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')!r}"
+    )
+
+
 def _select_device_and_rank(seed: int) -> tuple[str, int, int, int]:
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if cuda_visible == "":
@@ -224,11 +243,12 @@ def _select_device_and_rank(seed: int) -> tuple[str, int, int, int]:
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    os.environ["MUJOCO_EGL_DEVICE_ID"] = str(local_rank)
-    return f"cuda:{local_rank}", local_rank, rank, world_size
+    device_index = _resolve_cuda_device_index(local_rank)
+    os.environ["MUJOCO_EGL_DEVICE_ID"] = str(device_index)
+    return f"cuda:{device_index}", device_index, rank, world_size
 
 
-def _init_distributed(local_rank: int, world_size: int) -> None:
+def _init_distributed(device_index: int, world_size: int) -> None:
     if world_size <= 1:
         return
     from datetime import timedelta
@@ -236,7 +256,7 @@ def _init_distributed(local_rank: int, world_size: int) -> None:
     import torch
     import torch.distributed as dist
 
-    torch.cuda.set_device(local_rank)
+    torch.cuda.set_device(device_index)
     if not dist.is_initialized():
         init_kwargs = {
             "backend": "nccl",
@@ -244,7 +264,7 @@ def _init_distributed(local_rank: int, world_size: int) -> None:
             "timeout": timedelta(hours=2),
         }
         try:
-            init_kwargs["device_id"] = torch.device(f"cuda:{local_rank}")
+            init_kwargs["device_id"] = torch.device(f"cuda:{device_index}")
             dist.init_process_group(**init_kwargs)
         except TypeError:
             init_kwargs.pop("device_id", None)
