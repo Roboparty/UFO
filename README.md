@@ -23,6 +23,21 @@ python show_help.py
 uv sync
 ```
 
+### Git LFS Motion Data
+
+The bundled G1 LaFAN training pickle is stored with Git LFS. Install Git LFS and
+pull the real binary data after cloning:
+
+```bash
+git lfs install
+git lfs pull
+ls -lh humanoidverse/data/lafan_29dof_10s-clipped.pkl
+```
+
+The file should be roughly 205 MB. If it is only a few bytes or starts with
+`version https://git-lfs.github.com/spec/v1`, you only have the Git LFS pointer
+file and must run `git lfs pull`.
+
 If you use W&B logging, log in before launching multi-GPU training. Multi-process
 training should not depend on an interactive login prompt:
 
