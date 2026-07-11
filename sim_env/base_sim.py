@@ -3,6 +3,7 @@ import mujoco.viewer
 import time
 from threading import Thread
 import sched
+import os
 
 import sys
 sys.path.append(".")
