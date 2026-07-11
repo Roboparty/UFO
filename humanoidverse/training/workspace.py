@@ -77,6 +77,23 @@ def _trajectory_output_keys(agent: Agent) -> list[str]:
     return keys
 
 
+def _accumulate_metrics(
+    total_metrics: dict[str, torch.Tensor] | None,
+    metric_update_counts: dict[str, int],
+    metrics: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], dict[str, int]]:
+    if total_metrics is None:
+        total_metrics = {}
+    for key, value in metrics.items():
+        value = value.float()
+        if key in total_metrics:
+            total_metrics[key] = total_metrics[key] + value
+        else:
+            total_metrics[key] = value.clone()
+        metric_update_counts[key] = metric_update_counts.get(key, 0) + 1
+    return total_metrics, metric_update_counts
+
+
 class TrainConfig(BaseConfig):
     # The "pydantic.Field" field is used to explicitely tell which field is the discriminative
     # feature
@@ -617,6 +634,7 @@ class Workspace:
         truncated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
         done = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
         total_metrics, context = None, None
+        metric_update_counts: dict[str, int] = {}
         start_time = time.time()
         fps_start_time = time.time()
         checkpoint_time_checker = EveryNStepsChecker(self._checkpoint_global_time, self.cfg.checkpoint_every_steps)
@@ -931,18 +949,17 @@ class Workspace:
                         sync_floating_buffers(self.agent._model)
                     if self.cfg.distributed_sync and self.cfg.distributed_average_metrics:
                         metrics = average_metrics(metrics)
-                    if total_metrics is None:
-                        num_metrics_updates = 1
-                        total_metrics = {k: metrics[k].float().clone() for k in metrics.keys()}
-                    else:
-                        num_metrics_updates += 1
-                        total_metrics = {k: total_metrics[k] + metrics[k].float() for k in metrics.keys()}
+                    total_metrics, metric_update_counts = _accumulate_metrics(
+                        total_metrics,
+                        metric_update_counts,
+                        metrics,
+                    )
 
             if log_time_checker.check(global_time) and total_metrics is not None:
                 log_time_checker.update_last_step(global_time)
                 m_dict = {}
                 for k in sorted(list(total_metrics.keys())):
-                    tmp = total_metrics[k] / num_metrics_updates
+                    tmp = total_metrics[k] / metric_update_counts[k]
                     m_dict[k] = np.round(tmp.mean().item(), 6)
                 m_dict.update(self._get_torso_contact_force_metrics(train_env))
                 m_dict["duration [minutes]"] = (time.time() - start_time) / 60
@@ -968,6 +985,7 @@ class Workspace:
                 if self._write_shared_artifacts:
                     print(m_dict)
                 total_metrics = None
+                metric_update_counts = {}
                 fps_start_time = time.time()
                 m_dict["timestep"] = global_time
                 m_dict["local_timestep"] = local_time

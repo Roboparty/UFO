@@ -4,9 +4,11 @@ import sys
 import unittest
 from unittest.mock import patch
 
+import torch
+
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.train import build_ufo_mjlab_config, parse_args
-from humanoidverse.training.workspace import _trajectory_output_keys
+from humanoidverse.training.workspace import _accumulate_metrics, _trajectory_output_keys
 
 
 class UpdateZCliTest(unittest.TestCase):
@@ -58,6 +60,24 @@ class UpdateZCliTest(unittest.TestCase):
             wandb_project="test",
         )
         self.assertIn("aux_rewards", _trajectory_output_keys(selected["agent_cfg"]))
+
+    def test_metric_accumulation_accepts_tldr_phase_changes(self) -> None:
+        totals, counts = _accumulate_metrics(
+            None,
+            {},
+            {"tldr_te_loss": torch.tensor(2.0)},
+        )
+        totals, counts = _accumulate_metrics(
+            totals,
+            counts,
+            {
+                "tldr_te_loss": torch.tensor(4.0),
+                "disc_wgan_gp_loss": torch.tensor(6.0),
+            },
+        )
+        self.assertEqual(counts, {"tldr_te_loss": 2, "disc_wgan_gp_loss": 1})
+        self.assertEqual((totals["tldr_te_loss"] / counts["tldr_te_loss"]).item(), 3.0)
+        self.assertEqual((totals["disc_wgan_gp_loss"] / counts["disc_wgan_gp_loss"]).item(), 6.0)
 
 
 if __name__ == "__main__":
