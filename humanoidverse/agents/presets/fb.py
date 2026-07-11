@@ -23,7 +23,7 @@ TRAIN_RUNTIME = {
     "checkpoint_buffer": True,
     "use_trajectory_buffer": True,
     "buffer_size": 5120000,
-    "eval_every_steps": 9600000,
+    "eval_every_steps": 3200000,
 }
 
 
