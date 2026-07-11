@@ -7,7 +7,7 @@ If you follow this file from top to bottom, you should end up with:
 1. a working Python environment for the teleop bridge,
 2. GMR installed for online retargeting,
 3. XRoboToolkit PC service installed on the host machine,
-4. the XRoboToolkit Python binding installed,
+4. the XRoboToolkit Python binding installed with callback APIs or polling APIs,
 5. the PICO headset configured and connected,
 6. the teleop ZMQ bridge running and ready to feed UFO-Deploy's realtime `z` encoder.
 
@@ -24,6 +24,7 @@ The included files are:
 - `xrobot_teleop_to_pose_zmq_server.py`
 - `default_mimic_obs.py`
 - `teleop_pose_50hz.sh`
+- `teleop_pose_50hz_onboard.sh`
 
 ## Before you start
 
@@ -114,7 +115,7 @@ After installation, start the PC service application from the Ubuntu application
 
 ## Step 5. Build and install the XRoboToolkit Python binding
 
-The teleop bridge uses `XRobotStreamer`, and `XRobotStreamer` depends on the Python module `xrobotoolkit_sdk`.
+The teleop bridge depends on the Python module `xrobotoolkit_sdk`. It uses callback APIs when they are available and falls back to polling APIs when running with a polling-only SDK.
 
 ### 5.1 Clone the binding repository
 
@@ -242,7 +243,10 @@ This starts the retargeting server used by UFO-Deploy:
 - request socket: `tcp://*:28701`
 - reply socket: `tcp://*:28702`
 - controller socket: `tcp://*:28703`
+- optional controller PUB socket: `tcp://*:28704`
 - control publish rate: `50 Hz`
+
+For the browser retarget viewer, pass `--web-visualize --web-port 8080` to `xrobot_teleop_to_pose_zmq_server.py` or use `WEB_VISUALIZE=1 scripts/teleop/teleop_pose_50hz_onboard.sh` on the robot.
 
 Important: During the first few seconds after starting the script, remain in a stable standing posture. The script adjusts the z-axis offset based on foot height; if you are in another pose, the estimated z-offset may affect gait quality.
 
@@ -265,6 +269,7 @@ More concretely:
   - request channel: receives pose requests from `realtime_z_server.py`
   - reply channel: sends retargeted pose frames back
   - control channel: publishes XR controller button state
+- The optional controller PUB channel is for direct Pico-to-policy control without consuming the realtime `z` server's controller channel.
 - The reply payload contains `root_pos`, `root_quat`, and `dof_pos` for each returned frame.
 - The realtime `z` server uses the controller channel to switch between follow and freeze modes.
 - The bridge keeps a short retarget history and samples with a small lookback window to reduce jitter.

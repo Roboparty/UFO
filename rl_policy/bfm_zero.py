@@ -57,6 +57,8 @@ class BFMZeroPolicy:
         exp_config: Dict[str, Any],
         model_path: str,
         rl_rate: int = 50,
+        pico_control: bool = False,
+        pico_control_addr: str = "tcp://127.0.0.1:28704",
     ) -> None:
         robot_type = robot_config["ROBOT_TYPE"]
         if robot_type == "g1_real":
@@ -116,8 +118,12 @@ class BFMZeroPolicy:
             for name in self.policy_joint_names
         ]
 
-        # Keypress control state
+        # Keypress/control state
         self.use_policy_action = False
+        self.pico_control_enabled = bool(pico_control)
+        self.pico_control_addr = str(pico_control_addr)
+        self.pico_control_sock = None
+        self.last_pico_buttons: Dict[str, bool] = {}
 
         self.first_time_init = True
         self.init_count = 0
@@ -163,6 +169,9 @@ class BFMZeroPolicy:
                 target=self.start_key_listener, daemon=True
             )
             self.key_listener_thread.start()
+
+        if self.pico_control_enabled:
+            self.setup_pico_control()
 
         # Setup observations after all processors are ready
         self.setup_observations()
@@ -470,6 +479,8 @@ class BFMZeroPolicy:
             if self.use_joystick:
                 # print(f"Debug::process_joystick:")
                 self.process_joystick_input()
+            if self.pico_control_enabled:
+                self.process_pico_control_input()
 
             if not self.state_processor._prepare_low_state():
                 print("low state not ready.")
@@ -520,6 +531,87 @@ class BFMZeroPolicy:
         elapsed = time.perf_counter() - loop_start
         if elapsed > self.rl_dt:
             logger.warning(f"RL step took {elapsed:.6f} seconds, expected {self.rl_dt} seconds")
+
+
+    def setup_pico_control(self):
+        """Subscribe to Pico controller button JSON from the onboard teleop server."""
+        try:
+            import zmq
+        except ImportError as exc:
+            logger.warning(f"Pico control disabled because pyzmq is unavailable: {exc}")
+            self.pico_control_enabled = False
+            return
+
+        ctx = zmq.Context.instance()
+        sock = ctx.socket(zmq.SUB)
+        sock.setsockopt(zmq.SUBSCRIBE, b"")
+        sock.setsockopt(zmq.CONFLATE, 1)
+        sock.setsockopt(zmq.RCVTIMEO, 0)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(self.pico_control_addr)
+        self.pico_control_sock = sock
+        logger.info(f"Pico policy control enabled: {self.pico_control_addr}")
+        logger.info("Pico controls: A=init, A+B=enable policy/start tracking, B=stop, X=reset")
+
+    def process_pico_control_input(self):
+        if self.pico_control_sock is None:
+            return
+
+        try:
+            import zmq
+        except ImportError:
+            return
+
+        latest_buttons = None
+        while True:
+            try:
+                raw = self.pico_control_sock.recv_string(flags=zmq.NOBLOCK)
+            except zmq.Again:
+                break
+            except Exception as exc:
+                logger.debug(f"Pico control receive failed: {exc}")
+                return
+
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+            buttons = payload.get("controller_buttons") if isinstance(payload, dict) else None
+            if isinstance(buttons, dict):
+                latest_buttons = {str(k): bool(v) for k, v in buttons.items()}
+
+        if latest_buttons is None:
+            return
+
+        self.handle_pico_buttons(latest_buttons)
+
+    def handle_pico_buttons(self, buttons: Dict[str, bool]):
+        prev = self.last_pico_buttons
+        a = bool(buttons.get("right_key_one", False))
+        b = bool(buttons.get("right_key_two", False))
+        x = bool(buttons.get("left_key_one", False))
+
+        prev_a = bool(prev.get("right_key_one", False))
+        prev_b = bool(prev.get("right_key_two", False))
+        prev_x = bool(prev.get("left_key_one", False))
+
+        combo = a and b
+        prev_combo = prev_a and prev_b
+        if combo and not prev_combo:
+            logger.info("Pico A+B: enable policy and start tracking")
+            self.handle_joystick_button("R1")
+            self.handle_joystick_button("B")
+        elif a and not prev_a and not b:
+            logger.info("Pico A: init")
+            self.handle_joystick_button("A")
+        elif b and not prev_b and not a:
+            logger.info("Pico B: stop policy")
+            self.handle_joystick_button("R2")
+        elif x and not prev_x:
+            logger.info("Pico X: reset")
+            self.handle_joystick_button("X")
+
+        self.last_pico_buttons = buttons
 
 
     def process_joystick_input(self):
@@ -733,6 +825,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--task", type=str, help="task type: tracking or reward or single or stiching", default="track-walk"
     )
+    parser.add_argument(
+        "--pico-control", action="store_true",
+        help="Enable Pico controller buttons from the onboard teleop server for policy mode control.",
+    )
+    parser.add_argument(
+        "--pico-control-addr", type=str, default="tcp://127.0.0.1:28704",
+        help="ZMQ SUB address for Pico controller button JSON.",
+    )
 
     args = parser.parse_args()
 
@@ -752,5 +852,7 @@ if __name__ == "__main__":
         model_path=model_path,
         exp_config=exp_config,
         rl_rate=50,
+        pico_control=bool(args.pico_control),
+        pico_control_addr=str(args.pico_control_addr),
     )
     policy.run()

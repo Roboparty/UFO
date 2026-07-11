@@ -6,6 +6,7 @@ Minimal deployment code for running a BFM-Zero-style Unitree G1 policy in:
 - local PICO/GMR teleop sim2sim
 - onboard G1 sim2real
 - teleop sim2real, where the workstation retargets PICO motion, encodes realtime latent `z`, and the robot subscribes over ZMQ
+- onboard PICO teleop sim2real, where PICO connects directly to the robot
 
 This README is written for a new user cloning the repository from GitHub.
 
@@ -21,8 +22,9 @@ Workstation:
 Teleop workstation:
 
 - `general_motion_retargeting`
-- patched `xrobotoolkit_sdk` with callback APIs
+- patched `xrobotoolkit_sdk` with callback APIs or polling APIs
 - PICO/XRobot runtime set up outside this repo
+- optional `viser` and `mjviser` for the browser retarget viewer
 
 Robot:
 
@@ -89,11 +91,14 @@ config/exp/tracking/teleop.yaml
 rl_policy/bfm_zero.py
 sim_env/base_sim.py
 scripts/realtime/realtime_z_server.py
+scripts/realtime/run_realtime_z_server_onboard.sh
 scripts/teleop/teleop_pose_50hz.sh
+scripts/teleop/teleop_pose_50hz_onboard.sh
 scripts/teleop/xrobot_teleop_to_pose_zmq_server.py
+run_g1_teleop_policy_onboard.sh
 ```
 
-The only kept shell launcher is `scripts/teleop/teleop_pose_50hz.sh`; all policy and simulator commands are explicit command lines.
+The local shell launcher is `scripts/teleop/teleop_pose_50hz.sh`. The `*_onboard.sh` launchers are for direct PICO-to-robot teleop sim2real.
 
 ## Recommended Order
 
@@ -234,7 +239,6 @@ source /home/unitree/bfm0real_venv/bin/activate
 export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
 export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
 export PYTHONPATH=/home/unitree/unitree_sdk2_bfm/build/lib:$PYTHONPATH
-export BFM_RL_PROFILE=1
 ```
 
 Check robot dependencies:
@@ -273,8 +277,6 @@ source /home/unitree/bfm0real_venv/bin/activate
 export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
 export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
 export PYTHONPATH=/home/unitree/unitree_sdk2_bfm/build/lib:$PYTHONPATH
-export BFM_RL_PROFILE=1
-
 python rl_policy/bfm_zero.py \
   --robot_config config/robot/g1_real.yaml \
   --policy_config config/policy/g1_policy.yaml \
@@ -298,6 +300,54 @@ Use the physical e-stop for emergencies.
 ## 5. Teleop Sim2Real
 
 The workstation publishes realtime `z`; the robot subscribes to it.
+
+For direct PICO-to-robot teleop, run all three onboard launchers on the robot instead. PICO should connect to the robot IP, and `config/exp/tracking/teleop.yaml` can keep:
+
+```yaml
+ctx_source: zmq
+ctx_zmq_addr: tcp://127.0.0.1:28711
+ctx_norm_ref: 16.0
+```
+
+Robot terminal A, PICO/GMR retargeting with browser viewer and Pico button PUB:
+
+```bash
+cd /home/unitree/UFO-Deploy
+scripts/teleop/teleop_pose_50hz_onboard.sh
+```
+
+Open the viewer from another machine on the same network:
+
+```text
+http://<ROBOT_IP>:8080
+```
+
+Robot terminal B, realtime `z` publisher:
+
+```bash
+cd /home/unitree/UFO-Deploy
+scripts/realtime/run_realtime_z_server_onboard.sh
+```
+
+Robot terminal C, real policy controlled by Pico buttons:
+
+```bash
+cd /home/unitree/UFO-Deploy
+source /home/unitree/bfm0real_venv/bin/activate
+UFO_REAL_ROBOT_OK=1 VENV_PATH=/home/unitree/bfm0real_venv/bin/activate \
+  ./run_g1_teleop_policy_onboard.sh
+```
+
+PICO policy controls:
+
+```text
+A      interpolate to default standing pose
+A+B    enable policy action and start tracking
+B      stop policy action and hold current joints
+X      reset tracking motion
+```
+
+The older split workstation/robot flow is still supported:
 
 On the workstation, find the IP reachable from the robot:
 
@@ -354,8 +404,6 @@ source /home/unitree/bfm0real_venv/bin/activate
 export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
 export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
 export PYTHONPATH=/home/unitree/unitree_sdk2_bfm/build/lib:$PYTHONPATH
-export BFM_RL_PROFILE=1
-
 python rl_policy/bfm_zero.py \
   --robot_config config/robot/g1_real.yaml \
   --policy_config config/policy/g1_policy.yaml \

@@ -19,7 +19,9 @@ import multiprocessing as mp
 import threading
 import time
 from collections import deque
+from concurrent.futures import Future
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -64,6 +66,11 @@ def _load_runtime_dependencies() -> None:
     global GMR, RobotMotionViewer, quat_mul_np, xrt
 
     try:
+        # Import torch first on Jetson to avoid static TLS allocation failures from libtorch.
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            pass
         from general_motion_retargeting import GeneralMotionRetargeting as _GMR
         from general_motion_retargeting import RobotMotionViewer as _RobotMotionViewer
         from general_motion_retargeting.rot_utils import quat_mul_np as _quat_mul_np
@@ -79,21 +86,101 @@ def _load_runtime_dependencies() -> None:
             "Failed to import 'xrobotoolkit_sdk'. Install the patched SDK in the active Python environment."
         ) from exc
 
-    for name in (
+    if not hasattr(_xrt, "init"):
+        raise ImportError("Installed xrobotoolkit_sdk does not expose init().")
+
+    callback_names = (
         "register_frame_callback",
         "clear_frame_callback",
         "has_frame_callback",
+    )
+    polling_names = (
+        "is_body_data_available",
+        "get_body_joints_pose",
+        "get_body_timestamp_ns",
+        "get_A_button",
+        "get_B_button",
+        "get_X_button",
+        "get_Y_button",
+    )
+    if not all(hasattr(_xrt, name) for name in callback_names) and not all(
+        hasattr(_xrt, name) for name in polling_names
     ):
-        if not hasattr(_xrt, name):
-            raise ImportError(
-                "Installed xrobotoolkit_sdk does not expose callback APIs. "
-                "Reinstall the patched XRoboToolkit-PC-Service-Pybind build."
-            )
+        raise ImportError(
+            "Installed xrobotoolkit_sdk exposes neither callback APIs nor the required polling APIs."
+        )
 
     GMR = _GMR
     RobotMotionViewer = _RobotMotionViewer
     quat_mul_np = _quat_mul_np
     xrt = _xrt
+
+
+class _ShutdownTolerantExecutor:
+    def __init__(self, executor: Any) -> None:
+        self._executor = executor
+
+    def submit(self, *args: Any, **kwargs: Any) -> Future:
+        try:
+            return self._executor.submit(*args, **kwargs)
+        except RuntimeError as exc:
+            if "shutdown" not in str(exc):
+                raise
+            future: Future = Future()
+            future.set_result(None)
+            return future
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._executor, name)
+
+
+class WebRetargetViewer:
+    def __init__(self, mujoco_xml: str, port: int) -> None:
+        try:
+            import mujoco
+            import viser
+            from mjviser import ViserMujocoScene
+        except ImportError as exc:
+            raise ImportError(
+                "--web-visualize requires mujoco, viser, and mjviser in the active Python environment."
+            ) from exc
+
+        xml_path = Path(mujoco_xml).expanduser()
+        if not xml_path.is_file():
+            raise FileNotFoundError(f"web viewer MuJoCo XML not found: {xml_path}")
+
+        self.mujoco = mujoco
+        self.model = mujoco.MjModel.from_xml_path(str(xml_path))
+        self.data = mujoco.MjData(self.model)
+        self.server = viser.ViserServer(port=int(port), label="ufo-retarget")
+        executor = _ShutdownTolerantExecutor(self.server._thread_executor)
+        self.server._thread_executor = executor
+        self.server.scene._thread_executor = executor
+        self.server.gui._thread_executor = executor
+        self.scene = ViserMujocoScene(self.server, self.model, num_envs=1)
+        self.scene.create_visualization_gui(camera_distance=3.0, camera_azimuth=120.0, camera_elevation=20.0)
+        self.step(np.zeros(int(self.model.nq), dtype=np.float32))
+        print(f"[web-retarget-viewer] http://localhost:{self.server.get_port()}")
+
+    def step(self, qpos: np.ndarray) -> None:
+        qpos_arr = np.asarray(qpos, dtype=np.float64).reshape(-1)
+        self.data.qpos[:] = 0.0
+        self.data.qvel[:] = 0.0
+        n = min(int(self.model.nq), qpos_arr.shape[0])
+        self.data.qpos[:n] = qpos_arr[:n]
+        self.mujoco.mj_forward(self.model, self.data)
+        self.scene.update_from_arrays(
+            body_xpos=self.data.xpos[None, ...],
+            body_xmat=self.data.xmat.reshape(1, -1, 3, 3),
+            mocap_pos=np.zeros((1, 0, 3), dtype=np.float64),
+            mocap_quat=np.zeros((1, 0, 4), dtype=np.float64),
+            qpos=self.data.qpos[None, ...],
+            qvel=self.data.qvel[None, ...],
+            ctrl=self.data.ctrl[None, ...] if self.model.nu > 0 else None,
+        )
+
+    def close(self) -> None:
+        self.server.stop()
 
 
 @dataclass
@@ -109,6 +196,10 @@ class _RetargetWorkerRuntime:
     }
 
     def __init__(self, worker_config: Dict[str, Any]):
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            pass
         from general_motion_retargeting import GeneralMotionRetargeting
         from general_motion_retargeting.rot_utils import quat_mul_np as worker_quat_mul_np
 
@@ -351,6 +442,9 @@ class LowLatencyTeleopPoseZMQServer:
         self.req_sock = None
         self.rep_sock = None
         self.ctrl_sock = None
+        self.ctrl_pub_sock = None
+        self.web_viewer = None
+        self.xrt_input_mode = "uninitialized"
 
         self.default_qpos = self._build_default_qpos()
         self.last_controller_buttons: Dict[str, Any] = self._default_controller_buttons()
@@ -412,6 +506,7 @@ class LowLatencyTeleopPoseZMQServer:
         self.control_thread = None
         self.stats_thread = None
         self.visualization_thread = None
+        self.xrt_poll_thread = None
 
         self.mp_ctx = mp.get_context("spawn")
         self.raw_send_conn = None
@@ -513,6 +608,89 @@ class LowLatencyTeleopPoseZMQServer:
             "right_grip": float(right.get("grip", 0.0)) > 1e-4,
             "right_axis": _axis(right.get("axis", [0.0, 0.0])),
         }
+
+    @staticmethod
+    def _xrt_has_callback_api() -> bool:
+        return all(
+            hasattr(xrt, name)
+            for name in ("register_frame_callback", "clear_frame_callback", "has_frame_callback")
+        )
+
+    @staticmethod
+    def _xrt_has_polling_api() -> bool:
+        return all(
+            hasattr(xrt, name)
+            for name in (
+                "is_body_data_available",
+                "get_body_joints_pose",
+                "get_body_timestamp_ns",
+                "get_A_button",
+                "get_B_button",
+                "get_X_button",
+                "get_Y_button",
+            )
+        )
+
+    @staticmethod
+    def _safe_xrt_call(name: str, default: Any = None) -> Any:
+        fn = getattr(xrt, name, None)
+        if fn is None:
+            return default
+        try:
+            return fn()
+        except Exception:
+            return default
+
+    @staticmethod
+    def _axis(values: Any) -> list[float]:
+        if isinstance(values, (list, tuple)) and len(values) >= 2:
+            try:
+                return [float(values[0]), float(values[1])]
+            except Exception:
+                return [0.0, 0.0]
+        return [0.0, 0.0]
+
+    def _build_polling_snapshot(self) -> Dict[str, Any]:
+        body_available = bool(self._safe_xrt_call("is_body_data_available", False))
+        body_timestamp_ns = int(self._safe_xrt_call("get_body_timestamp_ns", 0) or 0)
+        top_timestamp_ns = int(self._safe_xrt_call("get_time_stamp_ns", body_timestamp_ns) or body_timestamp_ns)
+        poses = None
+        if body_available:
+            poses = self._safe_xrt_call("get_body_joints_pose", None)
+
+        return {
+            "timestamp_ns": top_timestamp_ns,
+            "controllers": {
+                "left": {
+                    "primary_button": bool(self._safe_xrt_call("get_X_button", False)),
+                    "secondary_button": bool(self._safe_xrt_call("get_Y_button", False)),
+                    "axis_click": bool(self._safe_xrt_call("get_left_axis_click", False)),
+                    "trigger": float(self._safe_xrt_call("get_left_trigger", 0.0) or 0.0),
+                    "grip": float(self._safe_xrt_call("get_left_grip", 0.0) or 0.0),
+                    "axis": self._axis(self._safe_xrt_call("get_left_axis", [0.0, 0.0])),
+                },
+                "right": {
+                    "primary_button": bool(self._safe_xrt_call("get_A_button", False)),
+                    "secondary_button": bool(self._safe_xrt_call("get_B_button", False)),
+                    "axis_click": bool(self._safe_xrt_call("get_right_axis_click", False)),
+                    "trigger": float(self._safe_xrt_call("get_right_trigger", 0.0) or 0.0),
+                    "grip": float(self._safe_xrt_call("get_right_grip", 0.0) or 0.0),
+                    "axis": self._axis(self._safe_xrt_call("get_right_axis", [0.0, 0.0])),
+                },
+            },
+            "body": {
+                "available": body_available,
+                "timestamp_ns": body_timestamp_ns,
+                "poses": poses,
+            },
+        }
+
+    def _xrt_poll_loop(self) -> None:
+        period_s = 1.0 / max(1e-6, float(self.args.xr_poll_hz))
+        while not self.stop_event.is_set():
+            snapshot = self._build_polling_snapshot()
+            self._on_vr_frame(snapshot)
+            self.stop_event.wait(timeout=period_s)
 
     @staticmethod
     def _serialize_qpos_frame(qpos: np.ndarray) -> Dict[str, Any]:
@@ -822,7 +1000,7 @@ class LowLatencyTeleopPoseZMQServer:
             self._append_retarget_frame(recv_ns=recv_ns, qpos=qpos_curr)
             self.retarget_count += 1
 
-            if self.viewer is not None:
+            if self.viewer is not None or self.web_viewer is not None:
                 with self.vis_lock:
                     self.latest_vis_qpos = qpos_curr.astype(np.float32, copy=True)
                     self.latest_vis_human_motion = payload.get("human_motion_data")
@@ -973,17 +1151,26 @@ class LowLatencyTeleopPoseZMQServer:
                 "t_ms": int(time.time() * 1000),
                 "controller_buttons": buttons,
             }
+            payload_raw = json.dumps(payload)
             try:
-                self.ctrl_sock.send_string(json.dumps(payload), flags=zmq.NOBLOCK)
+                self.ctrl_sock.send_string(payload_raw, flags=zmq.NOBLOCK)
             except zmq.Again:
                 pass
             except Exception as exc:
                 print(f"[Warning] control send failed: {exc}")
 
+            if self.ctrl_pub_sock is not None:
+                try:
+                    self.ctrl_pub_sock.send_string(payload_raw, flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    pass
+                except Exception as exc:
+                    print(f"[Warning] control pub send failed: {exc}")
+
             self.stop_event.wait(timeout=period_s)
 
     def _visualization_loop(self) -> None:
-        if self.viewer is None:
+        if self.viewer is None and self.web_viewer is None:
             return
 
         period_s = 1.0 / float(self.vis_fps)
@@ -993,20 +1180,27 @@ class LowLatencyTeleopPoseZMQServer:
                 human_motion_data = self.latest_vis_human_motion
 
             if qpos is not None:
-                try:
-                    self.viewer.step(
-                        root_pos=qpos[:3],
-                        root_rot=qpos[3:7],
-                        dof_pos=qpos[7:36],
-                        human_motion_data=human_motion_data,
-                        rate_limit=False,
-                        follow_camera=True,
-                    )
-                except Exception as exc:
-                    print(f"[Warning] visualization failed, disabling viewer: {exc}")
-                    self.viewer.close()
-                    self.viewer = None
-                    return
+                if self.viewer is not None:
+                    try:
+                        self.viewer.step(
+                            root_pos=qpos[:3],
+                            root_rot=qpos[3:7],
+                            dof_pos=qpos[7:36],
+                            human_motion_data=human_motion_data,
+                            rate_limit=False,
+                            follow_camera=True,
+                        )
+                    except Exception as exc:
+                        print(f"[Warning] visualization failed, disabling viewer: {exc}")
+                        self.viewer.close()
+                        self.viewer = None
+                if self.web_viewer is not None:
+                    try:
+                        self.web_viewer.step(qpos)
+                    except Exception as exc:
+                        print(f"[Warning] web visualization failed, disabling viewer: {exc}")
+                        self.web_viewer.close()
+                        self.web_viewer = None
 
             self.stop_event.wait(timeout=period_s)
 
@@ -1022,6 +1216,14 @@ class LowLatencyTeleopPoseZMQServer:
                 motion_fps=self.vis_fps,
                 transparent_robot=1,
             )
+
+        if self.args.web_visualize:
+            web_xml = str(self.args.web_mujoco_xml or _default_web_mujoco_xml())
+            try:
+                self.web_viewer = WebRetargetViewer(web_xml, int(self.args.web_port))
+            except Exception as exc:
+                print(f"[Warning] web viewer disabled: {exc}")
+                self.web_viewer = None
 
         self.raw_recv_conn, self.raw_send_conn = self.mp_ctx.Pipe(duplex=False)
         self.result_recv_conn, self.result_send_conn = self.mp_ctx.Pipe(duplex=False)
@@ -1053,7 +1255,13 @@ class LowLatencyTeleopPoseZMQServer:
             raise RuntimeError(f"Retarget worker failed to start: {worker_msg}")
 
         xrt.init()
-        xrt.register_frame_callback(self._on_vr_frame)
+        if self._xrt_has_callback_api():
+            xrt.register_frame_callback(self._on_vr_frame)
+            self.xrt_input_mode = "callback"
+        elif self._xrt_has_polling_api():
+            self.xrt_input_mode = "polling"
+        else:
+            raise RuntimeError("xrobotoolkit_sdk has no supported input API")
 
         self.zmq_context = zmq.Context.instance()
 
@@ -1072,10 +1280,18 @@ class LowLatencyTeleopPoseZMQServer:
         self.ctrl_sock.setsockopt(zmq.SNDHWM, 500)
         self.ctrl_sock.bind(self.args.ctrl_bind_addr)
 
+        if self.args.ctrl_pub_bind_addr:
+            self.ctrl_pub_sock = self.zmq_context.socket(zmq.PUB)
+            self.ctrl_pub_sock.setsockopt(zmq.LINGER, 0)
+            self.ctrl_pub_sock.setsockopt(zmq.SNDHWM, 10)
+            self.ctrl_pub_sock.bind(self.args.ctrl_pub_bind_addr)
+
         print("Low-latency teleop ZMQ pose server initialized")
         print(f"  req_bind_addr: {self.args.req_bind_addr}")
         print(f"  rep_bind_addr: {self.args.rep_bind_addr}")
         print(f"  ctrl_bind_addr: {self.args.ctrl_bind_addr}")
+        if self.args.ctrl_pub_bind_addr:
+            print(f"  ctrl_pub_bind_addr: {self.args.ctrl_pub_bind_addr}")
         print(f"  ctrl_fps: {self.ctrl_fps}")
         print(f"  gmr_max_iter: {self.gmr_max_iter}")
         print("  chunk_size: fixed to 1 frame per reply")
@@ -1083,6 +1299,8 @@ class LowLatencyTeleopPoseZMQServer:
         print(f"  retarget_buffer_window_s: {self.retarget_buffer_window_ns / 1e9:.3f}")
         print(f"  log_interval_s: {self.log_interval_s:.3f}")
         print(f"  visualize: {self.args.visualize}")
+        print(f"  web_visualize: {self.args.web_visualize}")
+        print(f"  xrt_input_mode: {self.xrt_input_mode}")
         print(f"  retarget_worker_pid: {self.retarget_process.pid if self.retarget_process else None}")
 
     def run(self) -> None:
@@ -1108,7 +1326,7 @@ class LowLatencyTeleopPoseZMQServer:
             name="teleop-control",
             daemon=True,
         )
-        if self.viewer is not None:
+        if self.viewer is not None or self.web_viewer is not None:
             self.visualization_thread = threading.Thread(
                 target=self._visualization_loop,
                 name="teleop-visualization",
@@ -1120,11 +1338,19 @@ class LowLatencyTeleopPoseZMQServer:
                 name="teleop-stats",
                 daemon=True,
             )
+        if self.xrt_input_mode == "polling":
+            self.xrt_poll_thread = threading.Thread(
+                target=self._xrt_poll_loop,
+                name="teleop-xrt-poll",
+                daemon=True,
+            )
 
         self.raw_sender_thread.start()
         self.worker_result_thread.start()
         self.request_thread.start()
         self.control_thread.start()
+        if self.xrt_poll_thread is not None:
+            self.xrt_poll_thread.start()
         if self.visualization_thread is not None:
             self.visualization_thread.start()
         if self.stats_thread is not None:
@@ -1138,16 +1364,18 @@ class LowLatencyTeleopPoseZMQServer:
         finally:
             self.stop_event.set()
             self.vr_frame_event.set()
-            try:
-                xrt.clear_frame_callback()
-            except Exception:
-                pass
+            if self.xrt_input_mode == "callback":
+                try:
+                    xrt.clear_frame_callback()
+                except Exception:
+                    pass
 
             for thread in (
                 self.raw_sender_thread,
                 self.worker_result_thread,
                 self.request_thread,
                 self.control_thread,
+                self.xrt_poll_thread,
                 self.visualization_thread,
                 self.stats_thread,
             ):
@@ -1175,12 +1403,21 @@ class LowLatencyTeleopPoseZMQServer:
 
             if self.viewer is not None:
                 self.viewer.close()
+            if self.web_viewer is not None:
+                self.web_viewer.close()
             if self.req_sock is not None:
                 self.req_sock.close(0)
             if self.rep_sock is not None:
                 self.rep_sock.close(0)
             if self.ctrl_sock is not None:
                 self.ctrl_sock.close(0)
+            if self.ctrl_pub_sock is not None:
+                self.ctrl_pub_sock.close(0)
+
+
+def _default_web_mujoco_xml() -> str:
+    repo_root = Path(__file__).resolve().parents[2]
+    return str(repo_root / "data/robots/g1/scene_29dof_freebase.xml")
 
 
 def parse_args() -> argparse.Namespace:
@@ -1194,6 +1431,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--actual_human_height", type=float, default=1.6)
     parser.add_argument("--vis_fps", type=int, default=10, help="Viewer update frequency")
     parser.add_argument("--ctrl_fps", type=int, default=50, help="Controller button publish frequency")
+    parser.add_argument("--xr-poll-hz", type=float, default=50.0, help="XRobot SDK polling frequency when callback APIs are unavailable")
     parser.add_argument(
         "--lookback_ms",
         type=float,
@@ -1215,6 +1453,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--req_bind_addr", type=str, default="tcp://*:28701")
     parser.add_argument("--rep_bind_addr", type=str, default="tcp://*:28702")
     parser.add_argument("--ctrl_bind_addr", type=str, default="tcp://*:28703")
+    parser.add_argument("--ctrl_pub_bind_addr", type=str, default="")
+    parser.add_argument("--web-visualize", action="store_true")
+    parser.add_argument("--web-port", type=int, default=8080)
+    parser.add_argument("--web-mujoco-xml", type=str, default="")
     parser.add_argument("--min_link_height", type=float, default=0.0)
     parser.add_argument(
         "--min_link_height_align_strategy",
