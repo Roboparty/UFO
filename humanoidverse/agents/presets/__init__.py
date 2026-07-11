@@ -37,7 +37,11 @@ def build_agent_preset(
         }
     if agent == "tldr":
         return {
-            "agent_cfg": build_tldr_agent(device=device, compile=compile),
+            "agent_cfg": build_tldr_agent(
+                device=device,
+                compile=compile,
+                update_z_every_step=update_z_every_step,
+            ),
             "wandb_group": "ufo_tldr",
             "wandb_project": wandb_project,
             "train_runtime": dict(TLDR_TRAIN_RUNTIME),

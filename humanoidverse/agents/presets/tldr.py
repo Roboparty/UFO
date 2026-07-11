@@ -27,7 +27,11 @@ TRAIN_RUNTIME = {
 }
 
 
-def build_tldr_agent(device: str = "cuda", compile: bool = True) -> TldrDistAuxAgentConfig:
+def build_tldr_agent(
+    device: str = "cuda",
+    compile: bool = True,
+    update_z_every_step: int = 10,
+) -> TldrDistAuxAgentConfig:
     return TldrDistAuxAgentConfig(
         name="TldrDistAuxAgent",
         model=GcrRlDistAuxModelConfig(
@@ -121,7 +125,7 @@ def build_tldr_agent(device: str = "cuda", compile: bool = True) -> TldrDistAuxA
             aux_critic_pessimism_penalty=0.5,
             critic_target_tau=0.005,
             use_mix_rollout=True,
-            update_z_every_step=10,
+            update_z_every_step=int(update_z_every_step),
             z_buffer_size=8192,
             rollout_expert_trajectories=True,
             rollout_expert_trajectories_length=250,

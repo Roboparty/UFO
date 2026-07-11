@@ -38,7 +38,9 @@ DEFAULT_CHECKPOINT_EVERY_STEPS = 3200000
 DEFAULT_DATA_PATH = "humanoidverse/data/lafan_29dof_10s-clipped.pkl"
 DEFAULT_WORK_DIR = "runs/ufo"
 DEFAULT_BUFFER_SIZE = 5120000
-DEFAULT_UPDATE_Z_EVERY_STEP = 100
+DEFAULT_FB_UPDATE_Z_EVERY_STEP = 100
+DEFAULT_TLDR_UPDATE_Z_EVERY_STEP = 10
+DEFAULT_UPDATE_Z_EVERY_STEP = DEFAULT_FB_UPDATE_Z_EVERY_STEP
 DEFAULT_WANDB_PROJECT = "ufo-humanoid"
 DEFAULT_ROBOT_CONFIG = "configs/robots/g1_29dof.yaml"
 
@@ -63,6 +65,10 @@ def _resolve_training_robot_config(
     return resolve_robot_config_path(DEFAULT_ROBOT_CONFIG)
 
 
+def _default_update_z_every_step(agent: str) -> int:
+    return DEFAULT_TLDR_UPDATE_Z_EVERY_STEP if agent == "tldr" else DEFAULT_FB_UPDATE_Z_EVERY_STEP
+
+
 def build_ufo_mjlab_config(
     *,
     device: str,
@@ -80,7 +86,7 @@ def build_ufo_mjlab_config(
     agent: str = DEFAULT_AGENT,
     data_path: str | list[str] | None = None,
     data_mix_weights: list[float] | None = None,
-    update_z_every_step: int = DEFAULT_UPDATE_Z_EVERY_STEP,
+    update_z_every_step: int | None = None,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
     disable_dr: bool = False,
     disable_obs_noise: bool = False,
@@ -108,11 +114,14 @@ def build_ufo_mjlab_config(
             )
         ]
     agent_device = "cuda" if device.startswith("cuda") else "cpu"
+    resolved_update_z_every_step = (
+        _default_update_z_every_step(agent) if update_z_every_step is None else int(update_z_every_step)
+    )
     selected = build_agent_preset(
         agent=agent,
         device=agent_device,
         compile=not distributed_sync,
-        update_z_every_step=update_z_every_step,
+        update_z_every_step=resolved_update_z_every_step,
         lr_scale=lr_scale,
         clip_grad_norm=clip_grad_norm,
         cartwheel_aux_safe=cartwheel_aux_safe,
@@ -402,7 +411,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Rebuild manifest-generated motion pkl caches instead of reusing existing cache files.",
     )
-    parser.add_argument("--update-z-every-step", type=int, default=DEFAULT_UPDATE_Z_EVERY_STEP)
+    parser.add_argument(
+        "--update-z-every-step",
+        type=int,
+        default=None,
+        help="Override latent update interval. Defaults to 100 for FB and 10 for TLDR.",
+    )
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="Replay capacity per rank/GPU.")
     parser.add_argument(
         "--num-agent-updates",
@@ -432,6 +446,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--smoke", action="store_true", help="Short local smoke settings: 16 envs, 2048 env steps, no W&B.")
     args = parser.parse_args()
+    if args.update_z_every_step is None:
+        args.update_z_every_step = _default_update_z_every_step(args.agent)
     if args.smoke:
         args.num_envs = min(args.num_envs, 16)
         args.num_env_steps = min(args.num_env_steps, 2048)
