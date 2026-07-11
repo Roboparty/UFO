@@ -14,15 +14,17 @@ Architecture:
 """
 
 import argparse
+import tempfile
 import json
 import multiprocessing as mp
 import threading
 import time
 from collections import deque
 from concurrent.futures import Future
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -134,6 +136,103 @@ class _ShutdownTolerantExecutor:
         return getattr(self._executor, name)
 
 
+def _format_floor_rgb(rgb: tuple[float, float, float]) -> str:
+    return " ".join(f"{float(channel):.3f}" for channel in rgb)
+
+
+def _scale_floor_rgb(rgb: tuple[float, float, float], scale: float) -> tuple[float, float, float]:
+    return tuple(min(max(float(channel) * scale, 0.0), 1.0) for channel in rgb)
+
+
+def _has_named_xml_element(xml_text: str, tag: str, name: str) -> bool:
+    start = 0
+    open_token = f"<{tag}"
+    while True:
+        tag_start = xml_text.find(open_token, start)
+        if tag_start < 0:
+            return False
+        tag_end = xml_text.find(">", tag_start)
+        if tag_end < 0:
+            return False
+        tag_text = xml_text[tag_start:tag_end]
+        if f'name="{name}"' in tag_text or f"name='{name}'" in tag_text:
+            return True
+        start = tag_end + 1
+
+
+def inject_floor_scene_xml(
+    xml_text: str,
+    ground_rgb: tuple[float, float, float] = (0.35, 0.35, 0.35),
+) -> str:
+    if "<asset>" not in xml_text or "</asset>" not in xml_text:
+        raise ValueError("MJCF XML structure error: expected <asset>...</asset> block for viewer floor assets.")
+    if "</worldbody>" not in xml_text:
+        raise ValueError("MJCF XML structure error: expected </worldbody> block for viewer floor geom.")
+
+    if "<visual>" not in xml_text:
+        visual_xml = """\
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.1 0.1 0.1" specular="0.9 0.9 0.9"/>
+    <global azimuth="-140" elevation="-20"/>
+  </visual>
+"""
+        asset_open = xml_text.find("<asset>")
+        xml_text = xml_text[:asset_open] + visual_xml + xml_text[asset_open:]
+
+    ground_rgb_dark = _scale_floor_rgb(ground_rgb, 0.75)
+    asset_parts: list[str] = []
+    if not _has_named_xml_element(xml_text, "texture", "groundplane"):
+        asset_parts.append(
+            f"""\
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="{_format_floor_rgb(ground_rgb)}" rgb2="{_format_floor_rgb(ground_rgb_dark)}" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+"""
+        )
+    if not _has_named_xml_element(xml_text, "material", "groundplane"):
+        asset_parts.append(
+            """\
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+"""
+        )
+    if asset_parts:
+        asset_close = xml_text.find("</asset>")
+        xml_text = xml_text[:asset_close] + "".join(asset_parts) + xml_text[asset_close:]
+
+    if _has_named_xml_element(xml_text, "geom", "floor"):
+        return xml_text
+
+    worldbody_xml = """\
+    <light pos="1 0 3.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+"""
+    worldbody_close = xml_text.find("</worldbody>")
+    return xml_text[:worldbody_close] + worldbody_xml + xml_text[worldbody_close:]
+
+
+@contextmanager
+def temp_mjcf_with_floor(mjcf_path: str | Path) -> Iterator[Path]:
+    source_path = Path(mjcf_path).expanduser()
+    if not source_path.is_absolute():
+        source_path = source_path.resolve(strict=False)
+
+    viewer_xml_text = inject_floor_scene_xml(source_path.read_text(encoding="utf-8"))
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".xml",
+            prefix=".ufo_viewer_floor_",
+            dir=source_path.parent,
+            delete=False,
+            encoding="utf-8",
+        ) as tmp:
+            tmp.write(viewer_xml_text)
+            temp_path = Path(tmp.name)
+        yield temp_path
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 class WebRetargetViewer:
     def __init__(self, mujoco_xml: str, port: int) -> None:
         try:
@@ -150,7 +249,8 @@ class WebRetargetViewer:
             raise FileNotFoundError(f"web viewer MuJoCo XML not found: {xml_path}")
 
         self.mujoco = mujoco
-        self.model = mujoco.MjModel.from_xml_path(str(xml_path))
+        with temp_mjcf_with_floor(xml_path) as viewer_xml:
+            self.model = mujoco.MjModel.from_xml_path(str(viewer_xml))
         self.data = mujoco.MjData(self.model)
         self.server = viser.ViserServer(port=int(port), label="ufo-retarget")
         executor = _ShutdownTolerantExecutor(self.server._thread_executor)

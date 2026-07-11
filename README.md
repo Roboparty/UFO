@@ -339,6 +339,9 @@ Open the viewer from another machine on the same network:
 http://<ROBOT_IP>:8080
 ```
 
+The onboard retarget web viewer loads a temporary MJCF with a checkerboard floor plane for visual debugging.
+This floor is viewer-only and does not affect retargeting, realtime `z`, or policy control.
+
 Robot terminal B, realtime `z` publisher:
 
 ```bash
