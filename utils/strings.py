@@ -1,6 +1,7 @@
 import re
 from typing import Any, Sequence
 
+# Release Unitree G1 29-DoF low-level joint order.
 unitree_joint_names = [
   "left_hip_pitch_joint",
   "left_hip_roll_joint",
@@ -226,4 +227,3 @@ def resolve_matching_names(
         )
     # return
     return index_list, names_list
-

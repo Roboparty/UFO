@@ -1,6 +1,6 @@
 ROBOT_SCENE: "./data/robots/g1/scene_29dof_freebase.xml" # Robot scene, for Sim2Sim
 # ROBOT_SCENE: "data/robots/g1/g1_gmt.xml" # Robot scene, for Sim2Sim
-ENABLE_ELASTIC_BAND: True # Virtual spring band, used for lifting h1
+ENABLE_ELASTIC_BAND: True # Virtual spring band for G1 sim bring-up.
 
 SIMULATE_DT: 0.005  # Need to be larger than the runtime of viewer.sync()
 VIEWER_DT: 0.02  # Viewer update time

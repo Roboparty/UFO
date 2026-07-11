@@ -2,10 +2,6 @@ import numpy as np
 import glfw
 import mujoco
 import zmq
-import json
-import time
-import uuid
-import os
 
 from loguru import logger
 
@@ -14,31 +10,6 @@ sys.path.append(".")
 from utils.strings import resolve_matching_names_values, unitree_joint_names
 from utils.math import quat_mul, quat_conjugate, yaw_quat
 from utils.common import LowStateMessage, LowCmdMessage, PORTS
-
-_DEBUG_LOG_PATH = os.environ.get(
-    "UFO_DEBUG_LOG",
-    os.path.join(os.getcwd(), ".debug", "sim_env_debug.log"),
-)
-_DEBUG_SESSION_ID = "922183"
-
-
-def _debug_log(location: str, message: str, hypothesis_id: str, data: dict) -> None:
-    payload = {
-        "sessionId": _DEBUG_SESSION_ID,
-        "runId": "pre-fix-2",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-        "id": f"log_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}",
-    }
-    try:
-        os.makedirs(os.path.dirname(_DEBUG_LOG_PATH), exist_ok=True)
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
 
 
 class SimulationBridge:
@@ -53,16 +24,10 @@ class SimulationBridge:
         self.robot_config = robot_config
         self.scene_config = scene_config
         robot_type = robot_config["ROBOT_TYPE"]
-        supported_types = {
-            "g1_29dof",
-            "h1",
-            "go2",
-            "h1-2_21dof",
-            "h1-2_27dof",
-        }
+        supported_types = {"g1_29dof"}
         if robot_type not in supported_types:
             raise ValueError(
-                f"Invalid robot type '{robot_type}'. Expected one of {supported_types}."
+                f"Invalid robot type '{robot_type}'. UFO-Deploy release sim runtime supports {supported_types}."
             )
         self.mj_model = mj_model
         self.mj_data = mj_data
@@ -101,7 +66,6 @@ class SimulationBridge:
         self.cmd_kp = np.zeros(total_joints, dtype=np.float32)
         self.cmd_kd = np.zeros(total_joints, dtype=np.float32)
         self.has_received_command = False
-        self._agent_dbg_last_cmd_t = 0.0
 
         self.init_joint_indices()
 
@@ -173,18 +137,6 @@ class SimulationBridge:
                     + kp * (q_des - self.mj_data.qpos[qpos_addr])
                     + kd * (dq_des - self.mj_data.qvel[qvel_addr])
                 )
-        else:
-            # #region agent log
-            now_dbg = time.perf_counter()
-            if now_dbg - self._agent_dbg_last_cmd_t >= 1.0:
-                _debug_log(
-                    "sim_env/utils/simulation_bridge.py:compute_torques",
-                    "no low command received yet",
-                    "H6",
-                    {"low_cmd_port": int(self.low_cmd_port)},
-                )
-                self._agent_dbg_last_cmd_t = now_dbg
-            # #endregion
         # Set the torque limit
         self.torques[self.joint_idx_in_ctrl] = np.clip(
             self.torques[self.joint_idx_in_ctrl],

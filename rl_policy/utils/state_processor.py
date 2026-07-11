@@ -20,16 +20,10 @@ class StateProcessor:
         if self.robot_type == "g1_real":
             self.robot = robot_config["robot"]
         else:
-            supported_types = {
-                "h1",
-                "go2",
-                "g1_29dof",
-                "h1-2_27dof",
-                "h1-2_21dof",
-            }
+            supported_types = {"g1_29dof"}
             if self.robot_type not in supported_types:
                 raise NotImplementedError(
-                    f"Robot type {self.robot_type} is not supported"
+                    f"Robot type {self.robot_type} is not supported by the UFO-Deploy release runtime"
                 )
 
             self.low_state_port = robot_config.get(

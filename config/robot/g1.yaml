@@ -1,4 +1,4 @@
-ROBOT_TYPE: 'g1_29dof' # Robot name, "go2", "b2", "b2w", "h1", "go2w", "g1" 
+ROBOT_TYPE: 'g1_29dof' # UFO-Deploy release sim runtime supports Unitree G1 29-DoF.
  ### REAL
 # # DOMAIN_ID: 0 # Domain id
 # # # Interface

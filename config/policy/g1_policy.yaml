@@ -1,4 +1,7 @@
 # G1 deployment policy config.
+onnx_providers:
+  - CPUExecutionProvider
+
 observation:
   policy:
     dof_pos_minus_default: 

@@ -1,6 +1,17 @@
 # UFO-Deploy
 
-Minimal deployment code for running a BFM-Zero-style Unitree G1 policy in:
+The `deploy` branch is the UFO-Deploy runtime: a deployment-only code path for running
+a released BFM-Zero-style policy on Unitree G1 29-DoF. It is not the training codebase,
+and it should not be merged or rebased into `main`.
+
+Release-supported target:
+
+- Unitree G1 29-DoF
+
+Other robot type strings or legacy code paths are not release-supported unless they are
+documented and tested in this branch.
+
+Supported deployment flows:
 
 - local MuJoCo sim2sim
 - local PICO/GMR teleop sim2sim
@@ -28,7 +39,7 @@ Teleop workstation:
 
 Robot:
 
-- Unitree G1 onboard Jetson
+- Unitree G1 29-DoF onboard Jetson
 - Python 3.10 venv
 - Unitree SDK2 Python binding, including `g1_interface`
 - CycloneDDS runtime
@@ -46,7 +57,11 @@ conda activate ufo-deploy
 pip install -r requirements.txt
 ```
 
-If you want CUDA ONNX Runtime on the workstation, install the GPU wheel that matches your CUDA setup. For CPU-only runs, the `onnxruntime` package from `requirements.txt` is enough.
+By default, policy inference uses ONNX Runtime `CPUExecutionProvider`. To use CUDA, install
+`onnxruntime-gpu` that matches your CUDA setup and set `onnx_providers` in
+`config/policy/g1_policy.yaml`.
+
+For CPU-only runs, the `onnxruntime` package from `requirements.txt` is enough.
 
 Check the base Python dependencies:
 
@@ -70,6 +85,8 @@ model/g1_policy/
 ```
 
 `model/` is ignored by git because the ONNX model is larger than GitHub's normal file limit. After cloning, put the released model artifact at `model/g1_policy`.
+The `ctx_dir` and `ctx_path` values in `config/exp/*/*.yaml` are resolved under this model
+root by default. The released artifact layout must match the tree above.
 
 Verify:
 
@@ -434,5 +451,13 @@ python -m py_compile \
   rl_policy/bfm_zero.py \
   scripts/realtime/realtime_z_server.py \
   scripts/teleop/xrobot_teleop_to_pose_zmq_server.py \
-  sim_env/base_sim.py
+  sim_env/base_sim.py \
+  sim_env/utils/simulation_bridge.py \
+  rl_policy/utils/state_processor.py \
+  rl_policy/utils/command_sender.py \
+  utils/common.py \
+  utils/math.py \
+  utils/strings.py
+
+git diff --check
 ```

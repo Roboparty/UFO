@@ -3,9 +3,9 @@ start: 0
 end: 10000
 stop: 0
 
-# ctx_path is resolved relative to dirname(--model_path), so this points from
-# model/g1_policy/exported/FBcprAuxModel.onnx to tracking_inference_mjlab/zs_7.pkl.
-ctx_path: ../tracking_inference_mjlab/zs_7.pkl
+# Resolved under model/g1_policy/tracking_inference_mjlab by default.
+ctx_dir: tracking_inference_mjlab
+ctx_path: zs_7.pkl
 
 gamma: 0.8
 window_size: 3

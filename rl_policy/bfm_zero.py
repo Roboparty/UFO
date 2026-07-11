@@ -8,7 +8,7 @@ import sched
 from termcolor import colored
 from sshkeyboard import listen_keyboard
 from pathlib import Path
-import copy 
+import copy
 import joblib
 import json
 import pickle
@@ -20,7 +20,7 @@ sys.path.append(".")
 from loguru import logger
 
 # Re-use utilities from the existing sim2real package
-from utils.strings import resolve_matching_names_values, unitree_joint_names
+from utils.strings import resolve_matching_names_values
 from utils.onnx_module import Timer
 from rl_policy.observations import Observation, ObsGroup
 from rl_policy.utils.state_processor import StateProcessor
@@ -37,14 +37,46 @@ def _resolve_model_relative_context_path(
     model_path: str,
     exp_config: Dict[str, Any],
     default_ctx_dir: str,
+    fallback_ctx_dirs: tuple[str, ...] = (),
 ) -> Path:
-    ctx_path = Path(str(exp_config["ctx_path"]))
+    ctx_path = Path(str(exp_config["ctx_path"])).expanduser()
     if ctx_path.is_absolute():
         return ctx_path
 
-    model_root = Path(model_path).parent.parent
-    ctx_dir = Path(str(exp_config.get("ctx_dir", default_ctx_dir)))
-    return model_root / ctx_dir / ctx_path
+    model_export_dir = Path(model_path).expanduser().resolve(strict=False).parent
+    model_root = model_export_dir.parent
+    candidates: list[Path] = []
+
+    if "ctx_dir" in exp_config:
+        candidates.append(model_root / str(exp_config["ctx_dir"]) / ctx_path)
+    else:
+        candidates.append(model_root / default_ctx_dir / ctx_path)
+        for ctx_dir in fallback_ctx_dirs:
+            candidates.append(model_root / ctx_dir / ctx_path)
+
+    # Backward compatibility: older configs used paths relative to either the
+    # model root or the exported/ directory.
+    candidates.append(model_root / ctx_path)
+    candidates.append(model_export_dir / ctx_path)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(resolved)
+
+    for candidate in deduped:
+        if candidate.is_file():
+            return candidate
+
+    tried = "\n".join(f"  - {candidate}" for candidate in deduped)
+    raise FileNotFoundError(
+        f"Could not resolve context file ctx_path={ctx_path!s} for model_path={model_path!s}.\n"
+        f"Tried:\n{tried}"
+    )
 
 # -------------------------------------------------------------------------------------------------
 # High-level RL policy that plugs into the existing framework
@@ -189,9 +221,13 @@ class BFMZeroPolicy:
                 raise ValueError(f"Invalid ctx_source={self.ctx_source}, expected 'pkl' or 'zmq'")
 
             if self.ctx_source == "pkl":
-                import joblib
-                logger.info(f"Loading tracking context from {exp_config['ctx_path']}")
-                ctx_path = Path(model_path).parent / exp_config["ctx_path"]
+                ctx_path = _resolve_model_relative_context_path(
+                    model_path,
+                    exp_config,
+                    default_ctx_dir="tracking_inference_mjlab",
+                    fallback_ctx_dirs=("tracking_inference",),
+                )
+                logger.info(f"Loading tracking context from {ctx_path}")
                 self.ctx = joblib.load(ctx_path)
                 self.ctx_zmq = None
                 self.ctx_window = None
@@ -230,7 +266,8 @@ class BFMZeroPolicy:
             reward_path = _resolve_model_relative_context_path(
                 model_path,
                 exp_config,
-                default_ctx_dir="reward_inference",
+                default_ctx_dir="reward_inference_mjlab",
+                fallback_ctx_dirs=("reward_inference",),
             )
             logger.info(f"Loading reward context from {reward_path}")
             with open(reward_path, "rb") as f:
@@ -288,12 +325,11 @@ class BFMZeroPolicy:
             goal_path = _resolve_model_relative_context_path(
                 model_path,
                 exp_config,
-                default_ctx_dir="goal_inference",
+                default_ctx_dir="goal_inference_mjlab",
+                fallback_ctx_dirs=("goal_inference",),
             )
-            print(f"goal_path=\n{goal_path}")
+            logger.info(f"Loading goal context from {goal_path}")
             with open(goal_path, "rb") as f:
-                # self.z_dict = pickle.load(f)
-                import joblib
                 self.z_dict = joblib.load(f)
                 self.z_dict_raw = copy.deepcopy(self.z_dict)
                 logger.info(colored(f"\n\nAvailable z_dict={list(self.z_dict_raw.keys())}", "green"))
@@ -317,7 +353,18 @@ class BFMZeroPolicy:
         # load onnx policy
         import onnxruntime
         logger.info(f"Loading onnx policy from {model_path}")
-        self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
+        providers = self.policy_config.get("onnx_providers", ["CPUExecutionProvider"])
+        if isinstance(providers, str):
+            providers = [providers]
+        if not isinstance(providers, list) or not all(isinstance(item, str) for item in providers):
+            raise ValueError("policy_config['onnx_providers'] must be a string or list of strings")
+        if len(providers) == 0:
+            providers = ["CPUExecutionProvider"]
+        logger.info(f"ONNX Runtime providers: {providers}")
+        self.onnx_policy_session = onnxruntime.InferenceSession(
+            model_path,
+            providers=providers,
+        )
         self.onnx_input_name = self.onnx_policy_session.get_inputs()[0].name
         self.onnx_output_name = self.onnx_policy_session.get_outputs()[0].name
 
@@ -700,13 +747,29 @@ class BFMZeroPolicy:
             logger.info(colored(f"Debug kp level: {self.command_sender.kp_level}", "green"))
 
     # ----------------------------- Keyboard handling -----------------------------
+    def _warn_unsupported_keyboard_key(self, keycode: str) -> None:
+        logger.warning(f"Keyboard key '{keycode}' is not supported by this release runtime")
+
+    def _set_debug_kp_level(self, *, delta: float | None = None, value: float | None = None) -> None:
+        if value is None:
+            value = self.command_sender.kp_level + float(delta or 0.0)
+        value = max(0.0, float(value))
+        self.command_sender.kp_level = value
+        logger.info(colored(f"Debug kp level: {self.command_sender.kp_level}", "green"))
+        logger.info(
+            colored(
+                f"Debug kp: {np.array2string(self.command_sender.joint_kp_unitree, precision=4)}",
+                "green",
+            )
+        )
+
     def start_key_listener(self):
         """Start a key listener using sshkeyboard (same as BasePolicy)."""
 
         def on_press(keycode):
             try:
                 self.handle_keyboard_button(keycode)
-            except AttributeError as e:
+            except Exception as e:
                 logger.warning(f"Keyboard key {keycode}. Error: {e}")
 
         listener = listen_keyboard(on_press=on_press)
@@ -761,52 +824,20 @@ class BFMZeroPolicy:
             self.get_ready_state = True
             self.init_count = 0
             logger.info("Setting to init state")
-        elif keycode == "w":
-            self.lin_vel_command[0, 0] += 0.1
-        elif keycode == "s":
-            self.lin_vel_command[0, 0] -= 0.1
-        elif keycode == "a":
-            self.lin_vel_command[0, 1] += 0.1
-        elif keycode == "d":
-            self.lin_vel_command[0, 1] -= 0.1
-        elif keycode == "q":
-            self.ang_vel_command[0, 0] -= 0.1
-        elif keycode == "e":
-            self.ang_vel_command[0, 0] += 0.1
-        elif keycode == "z":
-            self.ang_vel_command[0, 0] = 0.0
-            self.lin_vel_command[0, 0] = 0.0
-            self.lin_vel_command[0, 1] = 0.0
+        elif keycode in {"w", "s", "a", "d", "q", "e", "z"}:
+            self._warn_unsupported_keyboard_key(keycode)
         elif keycode == "5":
-            self.command_sender.kp_level -= 0.01
-            for i in range(len(self.command_sender.robot_kp)):
-                self.command_sender.robot_kp[i] = self.robot.MOTOR_KP[i] * self.command_sender.kp_level
-            logger.info(colored(f"Debug kp level: {self.command_sender.kp_level}", "green"))
-            logger.info(colored(f"Debug kp: {self.command_sender.robot_kp}", "green"))
+            self._set_debug_kp_level(delta=-0.01)
         elif keycode == "6":
-            self.command_sender.kp_level += 0.01
-            for i in range(len(self.command_sender.robot_kp)):
-                self.command_sender.robot_kp[i] = self.robot.MOTOR_KP[i] * self.command_sender.kp_level
-            logger.info(colored(f"Debug kp level: {self.command_sender.kp_level}", "green"))
-            logger.info(colored(f"Debug kp: {self.command_sender.robot_kp}", "green"))
+            self._set_debug_kp_level(delta=0.01)
         elif keycode == "4":
-            self.command_sender.kp_level -= 0.1
-            for i in range(len(self.command_sender.robot_kp)):
-                self.command_sender.robot_kp[i] = self.robot.MOTOR_KP[i] * self.command_sender.kp_level
-            logger.info(colored(f"Debug kp level: {self.command_sender.kp_level}", "green"))
-            logger.info(colored(f"Debug kp: {self.command_sender.robot_kp}", "green"))
+            self._set_debug_kp_level(delta=-0.1)
         elif keycode == "7":
-            self.command_sender.kp_level += 0.1
-            for i in range(len(self.command_sender.robot_kp)):
-                self.command_sender.robot_kp[i] = self.robot.MOTOR_KP[i] * self.command_sender.kp_level
-            logger.info(colored(f"Debug kp level: {self.command_sender.kp_level}", "green"))
-            logger.info(colored(f"Debug kp: {self.command_sender.robot_kp}", "green"))
+            self._set_debug_kp_level(delta=0.1)
         elif keycode == "0":
-            self.command_sender.kp_level = 1.0
-            for i in range(len(self.command_sender.robot_kp)):
-                self.command_sender.robot_kp[i] = self.robot.MOTOR_KP[i] * self.command_sender.kp_level
-            logger.info(colored(f"Debug kp level: {self.command_sender.kp_level}", "green"))
-            logger.info(colored(f"Debug kp: {self.command_sender.robot_kp}", "green"))
+            self._set_debug_kp_level(value=1.0)
+        else:
+            self._warn_unsupported_keyboard_key(keycode)
         
 
 if __name__ == "__main__":

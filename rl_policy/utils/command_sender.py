@@ -13,16 +13,10 @@ class CommandSender:
         if self.robot_type == "g1_real":
             self.robot = robot_config["robot"]
         else:
-            supported_types = {
-                "h1",
-                "go2",
-                "g1_29dof",
-                "h1-2_21dof",
-                "h1-2_27dof",
-            }
+            supported_types = {"g1_29dof"}
             if self.robot_type not in supported_types:
                 raise NotImplementedError(
-                    f"Robot type {self.robot_type} is not supported yet"
+                    f"Robot type {self.robot_type} is not supported by the UFO-Deploy release runtime"
                 )
 
         # init robot and kp kd
@@ -119,8 +113,8 @@ class CommandSender:
         else:
             cmd = self.robot.create_zero_command()
 
-            # Apply kp_level scaling (kd remains constant, consistent with original implementation)
-            kp_scaled = self.joint_kp_unitree * self._kp_level
+            # kp_level setter maintains joint_kp_unitree; kd remains constant.
+            kp_scaled = self.joint_kp_unitree
             kd_scaled = self.joint_kd_unitree
 
             q_target = list(cmd.q_target)

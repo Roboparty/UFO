@@ -3,39 +3,11 @@ import mujoco.viewer
 import time
 from threading import Thread
 import sched
-import os
-import json
-import uuid
 
 import sys
 sys.path.append(".")
 from sim_env.utils.simulation_bridge import SimulationBridge
 from sim_env.utils.elastic_band import ElasticBand
-
-_DEBUG_LOG_PATH = os.environ.get(
-    "UFO_DEBUG_LOG",
-    os.path.join(os.getcwd(), ".debug", "sim_env_debug.log"),
-)
-_DEBUG_SESSION_ID = "922183"
-
-
-def _debug_log(location: str, message: str, hypothesis_id: str, data: dict) -> None:
-    payload = {
-        "sessionId": _DEBUG_SESSION_ID,
-        "runId": "pre-fix-2",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-        "id": f"log_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}",
-    }
-    try:
-        os.makedirs(os.path.dirname(_DEBUG_LOG_PATH), exist_ok=True)
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
 
 class BaseSimulator:
     def __init__(self, robot_config, scene_config):
@@ -43,7 +15,6 @@ class BaseSimulator:
         self.scene_config = scene_config
         self.sim_dt = self.scene_config["SIMULATE_DT"]
         self.viewer_dt = self.scene_config["VIEWER_DT"]
-        self._agent_dbg_last_sim_t = 0.0
 
         self.init_scene()
         self.sim_bridge = SimulationBridge(
@@ -89,10 +60,12 @@ class BaseSimulator:
         # Enable the elastic band
         if self.scene_config["ENABLE_ELASTIC_BAND"]:
             self.elastic_band = ElasticBand()
-            if "h1" in self.robot_config["ROBOT_TYPE"] or "g1" in self.robot_config["ROBOT_TYPE"]:
+            if self.robot_config["ROBOT_TYPE"] == "g1_29dof":
                 self.band_attached_link = self.mj_model.body("torso_link").id
             else:
-                self.band_attached_link = self.mj_model.body("base_link").id
+                raise ValueError(
+                    "UFO-Deploy release supports elastic-band sim only for Unitree G1 29-DoF."
+                )
             key_callback = self.elastic_band.MujocoKeyCallback
         else:
             key_callback = None
@@ -151,17 +124,6 @@ class BaseSimulator:
         elapsed = time.perf_counter() - loop_start
         if elapsed > self.sim_dt:
             print(f"Sim step took {elapsed:.6f} seconds, expected {self.sim_dt}")
-            # #region agent log
-            now_dbg = time.perf_counter()
-            if now_dbg - self._agent_dbg_last_sim_t >= 1.0:
-                _debug_log(
-                    "sim_env/base_sim.py:_sim_step_scheduled",
-                    "sim loop overrun",
-                    "H5",
-                    {"elapsed": float(elapsed), "target_dt": float(self.sim_dt)},
-                )
-                self._agent_dbg_last_sim_t = now_dbg
-            # #endregion
 
 
 if __name__ == "__main__":
@@ -173,7 +135,7 @@ if __name__ == "__main__":
         "--robot_config", type=str, default="config/robot/g1.yaml", help="robot config file"
     )
     parser.add_argument(
-        "--scene_config", type=str, default="config/scene/g1_29dof_nohand.yaml", help="scene config file"
+        "--scene_config", type=str, default="config/scene/g1_29dof.yaml", help="scene config file"
     )
     args = parser.parse_args()
 
