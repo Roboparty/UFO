@@ -1,0 +1,71 @@
+[
+    {
+        "motion_id": 0,
+        "frames": [
+            2193,
+            2230,
+            3350,
+            5015
+        ],
+        "motion_name": "fallAndGetUp1_subject4"
+    },
+    {
+        "motion_id": 1,
+        "frames": [
+            505,
+            4024,
+            4700
+        ],
+        "motion_name": "dance1_subject3"
+    },
+    {
+        "motion_id": 2,
+        "frames": [
+            700,
+            670
+        ],
+        "motion_name": "dance2_subject4"
+    },
+    {
+        "motion_id": 3,
+        "frames": [
+            252,
+            745,
+            1009
+        ],
+        "motion_name": "fightAndSports1_subject1"
+    },
+    {
+        "motion_id": 5,
+        "frames": [
+            5559,
+            10229,
+            11981
+        ],
+        "motion_name": "fight1_subject3"
+    },
+    {
+        "motion_id": 7,
+        "frames": [
+            1150,
+            2877
+        ],
+        "motion_name": "dance1_subject2"
+    },
+    {
+        "motion_id": 13,
+        "frames": [
+            2588,
+            11375,
+            11384
+        ],
+        "motion_name": "walk2_subject1"
+    },
+    {
+        "motion_id": 21,
+        "frames": [
+            9044
+        ],
+        "motion_name": "walk3_subject3"
+    }
+]
