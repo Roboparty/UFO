@@ -1,1 +1,0 @@
-"""Core UFO training components."""

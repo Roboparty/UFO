@@ -1,4 +1,0 @@
-model_save:
-  _target_: humanoidverse.trl.callbacks.model_save_callback.ModelSaveCallback
-  save_dir: ${experiment_dir}
-  save_frequency: 500

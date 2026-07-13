@@ -1,5 +1,0 @@
-
-autoresume:
-  _target_: humanoidverse.trl.callbacks.autoresume_callback.AutoResumeCallback
-  save_dir: ${experiment_dir}
-  every_n_steps: 10
