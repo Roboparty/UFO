@@ -24,6 +24,27 @@ For new datasets, prefer `robot_state_csv` or `robot_state_npz` with the import 
 
 ## Recommended Flow
 
+### XML-derived Training Drafts
+
+`robot_inspect` can generate XML-derived draft robot configs for the training
+path. Passing `--hydra-out` writes both the UFO RobotTrainingSpec YAML and a
+Hydra robot config draft:
+
+```bash
+uv run python -m humanoidverse.tools.robot_inspect \
+  --xml /path/to/robot.xml \
+  --name my_robot \
+  --out configs/robots/my_robot.yaml \
+  --hydra-out humanoidverse/config/robot/my_robot/my_robot_auto.yaml
+```
+
+The draft extracts structural fields from XML, including body names, actuated
+joint order, action dimensions, joint ranges, and the freejoint base body.
+Training-specific fields still require review: semantic body groups, contact
+bodies, default pose, PD gains, actuator parameters, and reward/termination
+fields. Generated configs are marked `metadata.review_status: draft`. Formal
+experiments should use curated robot configs.
+
 1. Generate a draft robot config from a MuJoCo XML:
 
 ```bash
@@ -80,4 +101,4 @@ Remove `--smoke` and set the desired GPU and training options only after the imp
 
 For robots that already have curated configs, such as G1, formal experiments should continue to use reference configs like `configs/robots/g1_29dof.yaml`.
 
-The import wizard currently solves the robot-aware motion data import workflow. It does not mean the UFO training environment is fully robot-agnostic, and it does not enable cross-robot shared-policy training by itself.
+The import wizard currently solves the robot-aware motion data import workflow and can emit XML-derived training drafts. It does not mean the UFO training environment is fully robot-agnostic, and it does not enable cross-robot shared-policy training by itself.

@@ -144,6 +144,9 @@ This experimental path assumes you already have a MuJoCo XML and RobotState
 motion data for the same robot. UFO does not automatically retarget motion from
 another skeleton.
 
+`robot_inspect --hydra-out` can generate XML-derived draft RobotTrainingSpec
+and Hydra robot config files; see [Robot-Config Training](docs/robot_config_training.md).
+
 1. Generate a robot YAML draft from the XML:
 
    ```bash

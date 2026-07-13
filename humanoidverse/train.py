@@ -11,6 +11,8 @@ import logging
 import os
 from pathlib import Path
 
+from omegaconf import OmegaConf
+
 
 def _ensure_compile_cache(cache_root: str | Path | None = None) -> None:
     cache_dir = os.environ.get("UFO_CACHE_DIR") or os.environ.get("BFMZERO_MJLAB_CACHE_DIR")
@@ -97,6 +99,17 @@ def build_ufo_mjlab_config(
     robot_config: str | Path | None = None,
 ) -> TrainConfig:
     robot_training = load_robot_training_spec(robot_config or DEFAULT_ROBOT_CONFIG)
+    try:
+        raw_robot_config = OmegaConf.to_container(OmegaConf.load(robot_training.config_path), resolve=True)
+        metadata = raw_robot_config.get("metadata") if isinstance(raw_robot_config, dict) else None
+        if isinstance(metadata, dict) and metadata.get("review_status") == "draft":
+            print(
+                "WARNING: Robot config is auto-generated draft. Review semantics, default pose, PD gains, "
+                "actuator parameters, contact bodies, and reward/termination-related fields before formal training.",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"WARNING: Could not inspect robot config metadata for draft status: {exc}", flush=True)
     evaluations = []
     run_eval_and_prioritization = not smoke and not disable_eval_prioritization
     distributed_sync = distributed_world_size > 1

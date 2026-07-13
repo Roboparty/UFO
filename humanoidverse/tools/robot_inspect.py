@@ -7,10 +7,17 @@ from pathlib import Path
 from typing import Any
 
 import mujoco
+import yaml
 from loguru import logger
 from omegaconf import OmegaConf
 
-from humanoidverse.utils.robot_spec import load_robot_spec
+from humanoidverse.utils.robot_spec import load_robot_spec, load_robot_training_spec
+from humanoidverse.utils.robot_spec.xml_training_infer import build_hydra_robot_config_draft, build_robot_training_yaml_draft
+
+
+class _IndentedSafeDumper(yaml.SafeDumper):
+    def increase_indent(self, flow: bool = False, indentless: bool = False):  # noqa: ANN201 - PyYAML hook signature.
+        return super().increase_indent(flow, False)
 
 
 def _mj_name(model: mujoco.MjModel, obj_type: mujoco.mjtObj, obj_id: int) -> str:
@@ -141,6 +148,37 @@ def _parse_csv_list(value: str | None) -> list[str] | None:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def infer_hydra_robot_group(hydra_out: str | Path) -> str:
+    path = Path(hydra_out).expanduser()
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    hydra_root = (_repo_root() / "humanoidverse" / "config" / "robot").resolve()
+    try:
+        rel_path = path.resolve().relative_to(hydra_root)
+    except ValueError as exc:
+        raise ValueError(
+            "--hydra-out must be under humanoidverse/config/robot/ so the Hydra robot group path can be inferred. "
+            "Use --with-training --hydra-robot if you want to provide an existing Hydra group instead."
+        ) from exc
+    if rel_path.suffix not in {".yaml", ".yml"}:
+        raise ValueError("--hydra-out must point to a .yaml or .yml file")
+    return str(rel_path.with_suffix("")).replace("\\", "/")
+
+
+def _save_yaml(path: Path, config: dict[str, Any], *, force: bool, header: str | None = None) -> None:
+    if path.exists() and not force:
+        raise FileExistsError(f"Output file already exists: {path}. Use --force to overwrite it.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = yaml.dump(config, Dumper=_IndentedSafeDumper, sort_keys=False, default_flow_style=False)
+    if header:
+        text = header.rstrip() + "\n" + text
+    path.write_text(text)
+
+
 def inspect_mujoco_xml(xml_path: str | Path, *, name: str | None = None) -> dict[str, Any]:
     path = Path(xml_path).expanduser()
     model = mujoco.MjModel.from_xml_path(str(path))
@@ -222,6 +260,38 @@ def write_robot_yaml(
     return path
 
 
+def write_robot_training_yaml(
+    out_path: str | Path,
+    inspection: dict[str, Any],
+    semantics: dict[str, Any],
+    *,
+    hydra_robot: str,
+    args: argparse.Namespace,
+) -> Path:
+    path = Path(out_path).expanduser()
+    config = build_robot_training_yaml_draft(
+        model=inspection["model"],
+        name=str(inspection["name"]),
+        xml_path=str(inspection["xml_path"]),
+        hydra_robot=hydra_robot,
+        semantics=semantics,
+        default_keyframe=args.default_keyframe,
+        actuator_source=args.actuator_source,
+        action_scale=args.action_scale,
+        action_clip_value=args.action_clip_value,
+        normalize_action_to=args.normalize_action_to,
+        effort_limit_default=args.effort_limit_default,
+        velocity_limit_default=args.velocity_limit_default,
+        armature_default=args.armature_default,
+        friction_default=args.friction_default,
+        pd_template=args.pd_template,
+        review_status=args.review_status,
+    )
+    _save_yaml(path, config, force=bool(args.force))
+    load_robot_training_spec(path)
+    return path
+
+
 def _print_summary(inspection: dict[str, Any], semantics: dict[str, Any]) -> None:
     model = inspection["model"]
     print("Robot XML summary")
@@ -251,8 +321,31 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--root-quat-order", default="xyzw", choices=["xyzw", "wxyz"])
     parser.add_argument("--coordinate-system", default="z_up")
     parser.add_argument("--dof-unit", default="rad")
+    parser.add_argument("--with-training", action="store_true", help="Also write a draft training section into the Robot YAML.")
+    parser.add_argument("--hydra-out", default=None, help="Output path for an auto-generated Hydra robot config draft.")
+    parser.add_argument("--hydra-robot", default=None, help="Existing Hydra robot group, required with --with-training when --hydra-out is omitted.")
+    parser.add_argument("--default-keyframe", default="stand", help="Preferred MuJoCo keyframe name for default pose inference.")
+    parser.add_argument("--actuator-source", default="yaml", choices=["yaml", "g1_mode15", "g1-mode_15"])
+    parser.add_argument("--action-scale", type=float, default=0.25)
+    parser.add_argument("--action-clip-value", type=float, default=5.0)
+    parser.add_argument("--normalize-action-to", type=float, default=5.0)
+    parser.add_argument("--effort-limit-default", type=float, default=80.0)
+    parser.add_argument("--velocity-limit-default", type=float, default=20.0)
+    parser.add_argument("--armature-default", type=float, default=0.01)
+    parser.add_argument("--friction-default", type=float, default=0.0)
+    parser.add_argument("--pd-template", default="humanoid", choices=["humanoid"])
+    parser.add_argument("--review-status", default="draft")
     parser.add_argument("--force", action="store_true", help="Overwrite existing output")
     args = parser.parse_args(argv)
+    if args.hydra_out is not None:
+        args.with_training = True
+        if args.hydra_robot is None:
+            args.hydra_robot = infer_hydra_robot_group(args.hydra_out)
+    if args.with_training and args.hydra_robot is None:
+        parser.error("--with-training requires either --hydra-out or --hydra-robot.")
+    if args.actuator_source != "yaml":
+        logger.warning("Non-yaml actuator sources are legacy/G1-specific. Use --actuator-source yaml for new robots.")
+
     inspection = inspect_mujoco_xml(args.xml, name=args.name)
     semantics = infer_robot_semantics(
         inspection,
@@ -261,17 +354,42 @@ def main(argv: list[str] | None = None) -> None:
         hands=_parse_csv_list(args.hands),
         key_bodies=_parse_csv_list(args.key_bodies),
     )
-    out_path = write_robot_yaml(
-        args.out,
-        inspection,
-        semantics,
-        root_quat_order=args.root_quat_order,
-        coordinate_system=args.coordinate_system,
-        dof_unit=args.dof_unit,
-        force=args.force,
-    )
+    if args.with_training:
+        out_path = write_robot_training_yaml(args.out, inspection, semantics, hydra_robot=args.hydra_robot, args=args)
+    else:
+        out_path = write_robot_yaml(
+            args.out,
+            inspection,
+            semantics,
+            root_quat_order=args.root_quat_order,
+            coordinate_system=args.coordinate_system,
+            dof_unit=args.dof_unit,
+            force=args.force,
+        )
+    if args.hydra_out is not None:
+        hydra_path = Path(args.hydra_out).expanduser()
+        robot_config = OmegaConf.to_container(OmegaConf.load(out_path), resolve=True)
+        hydra_config = build_hydra_robot_config_draft(
+            model=inspection["model"],
+            robot_config=robot_config,
+            pd_template=args.pd_template,
+            review_status=args.review_status,
+        )
+        _save_yaml(
+            hydra_path,
+            hydra_config,
+            force=bool(args.force),
+            header="# AUTO-GENERATED DRAFT. REVIEW BEFORE TRAINING.\n# @package _global_",
+        )
+        print(f"Wrote Hydra robot config draft: {hydra_path}")
     _print_summary(inspection, semantics)
     print(f"Wrote robot YAML: {out_path}")
+    if args.with_training:
+        robot_config = OmegaConf.to_container(OmegaConf.load(out_path), resolve=True)
+        warnings = list((robot_config.get("metadata") or {}).get("warnings") or [])
+        print("Robot training draft generated. Review semantics, default pose, PD gains, actuator parameters, contact bodies, and reward/termination-related fields before formal training.")
+        for warning in warnings:
+            print(f"  warning: {warning}")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,27 @@ For a new robot, provide:
 - `training.hydra_robot`, `training.init_state`, `training.control`, and
   `training.actuator` fields in the Robot YAML.
 
+## XML-derived Draft Generation
+
+`robot_inspect` can generate a draft RobotTrainingSpec YAML and a matching
+Hydra robot config draft from a MuJoCo XML:
+
+```bash
+uv run python -m humanoidverse.tools.robot_inspect \
+  --xml /path/to/robot.xml \
+  --name my_robot \
+  --out configs/robots/my_robot.yaml \
+  --hydra-out humanoidverse/config/robot/my_robot/my_robot_auto.yaml
+```
+
+`--hydra-out` automatically enables `--with-training` and writes
+`training.hydra_robot` to the inferred Hydra group path, such as
+`my_robot/my_robot_auto`. Structural fields including body names, actuated
+joints, action dimensions, joint ranges, and base body are extracted from XML.
+The result is marked `metadata.review_status: draft`; review semantic body
+groups, contact bodies, default pose, PD gains, actuator parameters, and
+reward/termination-related fields before formal training.
+
 Example smoke command:
 
 ```bash
