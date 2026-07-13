@@ -48,7 +48,7 @@ Robot:
 ## Clone And Install
 
 ```bash
-git clone <YOUR_UFO_DEPLOY_REPO_URL> UFO-Deploy
+git clone --branch deploy --single-branch https://github.com/Xuewang01/UFO.git UFO-Deploy
 cd UFO-Deploy
 export UFO_ROOT=$PWD
 
@@ -122,11 +122,12 @@ The local shell launcher is `scripts/teleop/teleop_pose_50hz.sh`. The `*_onboard
 Run in this order when bringing up a new machine, model, or teleop setup:
 
 ```text
-1. ordinary sim2sim
-2. teleop sim2sim
-3. sync to robot and verify robot environment
-4. ordinary sim2real
-5. teleop sim2real
+1. local ordinary sim2sim
+2. local teleop sim2sim
+3. onboard ordinary sim2real with hoist/support
+4. onboard PICO teleop sim2real, first observe realtime z and robot state without enabling policy
+5. A initializes stable standing -> A+B enables/starts policy -> test B/R2 stop
+6. deliberately disconnect PICO/GMR/ZMQ and confirm the watchdog stops policy action
 ```
 
 ## 1. Ordinary Sim2Sim
