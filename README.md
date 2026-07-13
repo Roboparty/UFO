@@ -38,7 +38,7 @@ inference, with a curated and best-tested path for Unitree G1.
 | Tracking inference | Robot-config aware |
 | Goal inference | Robot-config aware; non-G1 requires robot-specific goal JSON |
 | Reward inference | G1 full default tasks; non-G1 limited to root/locomotion tasks |
-| Deployment and teleoperation | Use the [`deploy` branch](https://github.com/Xuewang01/UFO/tree/deploy) / UFO-Deploy runtime |
+| Deployment and teleoperation | Use the [`deploy` branch](https://github.com/Roboparty/UFO/tree/deploy) / UFO-Deploy runtime |
 | Automatic motion retargeting | Not supported |
 | Cross-robot shared-policy training | Not supported |
 
@@ -47,6 +47,13 @@ inference, with a curated and best-tested path for Unitree G1.
 > deployment and teleoperation runtime live in the `deploy` branch (UFO-Deploy).
 
 ## Install
+
+Clone UFO first:
+
+```bash
+git clone https://github.com/Roboparty/UFO.git
+cd UFO
+```
 
 Install [`uv`](https://docs.astral.sh/uv/):
 
@@ -62,11 +69,9 @@ python -m pip install --user uv
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Clone UFO and install its environment:
+Install the environment:
 
 ```bash
-git clone https://github.com/Xuewang01/UFO.git
-cd UFO
 uv sync
 ```
 
