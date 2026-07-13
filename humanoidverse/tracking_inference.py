@@ -18,7 +18,7 @@ import torch
 from torch.utils._pytree import tree_map
 
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
-from humanoidverse.export_backward_encoder import (
+from humanoidverse.export.backward_encoder import (
     UnsupportedBackwardEncoderExport,
     export_backward_encoder_from_model,
 )
