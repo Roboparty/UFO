@@ -73,6 +73,14 @@ For the teleop environment, PICO/XRobot setup, and online GMR retargeting checks
 
 ## Model Files
 
+Released artifact:
+
+```text
+HF repo: xuewang/ufo-g1-policy
+HF revision: fc5efb7b3bb7a82270abaeabb0cf3c1194f1c7e6
+Runtime commit: 5669f2c9d6fb5e3cfdc75a27ef8d3f7b616b7cb6
+```
+
 The policy directory expected by the commands is:
 
 ```text
@@ -88,12 +96,46 @@ model/g1_policy/
 The `ctx_dir` and `ctx_path` values in `config/exp/*/*.yaml` are resolved under this model
 root by default. The released artifact layout must match the tree above.
 
+Download the runtime artifact:
+
+```bash
+python - <<'PY'
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="xuewang/ufo-g1-policy",
+    repo_type="model",
+    revision="fc5efb7b3bb7a82270abaeabb0cf3c1194f1c7e6",
+    local_dir="model",
+    allow_patterns=[
+        "g1_policy/exported/**",
+        "g1_policy/tracking_inference_mjlab/*.pkl",
+        "g1_policy/reward_inference_mjlab/*.pkl",
+        "g1_policy/goal_inference_mjlab/*.pkl",
+        "g1_policy/release_manifest.yaml",
+        "g1_policy/README.md",
+    ],
+)
+PY
+```
+
+The artifact also contains `g1_policy/tracking_inference_mjlab/tracking_mjlab_*.mp4`
+rollout previews. They are useful for inspection but are not required by runtime policy
+inference. To download the full artifact including videos, change `allow_patterns` to
+`["g1_policy/**"]`.
+
+The default tracking context remains `tracking_inference_mjlab/zs_7.pkl`. Other
+`tracking_inference_mjlab/zs_*.pkl` files are included for offline comparison and manual
+selection; changing the runtime context should be revalidated in sim2sim before real robot
+use.
+
 Verify:
 
 ```bash
 test -f model/g1_policy/exported/FBcprAuxModel.onnx
 test -f model/g1_policy/exported/backward_encoder.onnx
 test -f model/g1_policy/tracking_inference_mjlab/zs_7.pkl
+test -f model/g1_policy/release_manifest.yaml
 ```
 
 ## Repository Map
