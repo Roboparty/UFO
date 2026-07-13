@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import signal
 import sys
 import time
 import numpy as np
@@ -94,6 +96,10 @@ class UFODeployPolicy:
     ) -> None:
         robot_type = robot_config["ROBOT_TYPE"]
         if robot_type == "g1_real":
+            if os.environ.get("UFO_REAL_ROBOT_OK") != "1":
+                raise RuntimeError(
+                    "Refusing to start real robot control without UFO_REAL_ROBOT_OK=1."
+                )
             # example: sys.path.append("/home/unitree/User/unitree_sdk2/build/lib")
             sys.path.append("/home/unitree/unitree_sdk2_bfm/build/lib")
             import g1_interface
@@ -160,10 +166,13 @@ class UFODeployPolicy:
         self.last_pico_buttons: Dict[str, bool] = {}
         self.stop_latched = False
         self.pico_enable_released_after_stop = True
+        self.stop_latch_enable_released_after_stop = True
         self._last_safe_stop_warning = 0.0
         self._last_invalid_z_warning = 0.0
         self._last_z_timeout_warning = 0.0
         self._last_stop_latch_warning = 0.0
+        self._exit_requested = False
+        self._exit_signal_name: str | None = None
 
         self.first_time_init = True
         self.init_count = 0
@@ -470,7 +479,34 @@ class UFODeployPolicy:
     def enter_stop_latch(self, reason: str) -> None:
         self.stop_latched = True
         self.pico_enable_released_after_stop = False
+        self.stop_latch_enable_released_after_stop = False
         self.enter_safe_stop(reason)
+
+    def _request_exit(self, signum, _frame) -> None:
+        self._exit_requested = True
+        try:
+            self._exit_signal_name = signal.Signals(signum).name
+        except ValueError:
+            self._exit_signal_name = str(signum)
+
+    def _install_signal_handlers(self) -> None:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(sig, self._request_exit)
+            except (ValueError, RuntimeError):
+                pass
+
+    def _warn_stop_latch_ignored(self, source: str) -> None:
+        self._warn_throttled(
+            "_last_stop_latch_warning",
+            f"{source} ignored while global stop latch is active; release enable/start inputs, then re-arm explicitly.",
+        )
+
+    def _clear_stop_latch_for_rearm(self, source: str) -> None:
+        self.stop_latched = False
+        self.pico_enable_released_after_stop = True
+        self.stop_latch_enable_released_after_stop = True
+        logger.info(f"{source}: global stop latch cleared")
 
     def _poll_realtime_z(self) -> bool:
         if getattr(self, "ctx_zmq", None) is None:
@@ -656,6 +692,9 @@ class UFODeployPolicy:
         return q_target
 
     def run(self):
+        self._install_signal_handlers()
+        self._exit_requested = False
+        self._exit_signal_name = None
         total_inference_cnt = 0
         state_dict = {}
         state_dict["action"] = np.zeros(self.num_actions)
@@ -667,7 +706,7 @@ class UFODeployPolicy:
             scheduler = sched.scheduler(time.perf_counter, time.sleep)
             next_run_time = time.perf_counter()
             
-            while True:
+            while not self._exit_requested:
                 scheduler.enterabs(next_run_time, 1, self._rl_step_scheduled, ())
                 scheduler.run()
                 
@@ -676,6 +715,8 @@ class UFODeployPolicy:
 
                 if self.total_inference_cnt % 100 == 0:
                     self.perf_dict = {}
+            if self._exit_requested:
+                logger.info(f"{self._exit_signal_name or 'signal'} received, exiting policy loop.")
         except KeyboardInterrupt:
             logger.info("KeyboardInterrupt, exiting policy loop.")
         finally:
@@ -832,17 +873,15 @@ class UFODeployPolicy:
         prev_combo = prev_a and prev_b
         if self.stop_latched and not a and not b:
             self.pico_enable_released_after_stop = True
+            self.stop_latch_enable_released_after_stop = True
 
         if combo and not prev_combo:
-            if self.stop_latched and not self.pico_enable_released_after_stop:
-                self._warn_throttled(
-                    "_last_stop_latch_warning",
-                    "Pico A+B ignored while stop latch is active; release A/B after R2 stop, then press A+B again.",
-                )
-                self.last_pico_buttons = buttons
-                return
-            self.stop_latched = False
-            self.pico_enable_released_after_stop = True
+            if self.stop_latched:
+                if not self.stop_latch_enable_released_after_stop:
+                    self._warn_stop_latch_ignored("Pico A+B")
+                    self.last_pico_buttons = buttons
+                    return
+                self._clear_stop_latch_for_rearm("Pico A+B")
             logger.info("Pico A+B: enable policy and start tracking")
             self.handle_joystick_button("R1")
             self.handle_joystick_button("B")
@@ -875,6 +914,31 @@ class UFODeployPolicy:
             self.last_wc_msg = self.wc_msg
             return True
 
+        if self.stop_latched:
+            enable_or_start_pressed = bool(self.wc_msg.R1 or self.wc_msg.B)
+            if not enable_or_start_pressed:
+                self.stop_latch_enable_released_after_stop = True
+
+            combo = bool(self.wc_msg.R1 and self.wc_msg.B)
+            prev_combo = bool(self.last_wc_msg.R1 and self.last_wc_msg.B)
+            if combo and not prev_combo:
+                if self.stop_latch_enable_released_after_stop:
+                    self._clear_stop_latch_for_rearm("Wireless R1+B")
+                    self.handle_joystick_button("R1")
+                    self.handle_joystick_button("B")
+                else:
+                    self._warn_stop_latch_ignored("Wireless R1+B")
+                self.last_wc_msg = self.wc_msg
+                return False
+
+            if (
+                (self.wc_msg.R1 and not self.last_wc_msg.R1)
+                or (self.wc_msg.B and not self.last_wc_msg.B)
+            ):
+                self._warn_stop_latch_ignored("Wireless enable/start")
+                self.last_wc_msg = self.wc_msg
+                return False
+
         # print(f"wc_msg.A: {self.wc_msg.A}")
         if self.wc_msg.A and not self.last_wc_msg.A:
             self.handle_joystick_button("A")
@@ -897,6 +961,9 @@ class UFODeployPolicy:
 
     def handle_joystick_button(self, cur_key):
         if cur_key == "R1":
+            if self.stop_latched:
+                self._warn_stop_latch_ignored("R1 enable")
+                return
             logger.info("Using policy actions")
             self.use_policy_action = True
             self.get_ready_state = False    
@@ -916,6 +983,9 @@ class UFODeployPolicy:
             self.init_count = 0
             logger.info(colored("Setting to init state (do this when robot was in a bad shape)", "blue"))
         elif cur_key == "B":
+            if self.stop_latched:
+                self._warn_stop_latch_ignored("B start")
+                return
             if self.task_type == "tracking":
                 logger.info("Starting motion")
                 self.start_motion = True
@@ -980,6 +1050,9 @@ class UFODeployPolicy:
 
     def handle_keyboard_button(self, keycode):
         if keycode == "]":
+            if self.stop_latched:
+                self._warn_stop_latch_ignored("Keyboard ] enable")
+                return
             logger.info("Using policy actions")
             self.use_policy_action = True
             self.get_ready_state = False    
@@ -991,6 +1064,9 @@ class UFODeployPolicy:
             if self.task_type == "tracking":
                 self.t = self.t_stop
         elif keycode == "[":
+            if self.stop_latched:
+                self._warn_stop_latch_ignored("Keyboard [ start")
+                return
             if self.task_type == "tracking":
                 logger.info("Starting motion")
                 self.start_motion = True

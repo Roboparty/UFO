@@ -1,4 +1,5 @@
 from collections import deque
+import os
 from pathlib import Path
 import sys
 import time
@@ -61,6 +62,7 @@ def _policy(num_dofs=3):
     policy.last_pico_buttons = {}
     policy.stop_latched = False
     policy.pico_enable_released_after_stop = True
+    policy.stop_latch_enable_released_after_stop = True
     policy._last_safe_stop_warning = 0.0
     policy._last_invalid_z_warning = 0.0
     policy._last_z_timeout_warning = 0.0
@@ -124,6 +126,16 @@ def test_r2_latch_blocks_pico_enable_until_release_and_repress():
     assert policy.start_motion
 
 
+def test_r2_latch_blocks_wireless_r1_enable():
+    policy = _policy()
+    policy.enter_stop_latch("test R2")
+
+    policy.handle_joystick_button("R1")
+
+    assert not policy.use_policy_action
+    assert policy.stop_latched
+
+
 def test_q_target_slew_limit_uses_joint_velocity_limit():
     policy = _policy(num_dofs=2)
     policy.last_cmd_q = np.array([0.0, 0.0])
@@ -136,9 +148,30 @@ def test_q_target_slew_limit_uses_joint_velocity_limit():
     np.testing.assert_allclose(limited, np.array([0.5, -0.1]))
 
 
+def test_g1_real_requires_explicit_real_robot_env():
+    old = os.environ.pop("UFO_REAL_ROBOT_OK", None)
+    try:
+        try:
+            UFODeployPolicy(
+                robot_config={"ROBOT_TYPE": "g1_real"},
+                policy_config={},
+                exp_config={},
+                model_path="",
+            )
+        except RuntimeError as exc:
+            assert "UFO_REAL_ROBOT_OK=1" in str(exc)
+        else:
+            raise AssertionError("g1_real policy started without UFO_REAL_ROBOT_OK=1")
+    finally:
+        if old is not None:
+            os.environ["UFO_REAL_ROBOT_OK"] = old
+
+
 if __name__ == "__main__":
     test_stale_realtime_z_enters_safe_stop()
     test_nan_realtime_z_is_ignored()
     test_r2_latch_blocks_pico_enable_until_release_and_repress()
+    test_r2_latch_blocks_wireless_r1_enable()
     test_q_target_slew_limit_uses_joint_velocity_limit()
+    test_g1_real_requires_explicit_real_robot_env()
     print("ufo_policy safety tests ok")

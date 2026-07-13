@@ -326,15 +326,34 @@ def _extract_latest_frame(payload: Dict[str, Any]) -> Optional[PoseFrame]:
         return None
     if len(dof_pos) != 29:
         return None
-    rp = np.asarray(root_pos, dtype=np.float32).reshape(3)
-    rq = np.asarray(root_quat, dtype=np.float32).reshape(4)
-    dq = np.asarray(dof_pos, dtype=np.float32).reshape(29)
+    try:
+        rp = np.asarray(root_pos, dtype=np.float32).reshape(3)
+        rq = np.asarray(root_quat, dtype=np.float32).reshape(4)
+        dq = np.asarray(dof_pos, dtype=np.float32).reshape(29)
+    except (TypeError, ValueError):
+        return None
+    if not (
+        np.all(np.isfinite(rp))
+        and np.all(np.isfinite(rq))
+        and np.all(np.isfinite(dq))
+    ):
+        return None
     n = float(np.linalg.norm(rq))
-    if np.isfinite(n) and n > 1e-6:
-        rq = (rq / n).astype(np.float32)
-    else:
-        rq = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    if not np.isfinite(n) or n <= 1e-6:
+        return None
+    rq = (rq / n).astype(np.float32)
     return PoseFrame(root_pos=rp, root_quat_wxyz=rq, dof_pos=dq)
+
+
+def _is_pose_stale(
+    last_valid_pose_monotonic: Optional[float],
+    max_pose_stale_s: Optional[float],
+    now: Optional[float] = None,
+) -> bool:
+    if last_valid_pose_monotonic is None or max_pose_stale_s is None:
+        return False
+    now_s = time.monotonic() if now is None else float(now)
+    return now_s - float(last_valid_pose_monotonic) > float(max_pose_stale_s)
 
 
 def _quat_normalize_wxyz(q: np.ndarray, eps: float = 1e-8) -> np.ndarray:
@@ -634,6 +653,7 @@ class OnlineZInferer:
         self._wall_step_t0: Optional[float] = None
         self._prev_z_dbg: Optional[np.ndarray] = None
         self._dbg_last_print: float = 0.0
+        self._last_invalid_z_warning: float = 0.0
         self.max_z_delta = float(max_z_delta)
         self.fix_quat_continuity = bool(fix_quat_continuity)
         if str(angvel_delta_frame) not in ("local", "world"):
@@ -715,7 +735,27 @@ class OnlineZInferer:
 
         return all_body_pos.astype(np.float64), all_body_rot_xyzw.astype(np.float64)
 
-    def step(self, pose: PoseFrame, mode: str = "follow") -> np.ndarray:
+    def _warn_invalid_z(self, message: str) -> None:
+        now = time.monotonic()
+        if now - self._last_invalid_z_warning >= 1.0:
+            print(f"[realtime_z_server] {message}", flush=True)
+            self._last_invalid_z_warning = now
+
+    def _validate_z_output(self, z: Any) -> Optional[np.ndarray]:
+        try:
+            z_np = np.asarray(z, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            self._warn_invalid_z("invalid ONNX z output; not publishing z")
+            return None
+        if z_np.shape != (256,):
+            self._warn_invalid_z(f"invalid ONNX z shape {z_np.shape}; not publishing z")
+            return None
+        if not np.all(np.isfinite(z_np)):
+            self._warn_invalid_z("non-finite ONNX z output; not publishing z")
+            return None
+        return z_np
+
+    def step(self, pose: PoseFrame, mode: str = "follow") -> Optional[np.ndarray]:
         now_wall = time.perf_counter()
 
         root_pos = pose.root_pos.astype(np.float32)
@@ -821,16 +861,16 @@ class OnlineZInferer:
         if "privileged_state" in self.session_input_names:
             feed["privileged_state"] = privileged_state
 
-        z_np = self.session.run([self.session_output_name], feed)[0]
-        z_np = np.asarray(z_np, dtype=np.float32).reshape(-1)
+        z_np = self._validate_z_output(self.session.run([self.session_output_name], feed)[0])
+        if z_np is None:
+            return None
 
         if self.max_z_delta > 0.0 and z_np.shape[0] == self.last_z.shape[0]:
             dz_raw = z_np - self.last_z
             dz_clip = np.clip(dz_raw, -self.max_z_delta, self.max_z_delta)
             z_np = (self.last_z + dz_clip).astype(np.float32)
 
-        if z_np.shape[0] == 256:
-            self.last_z = z_np
+        self.last_z = z_np
 
         if self.debug_z and self._prev_z_dbg is not None:
             if now_wall - self._dbg_last_print >= 1.0:
@@ -909,7 +949,7 @@ def main() -> None:
             fix_quat_continuity=bool(args.fix_quat_continuity),
             angvel_delta_frame=str(args.angvel_delta_frame),
         )
-        print("[realtime_z_server] z_mode: BFM realtime inference (ONNX)")
+        print("[realtime_z_server] z_mode: UFO realtime inference (ONNX)")
         print("[realtime_z_server] backward_onnx:", args.backward_onnx)
         print("[realtime_z_server] backward_onnx_inputs:", sorted(inferer.session_input_names))
         print("[realtime_z_server] backward_onnx_output:", inferer.session_output_name)
@@ -950,6 +990,13 @@ def main() -> None:
     time.sleep(0.2)  # PUB slow-joiner + teleop connect
 
     latest_pose: Optional[PoseFrame] = None
+    last_valid_pose_monotonic: Optional[float] = None
+    last_pose_stale_warning = 0.0
+    max_pose_stale_s = (
+        float(args.max_retarget_age_ms) / 1000.0
+        if float(args.max_retarget_age_ms) >= 0.0
+        else None
+    )
     current_pose: Optional[PoseFrame] = None
     pose_buffer: Optional[PoseFrameBuffer] = None
     pose_buffer_info: Dict[str, Any] = {"mode": "disabled", "buffer_len": 0}
@@ -999,6 +1046,7 @@ def main() -> None:
                         frame = _extract_latest_frame(payload)
                     if frame is not None:
                         latest_pose = frame
+                        last_valid_pose_monotonic = time.monotonic()
                         if pose_buffer is not None:
                             pose_buffer.append(frame, pose_recv_ns)
             except Exception:
@@ -1033,6 +1081,16 @@ def main() -> None:
             sampled_pose, pose_buffer_info = pose_buffer.sample(time.monotonic_ns())
             if sampled_pose is not None:
                 current_pose = sampled_pose
+        if mode == "follow" and _is_pose_stale(last_valid_pose_monotonic, max_pose_stale_s):
+            now_warn = time.monotonic()
+            if now_warn - last_pose_stale_warning >= 1.0:
+                print(
+                    "[realtime_z_server] teleop pose stale; not publishing z",
+                    flush=True,
+                )
+                last_pose_stale_warning = now_warn
+            current_pose = None
+            continue
         if current_pose is None and mode == "follow":
             continue
 
@@ -1043,6 +1101,8 @@ def main() -> None:
             z = inferer.step(current_pose, mode=mode)
         else:
             z = _standing_z()
+        if z is None:
+            continue
 
         if not args.dry_run:
             try:

@@ -295,7 +295,7 @@ source /home/unitree/ufo_deploy_venv/bin/activate
 export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
 export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
 export PYTHONPATH=/home/unitree/unitree_sdk2_bfm/build/lib:$PYTHONPATH
-python rl_policy/ufo_policy.py \
+UFO_REAL_ROBOT_OK=1 python rl_policy/ufo_policy.py \
   --robot_config config/robot/g1_real.yaml \
   --policy_config config/policy/g1_policy.yaml \
   --model_path model/g1_policy/exported/FBcprAuxModel.onnx \
@@ -376,9 +376,9 @@ B      stop policy action and hold current joints
 X      reset tracking motion
 ```
 
-The G1 wireless controller remains active as a fallback. Wireless R2 is a stop latch: while R2 is held, policy action and tracking motion are disabled and Pico control is skipped. After R2 is released, Pico A+B remains ignored until Pico A and B have both been released and then pressed again.
+The G1 wireless controller remains active as a fallback. Wireless R2 is a global stop latch: policy action and tracking motion are disabled, Pico control is skipped while R2 is held, and enable/start inputs cannot directly clear the latch. After R2 is released, release enable/start inputs first; then re-arm explicitly with Pico A+B or wireless R1+B.
 
-The policy subscriber rejects invalid realtime `z` packets and stops policy action if no valid 256-dim finite `z` arrives within `ctx_zmq_timeout_ms`. Policy actions and final joint targets are checked for finite values, and final `q_target` commands are slew-rate limited using the configured G1 joint velocity limits.
+The realtime `z` server stops publishing valid `z` when the teleop pose stream is stale or invalid. The policy subscriber rejects invalid realtime `z` packets and stops policy action if no valid 256-dim finite `z` arrives within `ctx_zmq_timeout_ms`. Policy actions and final joint targets are checked for finite values, and final `q_target` commands are slew-rate limited using the configured G1 joint velocity limits.
 
 A physical e-stop is still required.
 
@@ -442,7 +442,7 @@ source /home/unitree/ufo_deploy_venv/bin/activate
 export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
 export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
 export PYTHONPATH=/home/unitree/unitree_sdk2_bfm/build/lib:$PYTHONPATH
-python rl_policy/ufo_policy.py \
+UFO_REAL_ROBOT_OK=1 python rl_policy/ufo_policy.py \
   --robot_config config/robot/g1_real.yaml \
   --policy_config config/policy/g1_policy.yaml \
   --model_path model/g1_policy/exported/FBcprAuxModel.onnx \
@@ -484,9 +484,12 @@ python -m py_compile \
   utils/common.py \
   utils/math.py \
   utils/strings.py \
-  tests/test_ufo_policy_safety.py
+  tests/test_ufo_policy_safety.py \
+  tests/test_realtime_z_server_safety.py
 
 python tests/test_ufo_policy_safety.py
+python tests/test_realtime_z_server_safety.py
 
 git diff --check
+git diff --cached --check
 ```
