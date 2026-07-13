@@ -1,0 +1,2206 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="description" content="UFO: An Unsupervised Reinforcement Learning Framework for Humanoid Control">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>UFO: An Unsupervised Reinforcement Learning Framework for Humanoid Control</title>
+  <link rel="icon" type="image/png" href="./assets/UFO.png">
+  <style>
+    :root {
+      --bg: #f6f8f6;
+      --surface: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --accent: #5b8f3a;
+      --accent-2: #4f46e5;
+      --border: #e5e7eb;
+      --shadow: 0 10px 26px rgba(0, 0, 0, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      line-height: 1.55;
+    }
+
+    .container {
+      width: min(1180px, 92vw);
+      margin: 0 auto;
+    }
+
+    main .container {
+      width: min(980px, 84vw);
+    }
+
+    .hero {
+      position: relative;
+      min-height: 82vh;
+      border-bottom: 1px solid var(--border);
+      padding: 64px 0 52px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+    }
+
+    .hero-video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      z-index: 0;
+    }
+
+    .hero-overlay {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(145deg, rgba(15, 23, 42, 0.56) 0%, rgba(30, 41, 59, 0.42) 40%, rgba(15, 23, 42, 0.56) 100%);
+      z-index: 1;
+    }
+
+    .hero .container {
+      position: relative;
+      z-index: 2;
+    }
+
+    h1 {
+      margin: 0;
+      text-align: center;
+      font-size: clamp(1.4rem, 3.1vw, 2.3rem);
+      line-height: 1.2;
+    }
+
+    .title-icon {
+      width: 64px;
+      height: auto;
+      vertical-align: middle;
+      margin-right: 10px;
+    }
+
+    .acronym-letter {
+      color: #00eaff;
+      font-weight: inherit;
+    }
+
+    .subtitle {
+      margin: 12px auto 0;
+      text-align: center;
+      color: var(--muted);
+      max-width: 820px;
+      font-size: 1.02rem;
+    }
+
+    .hero h1,
+    .hero .subtitle {
+      color: #f8fafc;
+      text-shadow: 0 2px 16px rgba(0, 0, 0, 0.45);
+    }
+
+    .hero-links {
+      margin-top: 16px;
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .lang-switch {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 80;
+      border: 1px solid rgba(255, 255, 255, 0.45);
+      background: rgba(15, 23, 42, 0.62);
+      color: #f8fafc;
+      border-radius: 999px;
+      padding: 7px 14px;
+      font-size: 0.9rem;
+      font-weight: 700;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+      transition: background-color 0.2s ease, transform 0.16s ease;
+    }
+
+    .lang-switch:hover {
+      background: rgba(30, 41, 59, 0.82);
+      transform: translateY(-1px);
+    }
+
+    .hero-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 92px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.65);
+      background: rgba(15, 23, 42, 0.32);
+      color: #f8fafc;
+      text-decoration: none;
+      font-weight: 600;
+      transition: background 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .hero-link:hover {
+      background: rgba(248, 250, 252, 0.18);
+      border-color: rgba(255, 255, 255, 0.9);
+      transform: translateY(-1px);
+    }
+
+    .logo-wrap {
+      margin-top: 20px;
+      text-align: center;
+    }
+
+    .logo-wrap img {
+      width: min(420px, 78vw);
+      max-width: 100%;
+      filter: brightness(0) invert(1);
+    }
+
+    section {
+      padding: 48px 0;
+    }
+
+    h2 {
+      margin: 0 0 16px;
+      font-size: clamp(1.36rem, 2.75vw, 2.1rem);
+    }
+
+    .abstract-lead {
+      color: var(--muted);
+      margin-bottom: 18px;
+      font-size: 1.08rem;
+      line-height: 1.75;
+    }
+
+    .abstract-secondary {
+      margin-top: 12px;
+    }
+
+    .abstract-method {
+      font-weight: 700;
+    }
+
+    .abstract-key {
+      font-weight: 800;
+      color: #111827;
+      background: rgba(250, 204, 21, 0.2);
+      padding: 0 4px;
+      border-radius: 4px;
+    }
+
+    .abstract-item-1 {
+      color: #be185d;
+      font-weight: 600;
+    }
+
+    .abstract-item-2 {
+      color: #a16207;
+      font-weight: 600;
+    }
+
+    .abstract-item-3 {
+      color: #15803d;
+      font-weight: 600;
+    }
+
+    .abstract-item-4 {
+      color: #1d4ed8;
+      font-weight: 600;
+    }
+
+    .abstract-figure {
+      position: relative;
+      border-radius: 16px;
+      overflow: hidden;
+      background: #fff;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+    }
+
+    .abstract-figure img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .highlight-pin {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      border: 1px solid rgba(255, 255, 255, 0.9);
+      background: rgba(15, 23, 42, 0.78);
+      color: #fff;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.95rem;
+      text-decoration: none;
+      font-weight: 700;
+      transition: transform 0.18s ease, background 0.18s ease;
+    }
+
+    .highlight-pin:hover {
+      transform: translate(-50%, -50%) scale(1.11);
+      background: rgba(31, 41, 55, 0.95);
+    }
+
+    .highlight-pin.highlight-1 {
+      background: #ec4899;
+    }
+
+    .highlight-pin.highlight-2 {
+      background: #facc15;
+    }
+
+    .highlight-pin.highlight-3 {
+      background: #22c55e;
+    }
+
+    .highlight-pin.highlight-4 {
+      background: #3b82f6;
+    }
+
+    .pins-note {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.93rem;
+    }
+
+    .highlights-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 20px;
+    }
+
+    .highlight-card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .highlight-card h3 {
+      margin: 0;
+      padding: 14px 16px 10px;
+      font-size: clamp(0.98rem, 1.34vw, 1.14rem);
+    }
+
+    .highlight-card p {
+      margin: 0;
+      padding: 0 16px 14px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .highlight-card.highlight-1 {
+      border-top: 4px solid #ec4899;
+    }
+
+    .highlight-card.highlight-1 h3 {
+      color: #be185d;
+    }
+
+    .highlight-card.highlight-2 {
+      border-top: 4px solid #facc15;
+    }
+
+    .highlight-card.highlight-2 h3 {
+      color: #a16207;
+    }
+
+    .highlight-card.highlight-3 {
+      border-top: 4px solid #22c55e;
+    }
+
+    .highlight-card.highlight-3 h3 {
+      color: #15803d;
+    }
+
+    .highlight-card.highlight-4 {
+      border-top: 4px solid #3b82f6;
+    }
+
+    .highlight-card.highlight-4 h3 {
+      color: #1d4ed8;
+    }
+
+    .highlight-media-wrap {
+      position: relative;
+      margin: 0 12px 12px;
+      border-radius: 12px;
+      overflow: hidden;
+      background: linear-gradient(135deg, #e8f0ff, #f7f9ec);
+      border: 1px solid #dbe3ef;
+      min-height: 220px;
+    }
+
+    .highlight-media {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: transform 0.35s ease, filter 0.35s ease;
+    }
+
+    .highlight-card:hover .highlight-media {
+      transform: scale(1.045) translateY(-3px);
+      filter: saturate(1.1) contrast(1.04);
+    }
+
+    #highlight-2-card .highlight-media {
+      filter: sepia(0.28) hue-rotate(-12deg) saturate(1.18) brightness(1.03);
+    }
+
+    #highlight-2-card:hover .highlight-media {
+      filter: sepia(0.35) hue-rotate(-12deg) saturate(1.24) brightness(1.04) contrast(1.03);
+    }
+
+    #highlight-2-card .highlight2-hover-preview {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.22s ease;
+      z-index: 2;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: inset 0 0 0 2px rgba(250, 204, 21, 0.7);
+    }
+
+    #highlight-2-card .highlight2-hover-preview video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      filter: none;
+    }
+
+    #highlight-2-card .highlight-media-wrap:hover .highlight2-hover-preview {
+      opacity: 1;
+    }
+
+    .detail-section {
+      padding-top: 20px;
+      margin-top: 42px;
+      border-top: 1px dashed #d8dee8;
+    }
+
+    .detail-section h3 {
+      margin: 0 0 10px;
+      color: var(--accent-2);
+      font-size: clamp(1.5rem, 2.45vw, 2.08rem);
+    }
+
+    .detail-section p {
+      margin: 0;
+      color: #374151;
+    }
+
+    #highlight-1 {
+      border-top-color: #f9a8d4;
+    }
+
+    #highlight-1 h3 {
+      color: #be185d;
+      font-size: clamp(1.34rem, 2.7vw, 1.98rem);
+    }
+
+    #highlight-2 {
+      border-top-color: #fde68a;
+    }
+
+    #highlight-2 h3 {
+      color: #eab308;
+      text-shadow: 0 1px 0 rgba(120, 53, 15, 0.35);
+      font-size: clamp(1.34rem, 2.7vw, 1.98rem);
+    }
+
+    #highlight-3 {
+      border-top-color: #86efac;
+    }
+
+    #highlight-3 h3 {
+      color: #16a34a;
+      font-size: clamp(1.34rem, 2.7vw, 1.98rem);
+    }
+
+    .section3-block {
+      display: grid;
+      gap: 16px;
+    }
+
+    .section3-figure {
+      margin: 0;
+      border: 1px solid #dcfce7;
+      border-radius: 12px;
+      background: #f0fdf4;
+      padding: 10px;
+      box-shadow: 0 10px 24px rgba(22, 163, 74, 0.08);
+    }
+
+    .section3-figure img,
+    .section3-figure video {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 10px;
+    }
+
+    .section3-points {
+      margin: 0;
+      padding-left: 0.55rem;
+      color: #166534;
+      font-size: clamp(1.12rem, 1.7vw, 1.28rem);
+      line-height: 1.6;
+    }
+
+    .section3-points li + li {
+      margin-top: 8px;
+    }
+
+    #highlight-4 {
+      border-top-color: #93c5fd;
+    }
+
+    #highlight-4 h3 {
+      color: #1d4ed8;
+      font-size: clamp(1.34rem, 2.7vw, 1.98rem);
+    }
+
+    .viz-grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .result-panel {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #fff;
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .metric-block {
+      margin-bottom: 14px;
+    }
+
+    .metric-block:last-child {
+      margin-bottom: 0;
+    }
+
+    .metric-title {
+      font-size: 0.92rem;
+      color: #4b5563;
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: 72px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      margin: 5px 0;
+    }
+
+    .bar-label {
+      font-size: 0.85rem;
+      color: #6b7280;
+      white-space: nowrap;
+    }
+
+    .bar-track {
+      width: 100%;
+      height: 12px;
+      border-radius: 999px;
+      background: #edf2f7;
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      width: 0;
+      height: 100%;
+      border-radius: 999px;
+      animation: growBar 1.1s ease forwards;
+    }
+
+    .bar-fill.bfm {
+      background: #9ca3af;
+    }
+
+    .bar-fill.ufo {
+      background: linear-gradient(90deg, #8b5cf6, #22c55e);
+    }
+
+    .bar-value {
+      font-size: 0.82rem;
+      color: #374151;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .emd-figure {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      display: block;
+      background: #fff;
+    }
+
+    .figure-hotspot-wrap {
+      position: relative;
+      overflow: hidden;
+      border-radius: 12px;
+    }
+
+    .real-chart-panel {
+      margin-top: 14px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .real-chart-panel svg {
+      width: 100%;
+      height: auto;
+      display: block;
+      background: #fff;
+    }
+
+    .real-axis {
+      stroke: #334155;
+      stroke-width: 1.4;
+    }
+
+    .real-grid {
+      stroke: #e2e8f0;
+      stroke-width: 1;
+      stroke-dasharray: 4 4;
+    }
+
+    .real-label {
+      fill: #475569;
+      font-size: 18px;
+      font-weight: 500;
+    }
+
+    .real-legend-label {
+      fill: #1f2937;
+      font-size: 25px;
+      font-weight: 600;
+    }
+
+    .real-legend-label-ufo {
+      fill: #9f1239;
+    }
+
+    .real-curve-bfm,
+    .real-curve-ufo {
+      fill: none;
+      stroke-width: 4.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-dasharray: 1500;
+      stroke-dashoffset: 1500;
+      animation: drawCurve 1.75s ease-out forwards;
+    }
+
+    .real-curve-bfm {
+      stroke: #7f7f7f;
+    }
+
+    .real-curve-ufo {
+      stroke: #9f1239;
+      animation-delay: 0.1s;
+    }
+
+    .real-deploy-zone,
+    .real-deploy-boundary,
+    .real-note,
+    .real-benchmark-zone,
+    .real-benchmark-boundary,
+    .real-benchmark-note {
+      opacity: 0;
+      animation: fadeInZone 0.2s ease 1.62s forwards;
+    }
+
+    .real-deploy-zone {
+      fill: rgba(190, 24, 93, 0.14);
+    }
+
+    .real-deploy-boundary {
+      stroke: #9f1239;
+      stroke-width: 1.4;
+      stroke-dasharray: 5 5;
+    }
+
+    .real-note rect {
+      fill: rgba(255, 245, 247, 0.94);
+      stroke: #9f1239;
+      stroke-width: 1.8;
+      rx: 9;
+      ry: 9;
+    }
+
+    .real-note text {
+      fill: #881337;
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    .real-benchmark-zone {
+      fill: rgba(107, 114, 128, 0.14);
+    }
+
+    .real-benchmark-boundary {
+      stroke: #6b7280;
+      stroke-width: 1.4;
+      stroke-dasharray: 5 5;
+    }
+
+    .real-benchmark-note rect {
+      fill: rgba(248, 250, 252, 0.95);
+      stroke: #6b7280;
+      stroke-width: 1.8;
+      rx: 9;
+      ry: 9;
+    }
+
+    .real-benchmark-note text {
+      fill: #4b5563;
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    .real-hotspot {
+      opacity: 0;
+      animation: fadeInZone 0.18s ease 1.72s forwards;
+    }
+
+    .real-hotspot circle.outer {
+      fill: rgba(239, 68, 68, 0.26);
+    }
+
+    .real-hotspot circle.inner {
+      fill: #ef4444;
+      stroke: #ffffff;
+      stroke-width: 2.5;
+    }
+
+    .real-hotspot text {
+      fill: #7f1d1d;
+      font-size: 16px;
+      font-weight: 700;
+      text-anchor: middle;
+    }
+
+    .real-hotspot {
+      cursor: pointer;
+    }
+
+    .real-hover-video {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: min(260px, 42vw);
+      aspect-ratio: 16 / 9;
+      border-radius: 10px;
+      border: 2px solid rgba(190, 24, 93, 0.8);
+      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.28);
+      overflow: hidden;
+      background: #000;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 8;
+      transform: translate(10px, -50%) scale(0.96);
+      transition: opacity 0.16s ease, transform 0.16s ease;
+    }
+
+    .real-hover-video.show {
+      opacity: 1;
+      transform: translate(10px, -50%) scale(1);
+    }
+
+    .real-hover-video::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translate(-100%, -50%);
+      width: 0;
+      height: 0;
+      border-top: 10px solid transparent;
+      border-bottom: 10px solid transparent;
+      border-right: 12px solid rgba(190, 24, 93, 0.8);
+    }
+
+    .real-hover-video::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translate(-100%, -50%);
+      margin-left: 2px;
+      width: 0;
+      height: 0;
+      border-top: 8px solid transparent;
+      border-bottom: 8px solid transparent;
+      border-right: 10px solid #000;
+    }
+
+    .real-hover-video.left-side {
+      transform: translate(calc(-100% - 10px), -50%) scale(0.96);
+    }
+
+    .real-hover-video.left-side.show {
+      transform: translate(calc(-100% - 10px), -50%) scale(1);
+    }
+
+    .real-hover-video.left-side::before {
+      left: 100%;
+      top: 50%;
+      transform: translate(0, -50%);
+      border-right: none;
+      border-left: 12px solid rgba(190, 24, 93, 0.8);
+    }
+
+    .real-hover-video.left-side::after {
+      left: 100%;
+      top: 50%;
+      transform: translate(0, -50%);
+      margin-left: -2px;
+      border-right: none;
+      border-left: 10px solid #000;
+    }
+
+    .real-hover-video video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .real-hover-note {
+      position: absolute;
+      left: 0;
+      top: 0;
+      min-width: 210px;
+      max-width: min(280px, 46vw);
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 2px solid rgba(159, 18, 57, 0.85);
+      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.24);
+      background: rgba(255, 245, 247, 0.98);
+      color: #881337;
+      font-size: 16px;
+      font-weight: 600;
+      line-height: 1.2;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 8;
+      transform: translate(2px, -50%) scale(0.96);
+      transition: opacity 0.16s ease, transform 0.16s ease;
+    }
+
+    .real-hover-note.show {
+      opacity: 1;
+      transform: translate(2px, -50%) scale(1);
+    }
+
+    .real-hover-note::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translate(-100%, -50%);
+      width: 0;
+      height: 0;
+      border-left: 10px solid transparent;
+      border-right: 10px solid transparent;
+      border-top: 10px solid transparent;
+      border-bottom: 10px solid transparent;
+      border-right: 12px solid rgba(159, 18, 57, 0.85);
+    }
+
+    .real-hover-note::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translate(-100%, -50%);
+      margin-left: 2px;
+      width: 0;
+      height: 0;
+      border-top: 8px solid transparent;
+      border-bottom: 8px solid transparent;
+      border-right: 10px solid rgba(255, 245, 247, 0.98);
+    }
+
+    .real-hover-note.left-side {
+      transform: translate(calc(-100% - 2px), -50%) scale(0.96);
+    }
+
+    .real-hover-note.left-side.show {
+      transform: translate(calc(-100% - 2px), -50%) scale(1);
+    }
+
+    .real-hover-note.left-side::before {
+      left: 100%;
+      top: 50%;
+      transform: translate(0, -50%);
+      border-right: none;
+      border-left: 12px solid rgba(159, 18, 57, 0.85);
+    }
+
+    .real-hover-note.left-side::after {
+      left: 100%;
+      top: 50%;
+      transform: translate(0, -50%);
+      margin-left: -2px;
+      border-right: none;
+      border-left: 10px solid rgba(255, 245, 247, 0.98);
+    }
+
+    .section1-gallery {
+      --gallery-accent: #ec4899;
+      margin-top: 14px;
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-bottom: 8px;
+      scroll-snap-type: x proximity;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-color: var(--gallery-accent) #f1f5f9;
+      cursor: grab;
+    }
+
+    .section1-gallery.dragging {
+      cursor: grabbing;
+      user-select: none;
+    }
+
+    .section1-gallery::-webkit-scrollbar {
+      height: 10px;
+    }
+
+    .section1-gallery::-webkit-scrollbar-thumb {
+      background: var(--gallery-accent);
+      border-radius: 999px;
+    }
+
+    .section1-gallery::-webkit-scrollbar-track {
+      background: #f1f5f9;
+      border-radius: 999px;
+    }
+
+    .section1-gallery > * {
+      scroll-snap-align: start;
+    }
+
+    .section1-gallery-item {
+      flex: 0 0 auto;
+      width: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+
+    .section1-gallery-item video {
+      width: auto;
+      height: 260px;
+      display: block;
+      object-fit: contain;
+      background: #000;
+    }
+
+    .gallery-h2 {
+      --gallery-accent: #facc15;
+    }
+
+    .gallery-h4 {
+      --gallery-accent: #3b82f6;
+    }
+
+    .section1-gallery-caption {
+      margin: 0;
+      padding: 8px 10px;
+      font-size: 1.04rem;
+      color: #475569;
+      text-align: center;
+      border-top: 1px solid #e5e7eb;
+    }
+
+    .section2-explainer {
+      margin: 20px auto 42px;
+      width: min(920px, 92%);
+      color: #5b4a00;
+      line-height: 1.65;
+      font-size: clamp(1.24rem, 1.9vw, 1.52rem);
+      text-align: center;
+    }
+
+    .section2-explainer strong {
+      color: #a16207;
+    }
+
+    .section2-figure {
+      margin: 0 auto 14px;
+      width: min(860px, 86%);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+      background: #fffef3;
+      position: relative;
+    }
+
+    .section2-figure-title {
+      margin: 12px 0 18px;
+      padding-top: 0;
+      text-align: center;
+      color: #a16207;
+      text-shadow: none;
+      text-decoration: none;
+      font-size: clamp(1.06rem, 1.9vw, 1.28rem);
+      font-weight: 700;
+      line-height: 1.3;
+    }
+
+    .section2-figure img {
+      display: block;
+      width: 100%;
+      height: auto;
+      transition: transform 0.28s ease;
+      transform-origin: center;
+    }
+
+    .section2-figure:hover img {
+      transform: scaleX(-1);
+    }
+
+    .section2-figure-overlay {
+      position: absolute;
+      inset: 0;
+      padding: clamp(14px, 2.2vw, 24px);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 10px;
+      background: rgba(255, 250, 230, 0.95);
+      color: #5b4a00;
+      font-size: clamp(1.16rem, 1.55vw, 1.32rem);
+      line-height: 1.62;
+      opacity: 0;
+      transition: opacity 0.22s ease;
+      pointer-events: none;
+    }
+
+    .section2-figure:hover .section2-figure-overlay {
+      opacity: 1;
+    }
+
+    .section2-figure-overlay strong {
+      color: #a16207;
+    }
+
+    .section2-figure-overlay ul {
+      margin: 0;
+      padding-left: 0;
+      list-style: none;
+    }
+
+    .section2-figure-overlay li + li {
+      margin-top: 6px;
+    }
+
+    .section2-figure-pngflip {
+      background: transparent;
+      box-shadow: none;
+      border-radius: 0;
+      overflow: visible;
+      width: auto;
+      max-width: 100%;
+      margin: 0;
+      flex: 0 1 auto;
+      display: block;
+    }
+
+    .section2-flip-grid {
+      --section2-card-height: clamp(170px, 21vw, 230px);
+      width: min(1040px, 96%);
+      margin: 0 auto 14px;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      flex-wrap: nowrap;
+      gap: 16px;
+    }
+
+    .section2-png-flip-inner {
+      position: relative;
+      display: inline-block;
+      width: auto;
+      height: auto;
+      min-height: 0;
+      background: transparent;
+      box-shadow: none;
+      border-radius: 0;
+      overflow: visible;
+    }
+
+    .section2-png-face {
+      width: auto;
+      height: auto;
+      background: rgba(255, 251, 235, 0.92);
+      transition: opacity 0.24s ease;
+    }
+
+    .section2-png-front {
+      position: relative;
+      display: inline-block;
+      z-index: 1;
+      background: transparent;
+    }
+
+    .section2-png-back {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .section2-figure-pngflip:hover .section2-png-back,
+    .section2-figure-pngflip:focus-within .section2-png-back {
+      opacity: 1;
+    }
+
+    .section2-figure-pngflip:hover .section2-png-front-img {
+      transform: none;
+    }
+
+    .section2-figure .section2-png-front-img {
+      width: auto !important;
+      height: var(--section2-card-height) !important;
+      max-width: none !important;
+      display: block;
+      object-fit: contain;
+      padding: 0;
+      transition: none;
+    }
+
+    .section2-png-front-caption {
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      bottom: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(255, 251, 235, 0.93);
+      border: 1px solid rgba(250, 204, 21, 0.6);
+      color: #78350f;
+      font-size: clamp(0.96rem, 1.22vw, 1.08rem);
+      line-height: 1.48;
+    }
+
+    .section2-png-front-caption strong {
+      color: #a16207;
+    }
+
+    .section2-png-back-text {
+      padding: clamp(16px, 2.4vw, 24px);
+      color: #713f12;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      line-height: 1.58;
+      font-size: clamp(0.92rem, 1.2vw, 1.02rem);
+      background: rgba(255, 251, 235, 0.94);
+      border: none;
+      border-radius: 0;
+    }
+
+    .section2-png-back-text h4 {
+      margin: 0 0 10px;
+      color: #a16207;
+      font-size: clamp(1.04rem, 1.35vw, 1.16rem);
+    }
+
+    .section2-png-back-text ul {
+      margin: 0;
+      padding-left: 1.1rem;
+    }
+
+    .section2-png-back-text li + li {
+      margin-top: 6px;
+    }
+
+    .section2-png-back-text.compact {
+      font-size: clamp(0.88rem, 1.1vw, 0.98rem);
+      line-height: 1.54;
+    }
+
+    @keyframes growBar {
+      from { width: 0; }
+      to { width: var(--w); }
+    }
+
+    @keyframes drawCurve {
+      to {
+        stroke-dashoffset: 0;
+      }
+    }
+
+    @keyframes fadeInZone {
+      to {
+        opacity: 1;
+      }
+    }
+
+    .floating-toc {
+      position: fixed;
+      right: 0;
+      top: 50%;
+      transform: translate(0, -50%);
+      z-index: 60;
+      filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.18));
+    }
+
+    .floating-toc-tab {
+      position: absolute;
+      left: -46px;
+      top: 50%;
+      transform: translate(50px, -50%);
+      width: 120px;
+      height: 120px;
+      object-fit: contain;
+      user-select: none;
+      transition: transform 0.24s ease;
+      z-index: 2;
+    }
+
+    .floating-toc:hover .floating-toc-tab,
+    .floating-toc:focus-within .floating-toc-tab {
+      transform: translate(-50px, -50%);
+    }
+
+    .floating-toc-panel {
+      width: 140px;
+      background: rgba(255, 255, 255, 0.95);
+      border: 1px solid rgba(148, 163, 184, 0.44);
+      border-right: none;
+      border-radius: 12px 0 0 12px;
+      backdrop-filter: blur(4px);
+      padding: 12px 12px 12px 14px;
+      display: grid;
+      gap: 6px;
+      transform: translateX(100%);
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 0.24s ease, opacity 0.2s ease;
+      position: relative;
+      z-index: 1;
+    }
+
+    .floating-toc:hover .floating-toc-panel,
+    .floating-toc:focus-within .floating-toc-panel {
+      transform: translateX(0);
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .floating-toc-panel a {
+      text-decoration: none;
+      color: #1f2937;
+      font-size: 0.92rem;
+      padding: 6px 8px;
+      border-radius: 8px;
+      transition: background-color 0.18s ease, color 0.18s ease;
+    }
+
+    .floating-toc-panel a:hover {
+      background: #e0ecff;
+      color: #1d4ed8;
+    }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 26px 0 34px;
+      color: var(--muted);
+      font-size: 0.92rem;
+      text-align: center;
+    }
+
+    .footer-stats {
+      margin: 12px auto 0;
+      width: fit-content;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border: 1px solid #dbe4f0;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
+      font-size: 0.9rem;
+      color: #475569;
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+    }
+
+    .footer-stats .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+    }
+
+    .footer-stats .count {
+      font-weight: 700;
+      color: #1f2937;
+      margin-left: 4px;
+      letter-spacing: 0.02em;
+    }
+
+    .footer-contact {
+      margin-top: 12px;
+      font-size: 0.92rem;
+      color: #475569;
+    }
+
+    .footer-contact a {
+      color: #1d4ed8;
+      text-decoration: none;
+      margin: 0 6px;
+    }
+
+    .footer-contact a:hover {
+      text-decoration: underline;
+    }
+
+    .footer-brand-row {
+      margin-top: 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .footer-brand-logo {
+      height: 28px;
+      width: auto;
+      display: block;
+    }
+
+    .footer-join-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: #1d4ed8;
+      color: #ffffff;
+      font-size: 0.86rem;
+      font-weight: 700;
+      text-decoration: none;
+      transition: background-color 0.18s ease, transform 0.16s ease;
+    }
+
+    .footer-join-link:hover {
+      background: #1e40af;
+      transform: translateY(-1px);
+    }
+
+    @media (max-width: 920px) {
+      .highlights-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .section1-gallery {
+        display: flex;
+      }
+
+      .floating-toc {
+        top: auto;
+        bottom: 16px;
+        transform: translateX(0);
+      }
+
+      .section3-figure {
+        padding: 8px;
+      }
+
+      .section2-flip-grid {
+        flex-direction: column;
+        align-items: center;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .real-curve-bfm,
+      .real-curve-ufo,
+      .real-deploy-zone,
+      .real-deploy-boundary,
+      .real-note,
+      .real-benchmark-zone,
+      .real-benchmark-boundary,
+      .real-benchmark-note,
+      .real-hotspot {
+        animation: none;
+        opacity: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <button id="lang-switch" class="lang-switch" type="button" aria-label="Switch language">中文</button>
+  <nav class="floating-toc" aria-label="Page directory">
+    <img class="floating-toc-tab" src="./assets/UFO.png" alt="UFO directory logo">
+    <div class="floating-toc-panel">
+      <a id="toc-abstract" href="#abstract">Abstract</a>
+      <a id="toc-h1" href="#highlight-1">Highlight 1</a>
+      <a id="toc-h2" href="#highlight-2">Highlight 2</a>
+      <a id="toc-h3" href="#highlight-3">Highlight 3</a>
+      <a id="toc-h4" href="#highlight-4">Highlight 4</a>
+    </div>
+  </nav>
+  <header class="hero">
+    <video class="hero-video" autoplay muted loop playsinline preload="metadata">
+      <source src="./videos/head.mp4" type="video/mp4">
+    </video>
+    <div class="hero-overlay" aria-hidden="true"></div>
+    <div class="container">
+      <h1 id="hero-title"><img class="title-icon" src="./assets/UFO.png" alt="UFO logo"><span class="acronym-letter">UFO</span>: A General <span class="acronym-letter">U</span>nsupervised Reinforcement<br>Learning <span class="acronym-letter">F</span>ramework for Humanoid C<span class="acronym-letter">O</span>ntrol</h1>
+      <div class="hero-links" aria-label="Project links">
+        <a id="hero-link-code" class="hero-link" href="https://github.com/Roboparty/UFO">Code</a>
+        <a id="hero-link-video" class="hero-link" href="#">Video</a>
+        <a id="hero-link-pdf" class="hero-link" href="#">PDF</a>
+      </div>
+      <div class="logo-wrap">
+        <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB">
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="abstract">
+      <div class="container">
+        <h2 id="abstract-title">Motivation</h2>
+        <p id="abstract-lead" class="abstract-lead"><strong class="abstract-key">Tracking-based control</strong> remains the dominant paradigm for humanoid robots, while <strong class="abstract-key">unsupervised RL</strong> offers a complementary path toward general skill acquisition, with strong potential in <span class="abstract-item-1">disturbance robustness</span>, <span class="abstract-item-2">data efficiency</span>, <span class="abstract-item-3">skill generalization</span>, and <span class="abstract-item-4">behavior composition</span>. <br><br>Yet progress has been slowed by <strong class="abstract-key">high training complexity</strong>, <strong class="abstract-key">substantial engineering overhead</strong>, and the <strong class="abstract-key">absence of unified infrastructure</strong>, which has limited broader follow-up work. <strong class="abstract-key">UFO aims to lower this barrier</strong>, enabling wider exploration of unsupervised RL and accelerating the development of humanoid behavioral foundation models.</p>
+        
+      </div>
+    </section>
+
+    <section id="highlights">
+      <div class="container">
+        <h2 id="highlights-title">Highlights</h2>
+        <div class="highlights-grid">
+          <article class="highlight-card highlight-1" id="highlight-1-card">
+            <h3 id="card-h1-title">Highlight 1 - Fast Training + Better Performance</h3>
+            <p id="card-h1-desc">Improves the training efficiency of FB learning, reducing training time to 6-8 hours while achieving better performance.</p>
+            <div class="highlight-media-wrap">
+              <img class="highlight-media" data-placeholder="true" src="./assets/highlight_1.png" alt="Highlight 1 image">
+            </div>
+          </article>
+          <article class="highlight-card highlight-2" id="highlight-2-card">
+            <h3 id="card-h2-title">Highlight 2 - New Algorithm Integration</h3>
+            <p id="card-h2-desc">Adds TeCH, a contrastive temporal-distance representation learning algorithm, showing support for URL beyond FB.</p>
+            <div class="highlight-media-wrap">
+              <img class="highlight-media" src="./assets/highlight_2.png" alt="Highlight 2 image">
+              <div class="highlight2-hover-preview" aria-hidden="true">
+                <video autoplay muted loop playsinline preload="metadata">
+                  <source src="./videos/TECH.mp4" type="video/mp4">
+                </video>
+              </div>
+            </div>
+          </article>
+          <article class="highlight-card highlight-3" id="highlight-3-card">
+            <h3 id="card-h3-title">Highlight 3 - General & Extensible Framework</h3>
+            <p id="card-h3-desc">Provides a general and extensible framework supporting diverse robots and multi-dataset training, enabling high-dynamic skill injection.</p>
+            <div class="highlight-media-wrap">
+              <video class="highlight-media" autoplay muted loop playsinline preload="metadata" aria-label="Highlight 3 cartwheel preview">
+                <source src="./section3/cartwheel.mp4" type="video/mp4">
+              </video>
+            </div>
+          </article>
+          <article class="highlight-card highlight-4" id="highlight-4-card">
+            <h3 id="card-h4-title">Highlight 4 - Robust Real-world Teleoperation</h3>
+            <p id="card-h4-desc">Supports real-world teleoperation and demonstrates robust policy execution under external disturbances.</p>
+            <div class="highlight-media-wrap">
+              <video class="highlight-media" autoplay muted loop playsinline preload="metadata" aria-label="Highlight 4 teleoperation preview">
+                <source src="./section4/Teleop_disturbance_cai2.mp4" type="video/mp4">
+              </video>
+            </div>
+          </article>
+        </div>
+
+        <section class="detail-section" id="highlight-1">
+          <h3 id="detail-h1-title">Highlight 1: Fast Training + Better Performance</h3>
+          <div class="viz-grid">
+            <div class="real-chart-panel">
+              <svg id="highlight1-real-chart" viewBox="0 0 760 420" aria-label="Real EMD curves for BFM-Zero and UFO-FB"></svg>
+              <div id="highlight1-4h-preview" class="real-hover-video" aria-hidden="true">
+                <video muted loop playsinline preload="metadata">
+                  <source src="./section1/4h-1.mp4" type="video/mp4">
+                </video>
+              </div>
+              <div id="highlight1-7h-note" class="real-hover-note" aria-hidden="true">the default policy</div>
+            </div>
+            <div class="section1-gallery gallery-h1" aria-label="Section 1 behavior gallery">
+
+              <figure class="section1-gallery-item">
+                <video controls muted loop playsinline preload="metadata">
+                  <source src="./section1/getup.mp4" type="video/mp4">
+                </video>
+                <figcaption id="cap-h1-1" class="section1-gallery-caption">Motion Tracking: Getting up</figcaption>
+              </figure>
+              <figure class="section1-gallery-item">
+                <video controls muted loop playsinline preload="metadata">
+                  <source src="./section1/Teleop.mp4" type="video/mp4">
+                </video>
+                <figcaption id="cap-h1-2" class="section1-gallery-caption">Robust Real-world Teleoperation</figcaption>
+              </figure>
+
+              <figure class="section1-gallery-item">
+                <video controls muted loop playsinline preload="metadata">
+                  <source src="./section1/walking.mp4" type="video/mp4">
+                </video>
+                <figcaption id="cap-h1-3" class="section1-gallery-caption">Motion Tracking: Walking</figcaption>
+              </figure>
+              
+              <figure class="section1-gallery-item">
+                <video controls muted loop playsinline preload="metadata">
+                  <source src="./section1/goal%20reaching.mp4" type="video/mp4">
+                </video>
+                <figcaption id="cap-h1-4" class="section1-gallery-caption">Goal Reaching</figcaption>
+              </figure>
+
+            </div>
+          </div>
+        </section>
+        <section class="detail-section" id="highlight-2">
+          <h3 id="detail-h2-title">Highlight 2: New Algorithm Integration</h3>
+          <p id="section2-core" class="section2-explainer"><strong>Core idea:</strong> Learn a latent space where distances reflect temporal reachability.</p>
+          <div class="section2-flip-grid">
+            <figure class="section2-figure section2-figure-pngflip" aria-label="TeCH jointly learns flip card">
+              <div class="section2-png-flip-inner">
+                <div class="section2-png-face section2-png-front">
+                  <img class="section2-png-front-img" src="./assets/tech.png" alt="TeCH overview image">
+                </div>
+                <div class="section2-png-face section2-png-back section2-png-back-text">
+                  <h4 id="section2-tech-title">TeCH jointly learns:</h4>
+                  <ul>
+                    <li id="section2-tech-1">Temporal representations that preserve trajectory structure.</li>
+                    <li id="section2-tech-2">A goal-conditioned policy driven by unified progress rewards.</li>
+                  </ul>
+                </div>
+              </div>
+            </figure>
+
+            <figure class="section2-figure section2-figure-pngflip" aria-label="TeCH how-to-learn flip card">
+              <div class="section2-png-flip-inner">
+                <div class="section2-png-face section2-png-front">
+                  <img class="section2-png-front-img" src="./section2/tech_objective.png" alt="TeCH objective image">
+                </div>
+                <div class="section2-png-face section2-png-back section2-png-back-text">
+                  <h4 id="section2-how-title">How does TeCH learn?</h4>
+                  <ul>
+                    <li id="section2-how-1">Explore the environment to collect diverse transitions.</li>
+                    <li id="section2-how-2">Construct pseudo-goals via temporal rolling.</li>
+                    <li id="section2-how-3">Learn temporal representations through contrastive learning.</li>
+                  </ul>
+                </div>
+              </div>
+            </figure>
+          </div>
+          <div class="section1-gallery gallery-h2" aria-label="Section 2 TeCH gallery">
+            <figure class="section1-gallery-item">
+                <video controls muted loop playsinline preload="metadata">
+                  <source src="./section2/UFO-TeCH(disturbance)-cut.mp4" type="video/mp4">
+                </video>
+              </figure>
+            <figure class="section1-gallery-item">
+              <video controls muted loop playsinline preload="metadata">
+                <source src="./section2/UFO-TeCH(goal_reaching)-cut.mp4" type="video/mp4">
+              </video>
+            </figure>
+            <figure class="section1-gallery-item">
+              <video controls muted loop playsinline preload="metadata">
+                <source src="./section2/UFO-TeCH(motion_tracking)-cut.mp4" type="video/mp4">
+              </video>
+            </figure>
+
+          </div>
+        </section>
+        <section class="detail-section" id="highlight-3">
+          <h3 id="detail-h3-title">Highlight 3: General & Extensible Framework</h3>
+          <div class="section3-block">
+            <ul class="section3-points">
+              <li id="section3-li-1">Rapidly adapts to multiple robot embodiments.</li>
+              <li id="section3-li-2">A stable way to inject skills.</li>
+            </ul>
+            <figure class="section3-figure">
+              <video controls muted loop playsinline preload="metadata" aria-label="Section 3 cartwheel video">
+                <source src="./section3/cartwheel.mp4" type="video/mp4">
+              </video>
+            </figure>
+          </div>
+        </section>
+        <section class="detail-section" id="highlight-4">
+          <h3 id="detail-h4-title">Highlight 4: Real-world Robust Teleoperation</h3>
+          <div class="section1-gallery gallery-h4" aria-label="Section 4 teleoperation gallery">
+            <figure class="section1-gallery-item">
+              <video controls muted loop playsinline preload="metadata">
+                <source src="./section4/UFO-FB-TELEOP.mp4" type="video/mp4">
+              </video>
+            </figure>
+            <figure class="section1-gallery-item">
+              <video controls muted loop playsinline preload="metadata">
+                <source src="./section4/Teleop_disturbance_cai2.mp4" type="video/mp4">
+              </video>
+            </figure>
+            <figure class="section1-gallery-item">
+              <video controls muted loop playsinline preload="metadata">
+                <source src="./section4/Teleop_disturbance_mix.mp4" type="video/mp4">
+              </video>
+            </figure>
+            <figure class="section1-gallery-item">
+              <video controls muted loop playsinline preload="metadata">
+                <source src="./section4/Teleop_box_carry_mix.mp4" type="video/mp4">
+              </video>
+            </figure>
+            <figure class="section1-gallery-item">
+              <video controls muted loop playsinline preload="metadata">
+                <source src="./section4/Teleop_floor_action_1.mp4" type="video/mp4">
+              </video>
+            </figure>
+            <figure class="section1-gallery-item">
+              <video controls muted loop playsinline preload="metadata">
+                <source src="./section4/Teleop_squat_stand_1.mp4" type="video/mp4">
+              </video>
+            </figure>
+            <figure class="section1-gallery-item">
+              <video controls muted loop playsinline preload="metadata">
+                <source src="./section4/cqhdisturbance.mp4" type="video/mp4">
+              </video>
+            </figure>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="footer-stats">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="pageview-label">Total visitors:</span>
+      <span class="count" id="busuanzi_value_site_uv">--</span>
+    </div>
+    <div class="footer-contact">
+      Contact:
+      <a href="mailto:xuewangusst@gmail.com">xuewangusst@gmail.com</a>
+      <a href="mailto:liyitang475@gmail.com">liyitang475@gmail.com</a>
+    </div>
+    <div class="footer-brand-row">
+      <img class="footer-brand-logo" src="./assets/rplab_logo.png" alt="RoboPartyLab logo">
+      <a id="join-us-link" class="footer-join-link" href="https://roboparty.com/about/contact" target="_blank" rel="noopener noreferrer">Join us</a>
+    </div>
+  </footer>
+
+  <script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+
+  <script>
+    (function() {
+      function drawHighlight1RealChart() {
+        const chart = document.getElementById("highlight1-real-chart");
+        if (!chart) return;
+        const preview = document.getElementById("highlight1-4h-preview");
+        const note7h = document.getElementById("highlight1-7h-note");
+
+        const bfmData = [
+          [0.1973, 2.7716], [3.0226, 1.1538], [5.4843, 0.9611], [7.9504, 0.8453], [10.4200, 0.8263],
+          [12.8891, 0.7957], [15.3603, 0.7762], [17.8361, 0.7669], [20.3076, 0.7689], [22.7805, 0.7496],
+          [25.2599, 0.7335], [27.7455, 0.7509], [30.2114, 0.7447], [32.6765, 0.7339], [35.1419, 0.7275],
+          [37.6039, 0.7348], [40.0684, 0.7191], [42.5335, 0.7318], [44.9984, 0.7160], [47.4653, 0.7239], [49.9331, 0.7300]
+        ];
+
+        const ufoData = [
+          [0.0489, 2.9701], [0.6304, 1.0708], [1.2563, 0.9035], [1.9047, 0.8174], [2.6077, 0.7518],
+          [3.3072, 0.7226], [3.9886, 0.7003], [4.6844, 0.6865], [5.3885, 0.6716], [6.0771, 0.6672],
+          [6.7702, 0.6667], [7.4663, 0.6463], [8.1699, 0.6435], [8.8594, 0.6405], [9.5564, 0.6330],
+          [10.2481, 0.6431], [10.8944, 0.6204], [11.6000, 0.6152], [12.3079, 0.6188], [13.0360, 0.6156]
+        ];
+
+        const W = 760;
+        const H = 420;
+        const margin = { top: 26, right: 24, bottom: 52, left: 66 };
+        const innerW = W - margin.left - margin.right;
+        const innerH = H - margin.top - margin.bottom;
+        const xMin = 0;
+        const xMax = 50;
+        const yMin = 0.6;
+        const yMax = 3.0;
+        const ns = "http://www.w3.org/2000/svg";
+
+        const xTo = (x) => margin.left + ((x - xMin) / (xMax - xMin)) * innerW;
+        const yTo = (y) => margin.top + ((yMax - y) / (yMax - yMin)) * innerH;
+        const el = (name, attrs = {}) => {
+          const node = document.createElementNS(ns, name);
+          Object.entries(attrs).forEach(([k, v]) => node.setAttribute(k, String(v)));
+          return node;
+        };
+
+        while (chart.firstChild) chart.removeChild(chart.firstChild);
+
+        const toPanelCoords = (xSvg, ySvg) => {
+          const panel = chart.parentElement;
+          const chartRect = chart.getBoundingClientRect();
+          const panelRect = panel ? panel.getBoundingClientRect() : chartRect;
+          const sx = chartRect.width / W;
+          const sy = chartRect.height / H;
+          return {
+            x: (chartRect.left - panelRect.left) + xSvg * sx,
+            y: (chartRect.top - panelRect.top) + ySvg * sy
+          };
+        };
+
+        const placeFloatingPopover = (targetEl, px, py) => {
+          if (!targetEl) return;
+          const panel = targetEl.parentElement;
+          const panelWidth = panel ? panel.clientWidth : 0;
+          const panelHeight = panel ? panel.clientHeight : 0;
+          const popWidth = targetEl.getBoundingClientRect().width || 260;
+          const popHeight = targetEl.getBoundingClientRect().height || 146;
+          const edgePad = 8;
+          const sideGap = 10;
+
+          let left = px;
+          let useLeftSide = false;
+          if (panelWidth && (px + sideGap + popWidth + edgePad > panelWidth)) {
+            useLeftSide = true;
+          }
+
+          let top = py;
+          if (panelHeight) {
+            const minY = popHeight / 2 + edgePad;
+            const maxY = panelHeight - popHeight / 2 - edgePad;
+            top = Math.min(maxY, Math.max(minY, py));
+          }
+
+          targetEl.classList.toggle("left-side", useLeftSide);
+          targetEl.style.left = `${left}px`;
+          targetEl.style.top = `${top}px`;
+        };
+
+        const placeNoteBesidePoint = (targetEl, px, py) => {
+          if (!targetEl) return;
+          const panel = targetEl.parentElement;
+          const panelWidth = panel ? panel.clientWidth : 0;
+          const panelHeight = panel ? panel.clientHeight : 0;
+          const noteWidth = targetEl.getBoundingClientRect().width || 230;
+          const noteHeight = targetEl.getBoundingClientRect().height || 48;
+          const edgePad = 8;
+          const gap = 2;
+          const sideYOffset = 0;
+
+          let left = px;
+          let top = py + sideYOffset;
+          let useLeftSide = false;
+
+          if (panelWidth && (px + gap + noteWidth + edgePad > panelWidth)) {
+            useLeftSide = true;
+          }
+
+          if (panelHeight) {
+            const minY = noteHeight / 2 + edgePad;
+            const maxY = panelHeight - noteHeight / 2 - edgePad;
+            top = Math.min(maxY, Math.max(minY, py));
+          }
+
+          targetEl.classList.toggle("left-side", useLeftSide);
+          targetEl.style.left = `${left}px`;
+          targetEl.style.top = `${top}px`;
+        };
+
+        const hidePreview = () => {
+          if (!preview) return;
+          preview.classList.remove("show");
+          const video = preview.querySelector("video");
+          if (video) {
+            video.pause();
+          }
+        };
+
+        const showPreviewAt = (px, py) => {
+          if (!preview) return;
+          hideNote7h();
+          placeFloatingPopover(preview, px, py);
+          preview.classList.add("show");
+          const video = preview.querySelector("video");
+          if (video) {
+            video.currentTime = 0;
+            video.play().catch(() => {});
+          }
+        };
+
+        const hideNote7h = () => {
+          if (!note7h) return;
+          note7h.classList.remove("show");
+        };
+
+        const showNote7hAt = (px, py) => {
+          if (!note7h) return;
+          hidePreview();
+          placeNoteBesidePoint(note7h, px, py);
+          note7h.classList.add("show");
+        };
+
+        hidePreview();
+        hideNote7h();
+
+        const bg = el("rect", { x: 0, y: 0, width: W, height: H, fill: "#ffffff" });
+        chart.appendChild(bg);
+
+        // Grid and ticks.
+        [0, 10, 20, 30, 40, 50].forEach((xTick) => {
+          const x = xTo(xTick);
+          chart.appendChild(el("line", { class: "real-grid", x1: x, y1: margin.top, x2: x, y2: H - margin.bottom }));
+          const tx = el("text", { class: "real-label", x, y: H - margin.bottom + 22, "text-anchor": "middle" });
+          tx.textContent = String(xTick);
+          chart.appendChild(tx);
+        });
+
+        [0.6, 1.0, 1.5, 2.0, 2.5, 3.0].forEach((yTick) => {
+          const y = yTo(yTick);
+          chart.appendChild(el("line", { class: "real-grid", x1: margin.left, y1: y, x2: W - margin.right, y2: y }));
+          const ty = el("text", { class: "real-label", x: margin.left - 10, y: y + 4, "text-anchor": "end" });
+          ty.textContent = yTick.toFixed(1);
+          chart.appendChild(ty);
+        });
+
+        chart.appendChild(el("line", { class: "real-axis", x1: margin.left, y1: margin.top, x2: margin.left, y2: H - margin.bottom }));
+        chart.appendChild(el("line", { class: "real-axis", x1: margin.left, y1: H - margin.bottom, x2: W - margin.right, y2: H - margin.bottom }));
+
+        const xLabel = el("text", { class: "real-label", x: margin.left + innerW / 2, y: H - 12, "text-anchor": "middle" });
+        xLabel.textContent = "Training Time (h)";
+        chart.appendChild(xLabel);
+
+        const yLabel = el("text", {
+          class: "real-label",
+          x: 18,
+          y: margin.top + innerH / 2,
+          transform: `rotate(-90, 18, ${margin.top + innerH / 2})`,
+          "text-anchor": "middle"
+        });
+        yLabel.textContent = "Tracking Error (EMD ↓)";
+        chart.appendChild(yLabel);
+
+        // Deploy region: 6h to 8h.
+        const deployX1 = xTo(6);
+        const deployX2 = xTo(8);
+        chart.appendChild(el("rect", {
+          class: "real-deploy-zone",
+          x: deployX1,
+          y: margin.top,
+          width: deployX2 - deployX1,
+          height: innerH
+        }));
+        chart.appendChild(el("line", { class: "real-deploy-boundary", x1: deployX1, y1: margin.top, x2: deployX1, y2: H - margin.bottom }));
+        chart.appendChild(el("line", { class: "real-deploy-boundary", x1: deployX2, y1: margin.top, x2: deployX2, y2: H - margin.bottom }));
+
+        // BFM slow-stable marker starts at 42h and extends rightward.
+        const bfmMarkStart = xTo(42.0);
+        chart.appendChild(el("rect", {
+          class: "real-benchmark-zone",
+          x: bfmMarkStart,
+          y: margin.top,
+          width: xTo(xMax) - bfmMarkStart,
+          height: innerH
+        }));
+        chart.appendChild(el("line", {
+          class: "real-benchmark-boundary",
+          x1: bfmMarkStart,
+          y1: margin.top,
+          x2: bfmMarkStart,
+          y2: H - margin.bottom
+        }));
+
+        const ufoEndHour = 8.6;
+
+        function toPath(points, cutoffX = xMax) {
+          return points
+            .filter(([x]) => x <= cutoffX)
+            .map(([x, y], i) => `${i === 0 ? "M" : "L"}${xTo(x).toFixed(2)},${yTo(y).toFixed(2)}`)
+            .join(" ");
+        }
+
+        const bfmPath = el("path", { class: "real-curve-bfm", d: toPath(bfmData) });
+        const ufoPath = el("path", { class: "real-curve-ufo", d: toPath(ufoData, ufoEndHour) });
+        chart.appendChild(bfmPath);
+        chart.appendChild(ufoPath);
+
+        // Legend.
+        const legendY = margin.top + 10;
+        chart.appendChild(el("line", { x1: W - 210, y1: legendY, x2: W - 130, y2: legendY, stroke: "#7f7f7f", "stroke-width": 5 }));
+        const legendBfm = el("text", { class: "real-legend-label", x: W - 120, y: legendY + 5 });
+        legendBfm.textContent = "BFM-Zero";
+        chart.appendChild(legendBfm);
+        chart.appendChild(el("line", { x1: W - 210, y1: legendY + 34, x2: W - 130, y2: legendY + 34, stroke: "#9f1239", "stroke-width": 5 }));
+        const legendUfo = el("text", { class: "real-legend-label real-legend-label-ufo", x: W - 120, y: legendY + 39 });
+        legendUfo.textContent = "UFO-FB";
+        chart.appendChild(legendUfo);
+
+        // Note box appears after curves.
+        const note = el("g", { class: "real-note" });
+        const noteX = xTo(11.0);
+        const noteY = yTo(1.42);
+        note.appendChild(el("rect", { x: noteX, y: noteY, width: 286, height: 56 }));
+        const t1 = el("text", { x: noteX + 12, y: noteY + 24 });
+        t1.textContent = "Stable deploy after 6-8h";
+        const t2 = el("text", { x: noteX + 12, y: noteY + 44 });
+        t2.textContent = "EMD≈0.64";
+        note.appendChild(t1);
+        note.appendChild(t2);
+        chart.appendChild(note);
+
+        const bfmNote = el("g", { class: "real-benchmark-note" });
+        const bfmNoteX = xTo(35.8);
+        const bfmNoteY = yTo(1.22);
+        bfmNote.appendChild(el("rect", { x: bfmNoteX, y: bfmNoteY, width: 172, height: 44 }));
+        const bt = el("text", { x: bfmNoteX + 13, y: bfmNoteY + 30 });
+        bt.textContent = "EMD = 0.73";
+        bfmNote.appendChild(bt);
+        chart.appendChild(bfmNote);
+
+        function interpolateY(points, xTarget) {
+          for (let i = 0; i < points.length - 1; i += 1) {
+            const [x0, y0] = points[i];
+            const [x1, y1] = points[i + 1];
+            if (xTarget >= x0 && xTarget <= x1) {
+              const t = (xTarget - x0) / (x1 - x0);
+              return y0 + t * (y1 - y0);
+            }
+          }
+          return points[points.length - 1][1];
+        }
+
+        [[4, "4h"], [7, "7h"]].forEach(([xHour, label]) => {
+          const yVal = interpolateY(ufoData, xHour);
+          const g = el("g", { class: "real-hotspot" });
+          const cx = xTo(xHour);
+          const cy = yTo(yVal);
+          g.appendChild(el("circle", { class: "outer", cx, cy, r: 14 }));
+          g.appendChild(el("circle", { class: "inner", cx, cy, r: 7.2 }));
+          const t = el("text", { x: cx, y: cy - 19 });
+          t.textContent = label;
+          g.appendChild(t);
+
+          if (label === "4h") {
+            g.addEventListener("mouseenter", () => {
+              const p = toPanelCoords(cx, cy);
+              showPreviewAt(p.x, p.y);
+            });
+            g.addEventListener("mouseleave", hidePreview);
+          } else if (label === "7h") {
+            g.addEventListener("mouseenter", () => {
+              const p = toPanelCoords(cx, cy);
+              showNote7hAt(p.x, p.y);
+            });
+            g.addEventListener("mouseleave", hideNote7h);
+          }
+          chart.appendChild(g);
+        });
+      }
+
+      function initHighlight1ChartOnScroll() {
+        const triggerSection = document.getElementById("highlight-1");
+        if (!triggerSection) return;
+
+        let visible = false;
+        const drawOnEnter = () => {
+          drawHighlight1RealChart();
+        };
+
+        if (!("IntersectionObserver" in window)) {
+          drawOnEnter();
+          return;
+        }
+
+        const observer = new IntersectionObserver(
+          (entries) => {
+            entries.forEach((entry) => {
+              if (entry.isIntersecting && !visible) {
+                visible = true;
+                drawOnEnter();
+              } else if (!entry.isIntersecting && visible) {
+                visible = false;
+              }
+            });
+          },
+          { threshold: 0.28 }
+        );
+
+        observer.observe(triggerSection);
+      }
+
+      function initGalleryMouseDrag() {
+        const galleries = document.querySelectorAll(".section1-gallery");
+        galleries.forEach((gallery) => {
+          let isDown = false;
+          let startX = 0;
+          let startScrollLeft = 0;
+
+          gallery.addEventListener("mousedown", (e) => {
+            isDown = true;
+            startX = e.pageX - gallery.offsetLeft;
+            startScrollLeft = gallery.scrollLeft;
+            gallery.classList.add("dragging");
+          });
+
+          const stopDrag = () => {
+            isDown = false;
+            gallery.classList.remove("dragging");
+          };
+
+          gallery.addEventListener("mouseleave", stopDrag);
+          gallery.addEventListener("mouseup", stopDrag);
+
+          gallery.addEventListener("mousemove", (e) => {
+            if (!isDown) return;
+            e.preventDefault();
+            const x = e.pageX - gallery.offsetLeft;
+            const walk = x - startX;
+            gallery.scrollLeft = startScrollLeft - walk;
+          });
+        });
+      }
+
+      function initGalleryAutoplayOnScroll() {
+        const videos = document.querySelectorAll(".section1-gallery video");
+        if (!videos.length) return;
+
+        const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (reduceMotion || !("IntersectionObserver" in window)) return;
+
+        videos.forEach((video) => {
+          video.muted = true;
+          video.playsInline = true;
+        });
+
+        const observer = new IntersectionObserver(
+          (entries) => {
+            entries.forEach((entry) => {
+              const video = entry.target;
+              if (!(video instanceof HTMLVideoElement)) return;
+
+              if (entry.isIntersecting && entry.intersectionRatio >= 0.55) {
+                video.play().catch(() => {});
+              } else {
+                video.pause();
+              }
+            });
+          },
+          { threshold: [0.2, 0.55, 0.8] }
+        );
+
+        videos.forEach((video) => observer.observe(video));
+      }
+
+      function initLanguageSwitch() {
+        const switchBtn = document.getElementById("lang-switch");
+        if (!switchBtn) return;
+
+        const dict = {
+          en: {
+            button: "中文",
+            title: "UFO: An Unsupervised Reinforcement Learning Framework for Humanoid Control",
+            heroTitle: "<img class=\"title-icon\" src=\"./assets/UFO.png\" alt=\"UFO logo\"><span class=\"acronym-letter\">UFO</span>: A General <span class=\"acronym-letter\">U</span>nsupervised Reinforcement<br>Learning <span class=\"acronym-letter\">F</span>ramework for Humanoid C<span class=\"acronym-letter\">O</span>ntrol",
+            tocAbstract: "Motivation",
+            tocH1: "Highlight 1",
+            tocH2: "Highlight 2",
+            tocH3: "Highlight 3",
+            tocH4: "Highlight 4",
+            heroCode: "Code",
+            heroVideo: "Video",
+            heroPdf: "PDF",
+            abstractTitle: "Motivation",
+            abstractLead: "<strong class=\"abstract-key\">Tracking-based control</strong> remains the dominant paradigm for humanoid robots, while <strong class=\"abstract-key\">unsupervised RL</strong> offers a complementary path toward general skill acquisition, with strong potential in <span class=\"abstract-item-1\">disturbance robustness</span>, <span class=\"abstract-item-2\">data efficiency</span>, <span class=\"abstract-item-3\">skill generalization</span>, and <span class=\"abstract-item-4\">behavior composition</span>.<br><br>Yet progress has been slowed by <strong class=\"abstract-key\">high training complexity</strong>, <strong class=\"abstract-key\">substantial engineering overhead</strong>, and the <strong class=\"abstract-key\">absence of unified infrastructure</strong>, which has limited broader follow-up work. <strong class=\"abstract-key\">UFO aims to lower this barrier</strong>, enabling wider exploration of unsupervised RL and accelerating the development of humanoid behavioral foundation models.",
+            highlightsTitle: "Highlights",
+            cardH1Title: "Highlight 1 - Fast Training + Better Performance",
+            cardH1Desc: "Improves the training efficiency of FB learning, reducing training time to 6-8 hours while achieving better performance.",
+            cardH2Title: "Highlight 2 - New Algorithm Integration",
+            cardH2Desc: "Adds TeCH, a contrastive temporal-distance representation learning algorithm, showing support for URL beyond FB.",
+            cardH3Title: "Highlight 3 - General & Extensible Framework",
+            cardH3Desc: "Provides a general and extensible framework for diverse robots, motion datasets, and multi-dataset training.",
+            cardH4Title: "Highlight 4 - Robust Real-world Teleoperation",
+            cardH4Desc: "Supports real-world teleoperation and demonstrates robust policy execution under external disturbances.",
+            detailH1Title: "Highlight 1: Fast Training + Better Performance",
+            capH11: "Motion Tracking: Getting up",
+            capH12: "Robust Real-world Teleoperation",
+            capH13: "Motion Tracking: Walking",
+            capH14: "Goal Reaching",
+            detailH2Title: "Highlight 2: New Algorithm Integration",
+            section2Core: "<strong>Core idea:</strong> Learn a latent space where distances reflect temporal reachability.",
+            section2TechTitle: "TeCH jointly learns:",
+            section2Tech1: "Temporal representations that preserve trajectory structure.",
+            section2Tech2: "A goal-conditioned policy driven by unified progress rewards.",
+            section2HowTitle: "How does TeCH learn?",
+            section2How1: "Explore the environment to collect diverse transitions.",
+            section2How2: "Construct pseudo-goals via temporal rolling.",
+            section2How3: "Learn temporal representations through contrastive learning.",
+            detailH3Title: "Highlight 3: General & Extensible Framework",
+            section3Li1: "Rapidly adapts to multiple robot embodiments.",
+            section3Li2: "A stable way to inject skills.",
+            section3Li3: "",
+            detailH4Title: "Highlight 4: Real-world Robust Teleoperation",
+            footerText: "UFO project page skeleton. Send the four highlight images and I will wire them in directly.",
+            pageviewLabel: "Total visitors:",
+            joinUs: "Join us"
+          },
+          zh: {
+            button: "EN",
+            title: "UFO：面向人形控制的无监督强化学习框架",
+            heroTitle: "<img class=\"title-icon\" src=\"./assets/UFO.png\" alt=\"UFO logo\">UFO：面向人形控制的通用无监督强化学习框架",
+            tocAbstract: "动机",
+            tocH1: "亮点 1",
+            tocH2: "亮点 2",
+            tocH3: "亮点 3",
+            tocH4: "亮点 4",
+            heroCode: "代码",
+            heroVideo: "视频",
+            heroPdf: "论文",
+            abstractTitle: "动机",
+            abstractLead: "<strong class=\"abstract-key\">基于跟踪的控制</strong>仍是当前人形机器人最主流的范式，而<strong class=\"abstract-key\">无监督强化学习</strong>为通用技能学习提供了互补路径，在<span class=\"abstract-item-1\">抗扰动能力</span>、<span class=\"abstract-item-2\">数据效率</span>、<span class=\"abstract-item-3\">技能泛化</span>与<span class=\"abstract-item-4\">行为组合</span>方面展现出独特潜力。<br><br>但这一方向长期受限于<strong class=\"abstract-key\">训练复杂度高</strong>、<strong class=\"abstract-key\">工程实现成本大</strong>以及<strong class=\"abstract-key\">缺乏统一基础设施</strong>，导致后续研究推进缓慢。<strong class=\"abstract-key\">UFO 的目标是降低这一门槛</strong>，推动无监督强化学习的更广泛探索，并加速人形行为基础模型的发展。",
+            highlightsTitle: "亮点",
+            cardH1Title: "亮点 1 - 更快训练 + 更优性能",
+            cardH1Desc: "提升 FB 学习训练效率，将训练时间缩短到 6-8 小时，同时获得更好性能。",
+            cardH2Title: "亮点 2 - 新算法集成",
+            cardH2Desc: "集成 TeCH（对比式时序距离表征学习），展示了对 FB 之外无监督 RL 算法的支持能力。",
+            cardH3Title: "亮点 3 - 通用且可扩展框架",
+            cardH3Desc: "提供面向不同机器人、动作数据集和分布式多数据集训练的通用可扩展框架。",
+            cardH4Title: "亮点 4 - 鲁棒真实世界遥操作",
+            cardH4Desc: "支持真实世界遥操作，并在外部扰动下保持鲁棒策略执行。",
+            detailH1Title: "亮点 1：更快训练 + 更优性能",
+            capH11: "运动跟踪：起身",
+            capH12: "鲁棒真实世界遥操作",
+            capH13: "运动跟踪：行走",
+            capH14: "目标到达",
+            detailH2Title: "亮点 2：新算法集成",
+            section2Core: "<strong>核心思想：</strong>学习一个能够刻画时间可达性的潜在空间。",
+            section2TechTitle: "TeCH 联合学习：",
+            section2Tech1: "保持轨迹结构的时序表征。",
+            section2Tech2: "由统一进度奖励驱动的目标条件策略。",
+            section2HowTitle: "TeCH 如何学习？",
+            section2How1: "探索环境以收集多样化转移数据。",
+            section2How2: "通过时间滚动构造伪目标。",
+            section2How3: "通过对比学习获得时序表征。",
+            detailH3Title: "亮点 3：通用且可扩展框架",
+            section3Li1: "快速适配多种机器人本体。",
+            section3Li2: "稳定注入技能的方式。",
+            section3Li3: "",
+            detailH4Title: "亮点 4：鲁棒真实世界遥操作",
+            footerText: "UFO 项目页面框架。发送四个亮点图片后可进一步直连替换。",
+            pageviewLabel: "总访客数：",
+            joinUs: "加入我们"
+          }
+        };
+
+        const setText = (id, value, isHtml = false) => {
+          const el = document.getElementById(id);
+          if (!el || typeof value !== "string") return;
+          if (isHtml) {
+            el.innerHTML = value;
+          } else {
+            el.textContent = value;
+          }
+        };
+
+        const applyLanguage = (lang) => {
+          const t = dict[lang] || dict.en;
+          document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+          document.title = t.title;
+          switchBtn.textContent = t.button;
+
+          setText("toc-abstract", t.tocAbstract);
+          setText("hero-title", t.heroTitle, true);
+          setText("toc-h1", t.tocH1);
+          setText("toc-h2", t.tocH2);
+          setText("toc-h3", t.tocH3);
+          setText("toc-h4", t.tocH4);
+          setText("hero-link-code", t.heroCode);
+          setText("hero-link-video", t.heroVideo);
+          setText("hero-link-pdf", t.heroPdf);
+          setText("abstract-title", t.abstractTitle);
+          setText("abstract-lead", t.abstractLead, true);
+          setText("highlights-title", t.highlightsTitle);
+          setText("card-h1-title", t.cardH1Title);
+          setText("card-h1-desc", t.cardH1Desc);
+          setText("card-h2-title", t.cardH2Title);
+          setText("card-h2-desc", t.cardH2Desc);
+          setText("card-h3-title", t.cardH3Title);
+          setText("card-h3-desc", t.cardH3Desc);
+          setText("card-h4-title", t.cardH4Title);
+          setText("card-h4-desc", t.cardH4Desc);
+          setText("detail-h1-title", t.detailH1Title);
+          setText("cap-h1-1", t.capH11);
+          setText("cap-h1-2", t.capH12);
+          setText("cap-h1-3", t.capH13);
+          setText("cap-h1-4", t.capH14);
+          setText("detail-h2-title", t.detailH2Title);
+          setText("section2-core", t.section2Core, true);
+          setText("section2-tech-title", t.section2TechTitle);
+          setText("section2-tech-1", t.section2Tech1);
+          setText("section2-tech-2", t.section2Tech2);
+          setText("section2-how-title", t.section2HowTitle);
+          setText("section2-how-1", t.section2How1);
+          setText("section2-how-2", t.section2How2);
+          setText("section2-how-3", t.section2How3);
+          setText("detail-h3-title", t.detailH3Title);
+          setText("section3-li-1", t.section3Li1);
+          setText("section3-li-2", t.section3Li2);
+          setText("section3-li-3", t.section3Li3);
+          setText("detail-h4-title", t.detailH4Title);
+          setText("footer-text", t.footerText);
+          setText("pageview-label", t.pageviewLabel);
+          setText("join-us-link", t.joinUs);
+
+          localStorage.setItem("ufo-lang", lang);
+        };
+
+        const initialLang = localStorage.getItem("ufo-lang") === "zh" ? "zh" : "en";
+        applyLanguage(initialLang);
+
+        switchBtn.addEventListener("click", () => {
+          const nextLang = (localStorage.getItem("ufo-lang") === "zh") ? "en" : "zh";
+          applyLanguage(nextLang);
+        });
+      }
+
+      initLanguageSwitch();
+      initHighlight1ChartOnScroll();
+      initGalleryMouseDrag();
+      initGalleryAutoplayOnScroll();
+    })();
+  </script>
+</body>
+</html>
