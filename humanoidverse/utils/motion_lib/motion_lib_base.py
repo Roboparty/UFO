@@ -45,6 +45,23 @@ def to_torch(tensor):
     else:
         return torch.from_numpy(tensor)
 
+
+def _raw_dof_pos_from_motion_file(curr_file, start, end, dtype):
+    if "dof_pos" not in curr_file:
+        return None
+    dof_pos = to_torch(curr_file["dof_pos"]).clone()[start:end].to(dtype=dtype)
+    if dof_pos.ndim != 2:
+        raise ValueError(f"dof_pos must have shape [T, num_dof], got {tuple(dof_pos.shape)}")
+    return dof_pos
+
+
+def _dof_vel_from_dof_pos(dof_pos, dt):
+    if dof_pos.shape[0] <= 1:
+        return torch.zeros_like(dof_pos)
+    dof_vel = (dof_pos[1:] - dof_pos[:-1]) / dt
+    return torch.cat([dof_vel, dof_vel[-1:]], dim=0)
+
+
 class MotionLibBase():
     def __init__(self, motion_lib_cfg, num_envs, device):
         self.m_cfg = motion_lib_cfg
@@ -711,6 +728,10 @@ class MotionLibBase():
                     curr_motion['smpl_pose'] = torch.tensor(smpl_data_list[f]['pose_aa'][::skip][start:end]).float().to(self._device)
                     assert curr_motion['smpl_pose'].shape[0] == pose_aa.shape[0]
                 curr_motion = EasyDict({k: v.squeeze() if torch.is_tensor(v) else v for k, v in curr_motion.items()})
+                raw_dof_pos = _raw_dof_pos_from_motion_file(curr_file, start, end, pose_aa.dtype)
+                if raw_dof_pos is not None:
+                    curr_motion.dof_pos = raw_dof_pos
+                    curr_motion.dof_vels = _dof_vel_from_dof_pos(raw_dof_pos, dt)
                 # add "action" to curr_motion
                 if self.has_action:
                     curr_motion.action = to_torch(curr_file['action']).clone()[start:end]

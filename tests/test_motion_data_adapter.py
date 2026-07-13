@@ -7,6 +7,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+import torch
 
 from humanoidverse.tools.data_inspect import inspect_data_source
 from humanoidverse.utils.motion_data.adapters import (
@@ -21,6 +22,7 @@ from humanoidverse.utils.motion_data.robot_state import RobotStateMotion, reorde
 from humanoidverse.utils.motion_data.robot_state_convert import robot_state_dict_to_ufo_motion_dict, robot_state_to_ufo_motion
 from humanoidverse.utils.motion_data.robot_state_readers import read_robot_state_csv, read_robot_state_npz
 from humanoidverse.utils.motion_data.schema import validate_ufo_motion_dict
+from humanoidverse.utils.motion_lib.motion_lib_base import _dof_vel_from_dof_pos, _raw_dof_pos_from_motion_file
 from humanoidverse.utils.robot_spec import load_robot_spec
 
 
@@ -563,6 +565,25 @@ class MotionDataAdapterTest(unittest.TestCase):
             )
             path = prepare_manifest_dataset_path(manifest_path, "pkl", split="inference", cache_root=root / "cache")
             self.assertEqual(Path(path), train_path.resolve())
+
+
+    def test_motion_lib_prefers_raw_dof_pos_when_present(self) -> None:
+        raw = np.asarray(
+            [
+                [0.0, 0.0],
+                [0.1, -0.2],
+                [0.4, -0.8],
+                [0.9, -1.8],
+            ],
+            dtype=np.float32,
+        )
+        dof_pos = _raw_dof_pos_from_motion_file({"dof_pos": raw}, 1, 4, torch.float32)
+        self.assertIsNotNone(dof_pos)
+        np.testing.assert_allclose(dof_pos.numpy(), raw[1:4])
+
+        dof_vel = _dof_vel_from_dof_pos(dof_pos, 0.02)
+        expected = np.asarray([[15.0, -30.0], [25.0, -50.0], [25.0, -50.0]], dtype=np.float32)
+        np.testing.assert_allclose(dof_vel.numpy(), expected, rtol=1e-6, atol=1e-6)
 
     def test_manifest_auto_build_robot_state_csv_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
