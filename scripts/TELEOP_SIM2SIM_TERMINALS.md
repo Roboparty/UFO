@@ -4,7 +4,7 @@
 
 ```bash
 cd "$UFO_ROOT"
-conda activate bfm0real
+conda activate ufo-deploy
 ```
 
 终端 A：仿真
@@ -41,7 +41,7 @@ python scripts/realtime/realtime_z_server.py \
 
 终端 D：策略执行
 ```bash
-python rl_policy/bfm_zero.py \
+python rl_policy/ufo_policy.py \
   --robot_config config/robot/g1.yaml \
   --policy_config config/policy/g1_policy.yaml \
   --model_path ./model/g1_policy/exported/FBcprAuxModel.onnx \

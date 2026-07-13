@@ -8,7 +8,7 @@ import zmq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rl_policy.bfm_zero import BFMZeroPolicy
+from rl_policy.ufo_policy import UFODeployPolicy
 
 
 class _FakeStateProcessor:
@@ -41,7 +41,7 @@ class _FakeZmqSocket:
 
 
 def _policy(num_dofs=3):
-    policy = BFMZeroPolicy.__new__(BFMZeroPolicy)
+    policy = UFODeployPolicy.__new__(UFODeployPolicy)
     policy.num_dofs = num_dofs
     policy.num_actions = num_dofs
     policy.use_policy_action = True
@@ -141,4 +141,4 @@ if __name__ == "__main__":
     test_nan_realtime_z_is_ignored()
     test_r2_latch_blocks_pico_enable_until_release_and_repress()
     test_q_target_slew_limit_uses_joint_velocity_limit()
-    print("bfm_zero safety tests ok")
+    print("ufo_policy safety tests ok")

@@ -14,7 +14,7 @@ Runtime dependencies: numpy, mujoco, onnxruntime, pyzmq.
 
 No imports from humanoidverse / pico_npz_to_z_stream / pytorch.
 The required quaternion + FK + observation helpers are vendored locally below
-to mirror the math used during BFM-Zero training.
+to mirror the math used during training.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ import zmq
 # -----------------------------------------------------------------------------
 # Robot constants (G1, 29-DOF)
 # -----------------------------------------------------------------------------
-# Must match the body order used while training BFM-Zero. These names come from
+# Must match the body order used while training the latent policy. These names come from
 # humanoidverse robot config (g1_29dof_hard_waist.yaml: robot.motion.body_names
 # and robot.motion.extend_config).
 G1_29DOF_BODY_NAMES: List[str] = [
@@ -71,7 +71,7 @@ G1_29DOF_EXTEND_CONFIG: List[Dict[str, Any]] = [
 # Default 29-DoF "stand" pose used to center dof_pos in state/last_action.
 # Order: 6 left leg, 6 right leg, 3 waist, 4 left shoulder/elbow, 3 left wrist,
 # 4 right shoulder/elbow, 3 right wrist. Values come from the training XML's
-# `stand` keyframe and must match the dof_names order used by BFM-Zero.
+# `stand` keyframe and must match the training-time dof_names order.
 G1_29DOF_DEFAULT_POSE_RAD: np.ndarray = np.array(
     [
         -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,   # left leg

@@ -1,8 +1,8 @@
 # UFO-Deploy
 
 The `deploy` branch is the UFO-Deploy runtime: a deployment-only code path for running
-a released BFM-Zero-style policy on Unitree G1 29-DoF. It is not the training codebase,
-and it should not be merged or rebased into `main`.
+a released BFM-Zero-compatible latent policy on Unitree G1 29-DoF. It is not the training
+codebase, and it should not be merged or rebased into `main`.
 
 Release-supported target:
 
@@ -105,7 +105,7 @@ config/robot/g1_real.yaml
 config/scene/g1_29dof.yaml
 config/exp/tracking/tracking.yaml
 config/exp/tracking/teleop.yaml
-rl_policy/bfm_zero.py
+rl_policy/ufo_policy.py
 sim_env/base_sim.py
 scripts/realtime/realtime_z_server.py
 scripts/realtime/run_realtime_z_server_onboard.sh
@@ -147,7 +147,7 @@ Terminal B, start the policy:
 ```bash
 cd "$UFO_ROOT"
 conda activate ufo-deploy
-python rl_policy/bfm_zero.py \
+python rl_policy/ufo_policy.py \
   --robot_config config/robot/g1.yaml \
   --policy_config config/policy/g1_policy.yaml \
   --model_path model/g1_policy/exported/FBcprAuxModel.onnx \
@@ -217,7 +217,7 @@ Terminal D, policy:
 ```bash
 cd "$UFO_ROOT"
 conda activate ufo-deploy
-python rl_policy/bfm_zero.py \
+python rl_policy/ufo_policy.py \
   --robot_config config/robot/g1.yaml \
   --policy_config config/policy/g1_policy.yaml \
   --model_path model/g1_policy/exported/FBcprAuxModel.onnx \
@@ -252,7 +252,7 @@ On the robot, activate its runtime environment:
 
 ```bash
 cd /home/unitree/UFO-Deploy
-source /home/unitree/bfm0real_venv/bin/activate
+source /home/unitree/ufo_deploy_venv/bin/activate
 
 export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
 export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
@@ -290,12 +290,12 @@ Run on the robot after the checks above:
 
 ```bash
 cd /home/unitree/UFO-Deploy
-source /home/unitree/bfm0real_venv/bin/activate
+source /home/unitree/ufo_deploy_venv/bin/activate
 
 export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
 export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
 export PYTHONPATH=/home/unitree/unitree_sdk2_bfm/build/lib:$PYTHONPATH
-python rl_policy/bfm_zero.py \
+python rl_policy/ufo_policy.py \
   --robot_config config/robot/g1_real.yaml \
   --policy_config config/policy/g1_policy.yaml \
   --model_path model/g1_policy/exported/FBcprAuxModel.onnx \
@@ -362,8 +362,8 @@ Robot terminal C, real policy controlled by Pico buttons:
 
 ```bash
 cd /home/unitree/UFO-Deploy
-source /home/unitree/bfm0real_venv/bin/activate
-UFO_REAL_ROBOT_OK=1 VENV_PATH=/home/unitree/bfm0real_venv/bin/activate \
+source /home/unitree/ufo_deploy_venv/bin/activate
+UFO_REAL_ROBOT_OK=1 VENV_PATH=/home/unitree/ufo_deploy_venv/bin/activate \
   ./run_g1_teleop_policy_onboard.sh
 ```
 
@@ -437,12 +437,12 @@ Robot terminal, policy subscriber:
 
 ```bash
 cd /home/unitree/UFO-Deploy
-source /home/unitree/bfm0real_venv/bin/activate
+source /home/unitree/ufo_deploy_venv/bin/activate
 
 export CYCLONEDDS_HOME=/home/unitree/cyclonedds_ws/install/cyclonedds
 export LD_LIBRARY_PATH=/home/unitree/unitree_sdk2_bfm/build/lib:/home/unitree/unitree_sdk2_bfm/thirdparty/lib/aarch64:$CYCLONEDDS_HOME/lib:$LD_LIBRARY_PATH
 export PYTHONPATH=/home/unitree/unitree_sdk2_bfm/build/lib:$PYTHONPATH
-python rl_policy/bfm_zero.py \
+python rl_policy/ufo_policy.py \
   --robot_config config/robot/g1_real.yaml \
   --policy_config config/policy/g1_policy.yaml \
   --model_path model/g1_policy/exported/FBcprAuxModel.onnx \
@@ -465,11 +465,16 @@ If the robot does not react to teleop:
 
 ## Quick Validation
 
-Run locally before pushing changes:
+Run locally before pushing changes from an environment with the repository dependencies installed:
 
 ```bash
+conda activate ufo-deploy
+# Or, on the robot:
+# source /home/unitree/bfm0real_venv/bin/activate
+
 python -m py_compile \
-  rl_policy/bfm_zero.py \
+  rl_policy/ufo_policy.py \
+  rl_policy/observations/ufo_policy.py \
   scripts/realtime/realtime_z_server.py \
   scripts/teleop/xrobot_teleop_to_pose_zmq_server.py \
   sim_env/base_sim.py \
@@ -478,7 +483,10 @@ python -m py_compile \
   rl_policy/utils/command_sender.py \
   utils/common.py \
   utils/math.py \
-  utils/strings.py
+  utils/strings.py \
+  tests/test_ufo_policy_safety.py
+
+python tests/test_ufo_policy_safety.py
 
 git diff --check
 ```

@@ -56,7 +56,7 @@ echo "[run_g1_teleop_policy_onboard] task: ${TASK_CONFIG}"
 echo "[run_g1_teleop_policy_onboard] pico_control_addr: ${PICO_CONTROL_ADDR}"
 echo "[run_g1_teleop_policy_onboard] Pico controls: A=init, A+B=enable/start, B=stop, X=reset"
 
-exec python rl_policy/bfm_zero.py \
+exec python rl_policy/ufo_policy.py \
   --robot_config "${ROBOT_CONFIG}" \
   --policy_config "${POLICY_CONFIG}" \
   --model_path "${MODEL_PATH}" \

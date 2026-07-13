@@ -81,7 +81,7 @@ def _resolve_model_relative_context_path(
 # -------------------------------------------------------------------------------------------------
 # High-level RL policy that plugs into the existing framework
 # -------------------------------------------------------------------------------------------------
-class BFMZeroPolicy:
+class UFODeployPolicy:
     def __init__(
         self,
         robot_config: Dict[str, Any],
@@ -1079,7 +1079,7 @@ if __name__ == "__main__":
         exp_config = yaml.load(file, Loader=yaml.FullLoader)
     model_path = args.model_path
 
-    policy = BFMZeroPolicy(
+    policy = UFODeployPolicy(
         robot_config=robot_config,
         policy_config=policy_config,
         model_path=model_path,
