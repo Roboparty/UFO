@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import tempfile
@@ -156,6 +157,27 @@ class RobotConfigOnnxExportTest(unittest.TestCase):
         text = source.read_text()
         self.assertNotIn("num_dof != 29", text)
         self.assertNotIn("ONNX export currently supports only G1 29-DOF", text)
+
+    def test_goal_and_reward_export_calls_use_current_signature(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for relative_path in ("humanoidverse/goal_inference.py", "humanoidverse/reward_inference.py"):
+            source = root / relative_path
+            tree = ast.parse(source.read_text())
+            export_model = next(
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == "_export_model"
+            )
+            export_call = next(
+                node
+                for node in ast.walk(export_model)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "export_meta_policy_as_onnx"
+            )
+
+            self.assertEqual(len(export_call.args), 3, relative_path)
+            self.assertEqual([keyword.arg for keyword in export_call.keywords], ["z_dim"], relative_path)
 
     def test_tracking_policy_export_writes_robot_metadata_json(self) -> None:
         model = _FakePolicyModel(

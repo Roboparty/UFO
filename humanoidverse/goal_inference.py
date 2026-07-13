@@ -61,10 +61,7 @@ def _export_model(model: torch.nn.Module, output_dir: Path) -> None:
         model,
         output_dir,
         f"{model_name}.onnx",
-        {"actor_obs": torch.randn(1, model._actor.input_filter.output_space.shape[0] + model.cfg.archi.z_dim)},
         z_dim=model.cfg.archi.z_dim,
-        history=("history_actor" in model.cfg.archi.actor.input_filter.key),
-        use_29dof=True,
     )
     print(f"[INFO] Exported model to {output_dir / f'{model_name}.onnx'}")
 
