@@ -124,10 +124,14 @@ rollout previews. They are useful for inspection but are not required by runtime
 inference. To download the full artifact including videos, change `allow_patterns` to
 `["g1_policy/**"]`.
 
-The default tracking context remains `tracking_inference_mjlab/zs_7.pkl`. Other
-`tracking_inference_mjlab/zs_*.pkl` files are included for offline comparison and manual
-selection; changing the runtime context should be revalidated in sim2sim before real robot
-use.
+Additional `tracking_inference_mjlab/zs_*.pkl` files are included for offline comparison
+and manual selection.
+
+> **Safety Alert**
+> Keep the HF artifact revision paired with the runtime commit listed above. The MP4
+> files are rollout previews for inspection only and are not evidence of real-robot
+> safety. Before real robot use, complete sim2sim, hoist/support checks, realtime `z`
+> watchdog and R2 stop-latch checks, and use a physical e-stop.
 
 Verify:
 
