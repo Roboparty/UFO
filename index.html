@@ -462,16 +462,21 @@
       border-radius: 10px;
     }
 
-    .section3-points {
-      margin: 0;
-      padding-left: 0.55rem;
-      color: #166534;
-      font-size: clamp(1.12rem, 1.7vw, 1.28rem);
-      line-height: 1.6;
+    .section3-keypoint {
+      margin: 14px auto;
+      width: min(920px, 92%);
+      color: #16a34a !important;
+      line-height: 1.65;
+      font-size: clamp(1.24rem, 1.9vw, 1.52rem);
+      text-align: left;
+      font-weight: 700;
     }
 
-    .section3-points li + li {
-      margin-top: 8px;
+    .section3-intro {
+      margin: 4px 0 2px;
+      color: #166534;
+      font-size: clamp(1.02rem, 1.35vw, 1.12rem);
+      line-height: 1.7;
     }
 
     #highlight-4 {
@@ -1436,7 +1441,7 @@
           </article>
           <article class="highlight-card highlight-3" id="highlight-3-card">
             <h3 id="card-h3-title">Highlight 3 - General & Extensible Framework</h3>
-            <p id="card-h3-desc">Provides a general and extensible framework supporting diverse robots and multi-dataset training, enabling high-dynamic skill injection.</p>
+            <p id="card-h3-desc">Provides a general framework supporting diverse robots and multi-dataset training, enabling high-dynamic skill injection.</p>
             <div class="highlight-media-wrap">
               <video class="highlight-media" autoplay muted loop playsinline preload="metadata" aria-label="Highlight 3 cartwheel preview">
                 <source src="./section3/cartwheel.mp4" type="video/mp4">
@@ -1555,10 +1560,11 @@
         <section class="detail-section" id="highlight-3">
           <h3 id="detail-h3-title">Highlight 3: General & Extensible Framework</h3>
           <div class="section3-block">
-            <ul class="section3-points">
-              <li id="section3-li-1">Rapidly adapts to multiple robot embodiments.</li>
-              <li id="section3-li-2">A stable way to inject skills.</li>
-            </ul>
+            <p class="section3-keypoint" id="section3-li-1">Diverse Robot Platforms</p>
+            <p class="section3-keypoint" id="section3-li-2">Stable Skill Injection</p>
+            <p class="section3-intro" id="section3-intro">
+              UFO supports behavioral extensibility: new skills can be injected without collapsing the broad behavior distribution learned from the foundation dataset. This stability is key for rare agile motions, and below we show a cartwheel case enabled by fixed-ratio inter-dataset sampling.
+            </p>
             <figure class="section3-figure">
               <video controls muted loop playsinline preload="metadata" aria-label="Section 3 cartwheel video">
                 <source src="./section3/cartwheel.mp4" type="video/mp4">
@@ -2051,7 +2057,7 @@
             cardH2Title: "Highlight 2 - New Unsupervised RL Algorithm",
             cardH2Desc: "Adds TeCH, a contrastive temporal-distance representation learning algorithm, showing support for URL beyond FB.",
             cardH3Title: "Highlight 3 - General & Extensible Framework",
-            cardH3Desc: "Provides a general and extensible framework for diverse robots, motion datasets, and multi-dataset training.",
+            cardH3Desc: "Provides a general framework supporting diverse robots and multi-dataset training, enabling high-dynamic skill injection.",
             cardH4Title: "Highlight 4 - Robust Real-world Teleoperation",
             cardH4Desc: "Supports real-world teleoperation and demonstrates robust policy execution under external disturbances.",
             detailH1Title: "Highlight 1: Fast Training + Better Performance",
@@ -2069,9 +2075,9 @@
             section2How2: "Construct pseudo-goals via temporal rolling.",
             section2How3: "Learn temporal representations through contrastive learning.",
             detailH3Title: "Highlight 3: General & Extensible Framework",
-            section3Li1: "Rapidly adapts to multiple robot embodiments.",
-            section3Li2: "A stable way to inject skills.",
-            section3Li3: "",
+            section3Li1: "Diverse Robot Platforms",
+            section3Li2: "Stable Skill Injection",
+            section3Intro: "UFO supports behavioral extensibility: new skills can be injected without collapsing the broad behavior distribution learned from the foundation dataset. This stability is key for rare agile motions, and below we show a cartwheel case enabled by fixed-ratio inter-dataset sampling.",
             detailH4Title: "Highlight 4: Real-world Robust Teleoperation",
             footerText: "UFO project page skeleton. Send the four highlight images and I will wire them in directly.",
             pageviewLabel: "Total visitors:",
@@ -2115,9 +2121,9 @@
             section2How2: "通过时间滚动构造伪目标。",
             section2How3: "通过对比学习获得时序表征。",
             detailH3Title: "亮点 3：通用且可扩展框架",
-            section3Li1: "快速适配多种机器人本体。",
-            section3Li2: "稳定注入技能的方式。",
-            section3Li3: "",
+            section3Li1: "多样机器人平台",
+            section3Li2: "稳定技能注入",
+            section3Intro: "UFO 支持行为可扩展性：在不破坏基础数据集广泛行为分布的前提下，可持续注入新技能。对侧空翻这类稀有高动态动作，这种稳定性尤为关键，下面视频展示了基于固定比例跨数据集采样获得的侧空翻效果。",
             detailH4Title: "亮点 4：鲁棒真实世界遥操作",
             footerText: "UFO 项目页面框架。发送四个亮点图片后可进一步直连替换。",
             pageviewLabel: "总访客数：",
@@ -2178,7 +2184,7 @@
           setText("detail-h3-title", t.detailH3Title);
           setText("section3-li-1", t.section3Li1);
           setText("section3-li-2", t.section3Li2);
-          setText("section3-li-3", t.section3Li3);
+          setText("section3-intro", t.section3Intro);
           setText("detail-h4-title", t.detailH4Title);
           setText("footer-text", t.footerText);
           setText("pageview-label", t.pageviewLabel);
