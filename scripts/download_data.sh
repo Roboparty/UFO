@@ -3,9 +3,18 @@ set -euo pipefail
 
 DATASET_REPO="${UFO_DATASET_REPO:-xuewang/UFO-MotionData}"
 DATASET_REVISION="${UFO_DATASET_REVISION:-main}"
-DATASET_FILE="g1/lafan_29dof_10s-clipped.pkl"
-DEST="humanoidverse/data/lafan_29dof_10s-clipped.pkl"
-EXPECTED_SHA256="7f5aa36957808ee2e972472b18add8510533742710ba312d8b8c6e6014f1c010"
+DATASET_FILES=(
+  "g1/lafan_29dof_10s-clipped.pkl"
+  "g1/lafan_29dof.pkl"
+)
+DESTS=(
+  "humanoidverse/data/lafan_29dof_10s-clipped.pkl"
+  "humanoidverse/data/lafan_29dof.pkl"
+)
+EXPECTED_SHA256S=(
+  "7f5aa36957808ee2e972472b18add8510533742710ba312d8b8c6e6014f1c010"
+  "f3a0c2810363f5c50bf4146fa2db33c1ff5b90d00cb7c0bc2aa4622696375e11"
+)
 
 usage() {
   cat <<USAGE
@@ -13,6 +22,8 @@ Usage: bash scripts/download_data.sh [g1_lafan]
 
 Downloads the default G1 LaFAN training motion data from Hugging Face:
   https://huggingface.co/datasets/${DATASET_REPO}
+  ${DATASET_FILES[0]}
+  ${DATASET_FILES[1]}
 
 Environment overrides:
   UFO_DATASET_REPO=${DATASET_REPO}
@@ -34,34 +45,50 @@ case "${1:-g1_lafan}" in
     ;;
 esac
 
-if [[ -f "${DEST}" ]]; then
-  actual="$(sha256sum "${DEST}" | awk '{print $1}')"
-  if [[ "${actual}" == "${EXPECTED_SHA256}" ]]; then
-    echo "Data already present: ${DEST}"
-    exit 0
+needed_indices=()
+for i in "${!DATASET_FILES[@]}"; do
+  dest="${DESTS[$i]}"
+  expected="${EXPECTED_SHA256S[$i]}"
+
+  if [[ -f "${dest}" ]]; then
+    actual="$(sha256sum "${dest}" | awk '{print $1}')"
+    if [[ "${actual}" == "${expected}" ]]; then
+      echo "Data already present: ${dest}"
+      continue
+    fi
+    echo "Existing ${dest} has unexpected sha256: ${actual}" >&2
+    echo "Re-downloading." >&2
   fi
-  echo "Existing ${DEST} has unexpected sha256: ${actual}" >&2
-  echo "Re-downloading." >&2
+  needed_indices+=("${i}")
+done
+
+if [[ "${#needed_indices[@]}" -eq 0 ]]; then
+  exit 0
 fi
 
-mkdir -p "$(dirname "${DEST}")"
 tmpdir="$(mktemp -d)"
 cleanup() {
   rm -rf "${tmpdir}"
 }
 trap cleanup EXIT
 
-if command -v hf >/dev/null 2>&1; then
-  hf download "${DATASET_REPO}" \
-    "${DATASET_FILE}" \
-    --repo-type dataset \
-    --revision "${DATASET_REVISION}" \
-    --local-dir "${tmpdir}"
-elif python3 - <<'PYTEST' >/dev/null 2>&1
+download_one() {
+  local dataset_file="$1"
+
+  if command -v hf >/dev/null 2>&1; then
+    hf download "${DATASET_REPO}" \
+      "${dataset_file}" \
+      --repo-type dataset \
+      --revision "${DATASET_REVISION}" \
+      --local-dir "${tmpdir}"
+    return
+  fi
+
+  if python3 - <<'PYTEST' >/dev/null 2>&1
 import huggingface_hub
 PYTEST
-then
-  python3 - "${DATASET_REPO}" "${DATASET_FILE}" "${DATASET_REVISION}" "${tmpdir}" <<'PYDL'
+  then
+    python3 - "${DATASET_REPO}" "${dataset_file}" "${DATASET_REVISION}" "${tmpdir}" <<'PYDL'
 import sys
 from huggingface_hub import hf_hub_download
 
@@ -75,7 +102,9 @@ path = hf_hub_download(
 )
 print(path)
 PYDL
-else
+    return
+  fi
+
   cat >&2 <<'EOF'
 Missing Hugging Face downloader.
 Install one of the following and rerun:
@@ -84,22 +113,33 @@ or
   uv tool install huggingface_hub
 EOF
   exit 1
-fi
+}
 
-src="${tmpdir}/${DATASET_FILE}"
-if [[ ! -f "${src}" ]]; then
-  echo "Download failed: ${src} not found" >&2
-  exit 1
-fi
+for i in "${needed_indices[@]}"; do
+  download_one "${DATASET_FILES[$i]}"
+done
 
-actual="$(sha256sum "${src}" | awk '{print $1}')"
-if [[ "${actual}" != "${EXPECTED_SHA256}" ]]; then
-  echo "sha256 mismatch for downloaded data" >&2
-  echo "expected: ${EXPECTED_SHA256}" >&2
-  echo "actual:   ${actual}" >&2
-  exit 1
-fi
+for i in "${needed_indices[@]}"; do
+  dataset_file="${DATASET_FILES[$i]}"
+  dest="${DESTS[$i]}"
+  expected="${EXPECTED_SHA256S[$i]}"
+  src="${tmpdir}/${dataset_file}"
 
-cp "${src}" "${DEST}"
-echo "Downloaded ${DEST}"
-ls -lh "${DEST}"
+  if [[ ! -f "${src}" ]]; then
+    echo "Download failed: ${src} not found" >&2
+    exit 1
+  fi
+
+  actual="$(sha256sum "${src}" | awk '{print $1}')"
+  if [[ "${actual}" != "${expected}" ]]; then
+    echo "sha256 mismatch for downloaded data: ${dataset_file}" >&2
+    echo "expected: ${expected}" >&2
+    echo "actual:   ${actual}" >&2
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "${dest}")"
+  cp "${src}" "${dest}"
+  echo "Downloaded ${dest}"
+  ls -lh "${dest}"
+done
