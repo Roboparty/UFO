@@ -178,22 +178,7 @@ MuJoCo XML still defines qpos/qvel/action layout and actuator order. See
    hands, key bodies, initial state, controller, and actuator fields. The draft
    is not a finished robot configuration.
 
-3. Inspect the adapted RobotState data:
-
-   ```bash
-   uv run python -m humanoidverse.tools.data_inspect \
-     --robot configs/robots/my_robot.yaml \
-     --source "/path/to/motions/*.csv" \
-     --format robot_state_csv \
-     --fps 50
-   ```
-
-   Headerless RobotState CSV files are accepted. Without a header, columns are
-   interpreted as `root_pos` xyz, `root_quat` xyzw, then DOF positions in the
-   robot XML/control-joint order; an optional leading `time` column is also
-   accepted.
-
-4. Build the full inference pickle, clipped training pickle, and data manifest:
+3. Build the full inference pickle, clipped training pickle, and data manifest:
 
    ```bash
    uv run python -m humanoidverse.tools.data_build \
@@ -207,7 +192,15 @@ MuJoCo XML still defines qpos/qvel/action layout and actuator order. See
      --rebuild-cache
    ```
 
-5. Start with a smoke training run:
+   Headerless RobotState CSV files are accepted. Without a header, columns are
+   interpreted as `root_pos` xyz, `root_quat` xyzw, then DOF positions in the
+   robot XML/control-joint order; an optional leading `time` column is also
+   accepted.
+
+   Optional: run `humanoidverse.tools.data_inspect` first if you want to
+   validate the CSV schema without building cache files.
+
+4. Start with a smoke training run:
 
    ```bash
    ./run_train.sh \
