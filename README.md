@@ -148,16 +148,25 @@ motion data for the same robot. UFO does not automatically retarget motion from
 another skeleton.
 
 `robot_inspect --hydra-out` can generate XML-derived draft RobotTrainingSpec
-and Hydra robot config files; see [Robot-Config Training](docs/robot_config_training.md).
+and Hydra robot config files. If a matching URDF is available, pass `--urdf` to
+enrich draft hardware limits, dynamics, semantic hints, and symmetry metadata;
+MuJoCo XML still defines qpos/qvel/action layout and actuator order. See
+[Robot-Config Training](docs/robot_config_training.md).
 
-1. Generate a robot YAML draft from the XML:
+1. Generate robot YAML and Hydra config drafts from the XML, optionally assisted
+   by a matching URDF:
 
    ```bash
    uv run python -m humanoidverse.tools.robot_inspect \
      --xml /path/to/robot.xml \
+     --urdf /path/to/robot.urdf \
      --name my_robot \
-     --out configs/robots/my_robot.yaml
+     --out configs/robots/my_robot.yaml \
+     --hydra-out humanoidverse/config/robot/my_robot/my_robot_auto.yaml
    ```
+
+   Omit `--urdf` if you only have MJCF. URDF is auxiliary; it does not replace
+   the MuJoCo XML as the training/inference source of truth.
 
 2. Curate the generated YAML. Verify the base body, control-joint order, feet,
    hands, key bodies, initial state, controller, and actuator fields. The draft
