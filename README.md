@@ -14,7 +14,7 @@ inference, with a curated and best-tested path for Unitree G1.
 
 ## Highlights
 
-- FB and TLDR unsupervised RL presets.
+- FB and TeCH unsupervised RL presets.
 - G1 humanoid training in MJLab.
 - RobotState CSV and NPZ motion-data import.
 - Manifest-based, source-weighted multi-source data mixing.
@@ -118,22 +118,24 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --wandb-run-name ufo_fb_g1
 ```
 
-### TLDR Training
+### TeCH Training
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 ./run_train.sh \
-  --agent tldr \
+  --agent tech \
   --gpu-ids all \
   --num-envs 1024 \
   --num-env-steps 192000000 \
-  --work-dir runs/ufo_tldr_g1 \
+  --work-dir runs/ufo_tech_g1 \
   --data-path humanoidverse/data/lafan_29dof_10s-clipped.pkl \
   --update-z-every-step 10 \
   --buffer-size 5120000 \
   --use-wandb \
-  --wandb-run-name ufo_tldr_g1
+  --wandb-run-name ufo_tech_g1
 ```
+
+TeCH was previously exposed as the TLDR preset in early UFO versions. `--agent tldr` is kept as a deprecated compatibility alias for `--agent tech`.
 
 Core defaults live in `humanoidverse/train.py`. In particular, `--num-envs`
 and `--buffer-size` are per GPU, while `--num-env-steps` is the global sample

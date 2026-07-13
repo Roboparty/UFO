@@ -1,6 +1,6 @@
 """UFO training entrypoint.
 
-UFO provides FB and TLDR unsupervised RL presets for humanoid control.
+UFO provides FB and TeCH unsupervised RL presets for humanoid control.
 Defaults are kept in this file; command-line arguments can override them.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -41,10 +42,16 @@ DEFAULT_DATA_PATH = "humanoidverse/data/lafan_29dof_10s-clipped.pkl"
 DEFAULT_WORK_DIR = "runs/ufo"
 DEFAULT_BUFFER_SIZE = 5120000
 DEFAULT_FB_UPDATE_Z_EVERY_STEP = 100
-DEFAULT_TLDR_UPDATE_Z_EVERY_STEP = 10
+DEFAULT_TECH_UPDATE_Z_EVERY_STEP = 10
 DEFAULT_UPDATE_Z_EVERY_STEP = DEFAULT_FB_UPDATE_Z_EVERY_STEP
 DEFAULT_WANDB_PROJECT = "ufo-humanoid"
 DEFAULT_ROBOT_CONFIG = "configs/robots/g1_29dof.yaml"
+
+AGENT_ALIASES = {
+    "fb": "fb",
+    "tech": "tech",
+    "tldr": "tech",
+}
 
 from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import HumanoidVerseMjlabTrackingEvaluationConfig
@@ -67,8 +74,17 @@ def _resolve_training_robot_config(
     return resolve_robot_config_path(DEFAULT_ROBOT_CONFIG)
 
 
+def canonical_agent_name(agent: str) -> str:
+    try:
+        return AGENT_ALIASES[agent]
+    except KeyError as exc:
+        supported = ", ".join(sorted(AGENT_ALIASES))
+        raise ValueError(f"Unsupported agent preset: {agent}. Supported presets: {supported}") from exc
+
+
 def _default_update_z_every_step(agent: str) -> int:
-    return DEFAULT_TLDR_UPDATE_Z_EVERY_STEP if agent == "tldr" else DEFAULT_FB_UPDATE_Z_EVERY_STEP
+    canonical = canonical_agent_name(agent)
+    return DEFAULT_TECH_UPDATE_Z_EVERY_STEP if canonical == "tech" else DEFAULT_FB_UPDATE_Z_EVERY_STEP
 
 
 def build_ufo_mjlab_config(
@@ -98,6 +114,7 @@ def build_ufo_mjlab_config(
     num_agent_updates: int | None = None,
     robot_config: str | Path | None = None,
 ) -> TrainConfig:
+    agent = canonical_agent_name(agent)
     robot_training = load_robot_training_spec(robot_config or DEFAULT_ROBOT_CONFIG)
     try:
         raw_robot_config = OmegaConf.to_container(OmegaConf.load(robot_training.config_path), resolve=True)
@@ -385,7 +402,12 @@ def launch(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train UFO.")
-    parser.add_argument("--agent", default=DEFAULT_AGENT, choices=["fb", "tldr"], help="Training agent preset: fb (default) or tldr.")
+    parser.add_argument(
+        "--agent",
+        default=DEFAULT_AGENT,
+        choices=["fb", "tech", "tldr"],
+        help="Training agent preset: fb or tech. tldr is a deprecated alias for tech.",
+    )
     parser.add_argument("--gpu-ids", default="single", help="'single', 'all', or a comma-separated GPU id list relative to CUDA_VISIBLE_DEVICES.")
     parser.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
     parser.add_argument(
@@ -428,7 +450,7 @@ def parse_args() -> argparse.Namespace:
         "--update-z-every-step",
         type=int,
         default=None,
-        help="Override latent update interval. Defaults to 100 for FB and 10 for TLDR.",
+        help="Override latent update interval. Defaults to 100 for FB and 10 for TeCH.",
     )
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="Replay capacity per rank/GPU.")
     parser.add_argument(
@@ -442,7 +464,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--disable-dr", action="store_true", help="Disable domain randomization for training.")
     parser.add_argument("--disable-obs-noise", action="store_true", help="Disable observation noise for training.")
-    parser.add_argument("--lr-scale", type=float, default=1.0, help="Scale FB learning rates. TLDR preset ignores this value.")
+    parser.add_argument("--lr-scale", type=float, default=1.0, help="Scale FB learning rates. TeCH preset ignores this value.")
     parser.add_argument("--clip-grad-norm", type=float, default=0.0, help="Enable FB actor/FB gradient clipping when > 0.")
     parser.add_argument(
         "--cartwheel-aux-safe",
@@ -459,6 +481,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--smoke", action="store_true", help="Short local smoke settings: 16 envs, 2048 env steps, no W&B.")
     args = parser.parse_args()
+    raw_agent = args.agent
+    args.agent = canonical_agent_name(args.agent)
+    if raw_agent == "tldr":
+        print("WARNING: agent=tldr is deprecated; use agent=tech instead.", file=sys.stderr, flush=True)
     if args.update_z_every_step is None:
         args.update_z_every_step = _default_update_z_every_step(args.agent)
     if args.smoke:

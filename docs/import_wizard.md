@@ -8,7 +8,7 @@ The available commands are:
 - `humanoidverse.tools.data_inspect`
 - `humanoidverse.tools.data_build`
 
-These tools generate and check configuration files, then call the existing `RobotSpec`, motion adapters, and manifest auto-build path. They do not change FB/TLDR algorithms, MotionLib sampling, or the training environment.
+These tools generate and check configuration files, then call the existing `RobotSpec`, motion adapters, and manifest auto-build path. They do not change FB/TeCH algorithms, MotionLib sampling, or the training environment.
 
 ## Supported Public Motion Formats
 

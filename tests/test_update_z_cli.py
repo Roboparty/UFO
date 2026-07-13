@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import sys
 import unittest
 from unittest.mock import patch
@@ -13,7 +14,7 @@ from humanoidverse.training.workspace import _accumulate_metrics, _trajectory_ou
 
 class UpdateZCliTest(unittest.TestCase):
     def _parse(self, *args: str):
-        with patch.object(sys, "argv", ["train.py", *args]):
+        with patch.object(sys, "argv", ["train.py", *args]), patch("sys.stderr", io.StringIO()):
             return parse_args()
 
     def test_agent_specific_defaults_are_preserved(self) -> None:

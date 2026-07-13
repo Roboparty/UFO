@@ -26,6 +26,7 @@ The default training configuration is defined in `humanoidverse/train.py`:
 - `--work-dir`: `runs/ufo`.
 - `--checkpoint-every-steps`: `3200000` global environment steps.
 - `--buffer-size`: `5120000` transitions per GPU.
+- `--update-z-every-step`: defaults to `100` for FB and `10` for TeCH.
 
 All of these can be overridden from the command line.
 
@@ -40,16 +41,18 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --wandb-run-name ufo_fb_8gpu
 ```
 
-## TLDR Training
+## TeCH Training
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 ./run_train.sh \
-  --agent tldr \
+  --agent tech \
   --gpu-ids all \
   --use-wandb \
-  --wandb-run-name ufo_tldr_8gpu
+  --wandb-run-name ufo_tech_8gpu
 ```
+
+TeCH was previously exposed as the TLDR preset in early UFO versions. `--agent tldr` is kept as a deprecated compatibility alias for `--agent tech`.
 
 ## Tracking Inference
 

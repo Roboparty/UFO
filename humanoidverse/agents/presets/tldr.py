@@ -1,4 +1,7 @@
-"""TLDR agent preset for UFO training."""
+"""Internal implementation of the TeCH agent.
+
+Historical TLDR names are kept for checkpoint/config compatibility.
+"""
 
 from __future__ import annotations
 

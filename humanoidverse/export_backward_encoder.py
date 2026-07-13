@@ -32,7 +32,7 @@ def _require_backward_encoder_model(model: nn.Module) -> None:
     if missing:
         raise UnsupportedBackwardEncoderExport(
             "Policy does not expose an FB backward encoder; "
-            f"missing attributes: {missing}. TLDR policies are skipped."
+            f"missing attributes: {missing}. TeCH policies are skipped."
         )
 
 
