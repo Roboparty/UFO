@@ -1,5 +1,4 @@
 <h1 align="center">
-  <img src="./assets/UFO.png" alt="UFO" width="62" />
   UFO: A General <b>U</b>nsupervised Reinforcement Learning <b>F</b>ramework for Humanoid C<b>O</b>ntrol
 </h1>
 
@@ -10,5 +9,6 @@
 </p>
 
 <p align="center">
+  <img src="./assets/UFO.png" alt="UFO" width="62" style="vertical-align: middle; margin-right: 10px;" />
   <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" width="420" />
 </p>
