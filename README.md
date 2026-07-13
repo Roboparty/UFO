@@ -9,6 +9,6 @@
 </p>
 
 <p align="center">
-  <img src="./assets/UFO.png" alt="UFO" height="72" style="vertical-align: middle; margin-right: 10px;" />
+  <img src="./assets/UFO.png" alt="UFO" height="72" style="vertical-align: middle; margin-right: 18px;" />
   <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" height="72" style="vertical-align: middle;" />
 </p>
