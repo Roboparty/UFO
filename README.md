@@ -4,9 +4,9 @@
 </h1>
 
 <p align="center">
-  <a href="https://roboparty.github.io/UFO/"><img alt="Project Website" src="https://img.shields.io/badge/Website-roboparty.github.io%2FUFO-2563eb?style=for-the-badge" /></a>
-  <a href="https://roboparty.github.io/UFO/"><img alt="Project Video" src="https://img.shields.io/badge/Video-Coming%20Soon-7c3aed?style=for-the-badge" /></a>
-  <a href="https://roboparty.github.io/UFO/"><img alt="Project PDF" src="https://img.shields.io/badge/PDF-Coming%20Soon-0f766e?style=for-the-badge" /></a>
+  <a href="https://roboparty.github.io/UFO/"><img alt="Website" src="https://img.shields.io/badge/Website-roboparty.github.io%2FUFO-2563eb?style=for-the-badge" /></a>
+  <a href="https://roboparty.github.io/UFO/"><img alt="Video" src="https://img.shields.io/badge/Video-Coming%20Soon-7c3aed?style=for-the-badge" /></a>
+  <a href="https://roboparty.github.io/UFO/"><img alt="PDF" src="https://img.shields.io/badge/PDF-Coming%20Soon-0f766e?style=for-the-badge" /></a>
 </p>
 
 <p align="center">
