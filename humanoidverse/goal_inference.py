@@ -228,7 +228,7 @@ def run_goal_inference(
                 env.set_is_evaluating(motion_id)
                 gobs, _gobs_dict = get_backward_observation(
                     env,
-                    0,
+                    motion_id,
                     use_root_height_obs=use_root_height_obs,
                     velocity_multiplier=0,
                 )
@@ -269,7 +269,7 @@ def run_goal_inference(
             env.set_is_evaluating(first_motion_id)
             _first_backward_obs, first_obs_dict = get_backward_observation(
                 env,
-                0,
+                first_motion_id,
                 use_root_height_obs=use_root_height_obs,
                 velocity_multiplier=0,
             )

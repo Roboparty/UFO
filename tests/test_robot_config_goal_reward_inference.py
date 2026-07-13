@@ -204,6 +204,32 @@ class RobotConfigGoalRewardInferenceTest(unittest.TestCase):
             self.assertEqual(len(export_call.args), 3, relative_path)
             self.assertEqual([keyword.arg for keyword in export_call.keywords], ["z_dim"], relative_path)
 
+    def test_goal_backward_observation_uses_goal_motion_ids(self) -> None:
+        source = REPO_ROOT / "humanoidverse/goal_inference.py"
+        tree = ast.parse(source.read_text())
+        run_goal = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "run_goal_inference"
+        )
+        calls = [
+            node
+            for node in ast.walk(run_goal)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "get_backward_observation"
+        ]
+        motion_arg_names = [
+            call.args[1].id
+            for call in calls
+            if len(call.args) >= 2 and isinstance(call.args[1], ast.Name)
+        ]
+        self.assertIn("motion_id", motion_arg_names)
+        self.assertIn("first_motion_id", motion_arg_names)
+        self.assertFalse(
+            any(len(call.args) >= 2 and isinstance(call.args[1], ast.Constant) and call.args[1].value == 0 for call in calls)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
