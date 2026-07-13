@@ -84,11 +84,9 @@ dataset:
 
 ```bash
 bash scripts/download_data.sh g1_lafan
-ls -lh humanoidverse/data/lafan_29dof_10s-clipped.pkl
 ```
 
-The download script verifies the SHA256 checksum and places the approximately
-205 MB file at the default training path.
+
 
 For W&B logging, authenticate before starting a multi-process run:
 
