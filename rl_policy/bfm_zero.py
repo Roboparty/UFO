@@ -101,8 +101,10 @@ class BFMZeroPolicy:
             self.robot = g1_interface.G1Interface(network_interface)
             try:
                 self.robot.set_control_mode(g1_interface.ControlMode.PR)
-            except Exception:
-                pass  # Ignore if firmware already in the correct mode
+            except Exception as exc:
+                raise RuntimeError(
+                    "Failed to set G1 control mode to PR; refusing to start real robot control."
+                ) from exc
             robot_config["robot"] = self.robot
         # Plug-in our custom state processor & command sender
         self.state_processor = StateProcessor(robot_config, policy_config["isaac_joint_names"])
@@ -156,10 +158,17 @@ class BFMZeroPolicy:
         self.pico_control_addr = str(pico_control_addr)
         self.pico_control_sock = None
         self.last_pico_buttons: Dict[str, bool] = {}
+        self.stop_latched = False
+        self.pico_enable_released_after_stop = True
+        self._last_safe_stop_warning = 0.0
+        self._last_invalid_z_warning = 0.0
+        self._last_z_timeout_warning = 0.0
+        self._last_stop_latch_warning = 0.0
 
         self.first_time_init = True
         self.init_count = 0
         self.get_ready_state = False
+        self.has_valid_low_state = False
 
         # Joint limits
         joint_indices, joint_names, joint_pos_lower_limit = (
@@ -183,6 +192,26 @@ class BFMZeroPolicy:
         )
         self.joint_pos_upper_limit = np.zeros(self.num_dofs)
         self.joint_pos_upper_limit[joint_indices] = joint_pos_upper_limit
+
+        joint_indices, joint_names, joint_velocity_limit = (
+            resolve_matching_names_values(
+                robot_config["joint_velocity_limit"],
+                self.isaac_joint_names,
+                preserve_order=True,
+                strict=False,
+            )
+        )
+        self.joint_velocity_limit = np.full(self.num_dofs, np.inf)
+        self.joint_velocity_limit[joint_indices] = joint_velocity_limit
+        self.q_target_slew_safety_factor = float(
+            policy_config.get(
+                "q_target_slew_safety_factor",
+                robot_config.get("Q_TARGET_SLEW_SAFETY_FACTOR", 0.5),
+            )
+        )
+        if not np.isfinite(self.q_target_slew_safety_factor) or self.q_target_slew_safety_factor < 0.0:
+            raise ValueError("q_target_slew_safety_factor must be a finite non-negative value")
+        self.last_cmd_q: np.ndarray | None = None
 
         # ------------------------------------------------------
         # Joystick / keyboard setup (mirrors base_policy logic)
@@ -239,9 +268,18 @@ class BFMZeroPolicy:
                 self.ctx = None
                 self.ctx_norm_ref = float(exp_config.get("ctx_norm_ref", 16.0))
                 self.ctx_window = deque(maxlen=int(exp_config.get("window_size", 1)))
+                self.ctx_zmq_timeout_s = max(
+                    0.0,
+                    float(exp_config.get("ctx_zmq_timeout_ms", 200.0)) / 1000.0,
+                )
+                self.ctx_zmq_start_monotonic = time.monotonic()
+                self.ctx_last_z_monotonic: float | None = None
 
                 zmq_addr = str(exp_config.get("ctx_zmq_addr", "tcp://127.0.0.1:28711"))
-                logger.info(f"Tracking context from ZMQ: {zmq_addr} (norm_ref={self.ctx_norm_ref})")
+                logger.info(
+                    f"Tracking context from ZMQ: {zmq_addr} "
+                    f"(norm_ref={self.ctx_norm_ref}, timeout={self.ctx_zmq_timeout_s * 1000:.0f} ms)"
+                )
                 zctx = zmq.Context.instance()
                 sock = zctx.socket(zmq.SUB)
                 sock.setsockopt(zmq.SUBSCRIBE, b"")
@@ -400,6 +438,136 @@ class BFMZeroPolicy:
         for update_callback in self.update_callbacks:
             update_callback(self.state_dict)
 
+    def _warn_throttled(self, attr_name: str, message: str, interval_s: float = 1.0) -> None:
+        now = time.monotonic()
+        last = float(getattr(self, attr_name, 0.0))
+        if now - last >= interval_s:
+            logger.warning(message)
+            setattr(self, attr_name, now)
+
+    def _reset_tracking_state_to_stop(self, reset_realtime_z: bool = False) -> None:
+        self.start_motion = False
+        if hasattr(self, "t_stop"):
+            self.t = self.t_stop
+        if reset_realtime_z and getattr(self, "ctx_source", None) == "zmq":
+            self.ctx_latest = _default_realtime_z(float(self.ctx_norm_ref))
+            if self.ctx_window is not None:
+                self.ctx_window.clear()
+
+    def enter_safe_stop(
+        self,
+        reason: str,
+        *,
+        reset_realtime_z: bool = False,
+        warning_attr: str = "_last_safe_stop_warning",
+    ) -> None:
+        self.use_policy_action = False
+        self.get_ready_state = False
+        self._reset_tracking_state_to_stop(reset_realtime_z=reset_realtime_z)
+        self.last_action = np.zeros_like(self.last_action)
+        self._warn_throttled(warning_attr, f"Safe stop: {reason}")
+
+    def enter_stop_latch(self, reason: str) -> None:
+        self.stop_latched = True
+        self.pico_enable_released_after_stop = False
+        self.enter_safe_stop(reason)
+
+    def _poll_realtime_z(self) -> bool:
+        if getattr(self, "ctx_zmq", None) is None:
+            return False
+
+        import zmq
+
+        received_valid_z = False
+        while True:
+            try:
+                raw = self.ctx_zmq.recv(flags=zmq.NOBLOCK)
+            except zmq.Again:
+                break
+
+            try:
+                z = np.frombuffer(raw, dtype=np.float32) if raw else np.array([], dtype=np.float32)
+            except ValueError:
+                self._warn_throttled(
+                    "_last_invalid_z_warning",
+                    "Ignoring invalid realtime z: malformed float32 payload",
+                )
+                continue
+            if z.size != 256 or not np.all(np.isfinite(z)):
+                self._warn_throttled(
+                    "_last_invalid_z_warning",
+                    f"Ignoring invalid realtime z: size={z.size}, finite={bool(np.all(np.isfinite(z)))}",
+                )
+                continue
+
+            self.ctx_latest = z.copy()
+            self.ctx_last_z_monotonic = time.monotonic()
+            received_valid_z = True
+
+        return received_valid_z
+
+    def _check_realtime_z_watchdog(self) -> None:
+        timeout_s = float(getattr(self, "ctx_zmq_timeout_s", 0.0))
+        if timeout_s <= 0.0:
+            return
+
+        now = time.monotonic()
+        last_z_time = getattr(self, "ctx_last_z_monotonic", None)
+        reference_time = (
+            float(last_z_time)
+            if last_z_time is not None
+            else float(getattr(self, "ctx_zmq_start_monotonic", now))
+        )
+        age_s = now - reference_time
+        if age_s > timeout_s:
+            self.enter_safe_stop(
+                f"no valid realtime z for {age_s * 1000:.0f} ms",
+                reset_realtime_z=True,
+                warning_attr="_last_z_timeout_warning",
+            )
+
+    def _apply_q_target_slew_limit(self, q_target: np.ndarray) -> np.ndarray:
+        q_target = np.asarray(q_target, dtype=np.float64).reshape(-1)
+        if self.last_cmd_q is None:
+            baseline = np.asarray(self.state_processor.joint_pos, dtype=np.float64).reshape(-1)
+            if baseline.shape != q_target.shape or not np.all(np.isfinite(baseline)):
+                baseline = q_target.copy()
+        else:
+            baseline = np.asarray(self.last_cmd_q, dtype=np.float64).reshape(-1)
+
+        max_delta = self.joint_velocity_limit * self.rl_dt * self.q_target_slew_safety_factor
+        if max_delta.shape != q_target.shape:
+            raise ValueError(
+                f"q_target slew limit shape mismatch: {max_delta.shape} vs {q_target.shape}"
+            )
+        return baseline + np.clip(q_target - baseline, -max_delta, max_delta)
+
+    def _send_safe_hold_command(self) -> bool:
+        if not bool(getattr(self, "has_valid_low_state", False)):
+            return False
+        if not hasattr(self, "state_processor") or not hasattr(self.state_processor, "joint_pos"):
+            return False
+
+        hold_q = np.asarray(self.state_processor.joint_pos, dtype=np.float64).reshape(-1)
+        if hold_q.shape[0] != self.num_dofs or not np.all(np.isfinite(hold_q)):
+            return False
+
+        hold_q = np.clip(hold_q, self.joint_pos_lower_limit, self.joint_pos_upper_limit)
+        try:
+            self.command_sender.send_command(
+                hold_q,
+                np.zeros(self.num_dofs),
+                np.zeros(self.num_dofs),
+            )
+            self.last_cmd_q = hold_q.copy()
+            return True
+        except Exception as exc:
+            self._warn_throttled(
+                "_last_safe_stop_warning",
+                f"Failed to send safe hold command: {exc}",
+            )
+            return False
+
     def prepare_obs_for_rl(self):
         """Prepare observation for policy inference using observation classes"""
         obs_dict: Dict[str, np.ndarray] = {}
@@ -423,18 +591,10 @@ class BFMZeroPolicy:
                     * float(np.linalg.norm(self.ctx[0]))
                 )
             else:
-                import zmq
                 from collections import deque
 
-                while True:
-                    try:
-                        raw = self.ctx_zmq.recv(flags=zmq.NOBLOCK)
-                    except zmq.Again:
-                        break
-                    if raw:
-                        z = np.frombuffer(raw, dtype=np.float32)
-                        if z.size == 256:
-                            self.ctx_latest = z.copy()
+                self._poll_realtime_z()
+                self._check_realtime_z_watchdog()
 
                 if self.ctx_window.maxlen != int(self.window_size):
                     old = list(self.ctx_window)
@@ -517,7 +677,10 @@ class BFMZeroPolicy:
                 if self.total_inference_cnt % 100 == 0:
                     self.perf_dict = {}
         except KeyboardInterrupt:
-            pass
+            logger.info("KeyboardInterrupt, exiting policy loop.")
+        finally:
+            self.enter_safe_stop("policy loop exiting")
+            self._send_safe_hold_command()
 
     def _rl_step_scheduled(self):
         loop_start = time.perf_counter()
@@ -533,6 +696,7 @@ class BFMZeroPolicy:
             if not self.state_processor._prepare_low_state():
                 print("low state not ready.")
                 return
+            self.has_valid_low_state = True
             
         try:
             with Timer(self.perf_dict, "prepare_obs"):
@@ -542,14 +706,21 @@ class BFMZeroPolicy:
 
             with Timer(self.perf_dict, "policy"):  
                 # Inference
-                action = self.policy(observations)
+                action = np.asarray(self.policy(observations), dtype=np.float32)
+                if not np.all(np.isfinite(action)):
+                    self.enter_safe_stop("non-finite policy action")
+                    self.state_dict["action"] = np.zeros(self.num_actions)
+                    self._send_safe_hold_command()
+                    return
                 # Clip policy action
                 action = action.clip(-1, 1)
                 action_scaled = self.action_rescale * action
                 self.last_action = action_scaled
         except Exception as e:
             print(f"Error in policy inference: {e}")
+            self.enter_safe_stop(f"policy inference failed: {e}")
             self.state_dict["action"] = np.zeros(self.num_actions)
+            self._send_safe_hold_command()
             return
 
         with Timer(self.perf_dict, "rule_based_control_flow"):
@@ -569,12 +740,26 @@ class BFMZeroPolicy:
             q_target = np.clip(
                 q_target, self.joint_pos_lower_limit, self.joint_pos_upper_limit
             )
+            if not np.all(np.isfinite(q_target)):
+                self.enter_safe_stop("non-finite q_target before slew limit")
+                self._send_safe_hold_command()
+                return
+
+            q_target = self._apply_q_target_slew_limit(q_target)
+            q_target = np.clip(
+                q_target, self.joint_pos_lower_limit, self.joint_pos_upper_limit
+            )
+            if not np.all(np.isfinite(q_target)):
+                self.enter_safe_stop("non-finite q_target after slew limit")
+                self._send_safe_hold_command()
+                return
 
             # Send command
             cmd_q = q_target
             cmd_dq = np.zeros(self.num_dofs)
             cmd_tau = np.zeros(self.num_dofs)
             self.command_sender.send_command(cmd_q, cmd_dq, cmd_tau)
+            self.last_cmd_q = np.asarray(cmd_q, dtype=np.float64).copy()
 
         elapsed = time.perf_counter() - loop_start
         if elapsed > self.rl_dt:
@@ -645,7 +830,19 @@ class BFMZeroPolicy:
 
         combo = a and b
         prev_combo = prev_a and prev_b
+        if self.stop_latched and not a and not b:
+            self.pico_enable_released_after_stop = True
+
         if combo and not prev_combo:
+            if self.stop_latched and not self.pico_enable_released_after_stop:
+                self._warn_throttled(
+                    "_last_stop_latch_warning",
+                    "Pico A+B ignored while stop latch is active; release A/B after R2 stop, then press A+B again.",
+                )
+                self.last_pico_buttons = buttons
+                return
+            self.stop_latched = False
+            self.pico_enable_released_after_stop = True
             logger.info("Pico A+B: enable policy and start tracking")
             self.handle_joystick_button("R1")
             self.handle_joystick_button("B")
@@ -672,9 +869,9 @@ class BFMZeroPolicy:
         if self.wc_msg is None:
             return False
 
-        r2_stop_pressed = bool(self.wc_msg.R2 and not self.last_wc_msg.R2)
+        r2_stop_pressed = bool(self.wc_msg.R2)
         if r2_stop_pressed:
-            self.handle_joystick_button("R2")
+            self.enter_stop_latch("G1 wireless R2 stop")
             self.last_wc_msg = self.wc_msg
             return True
 
@@ -712,8 +909,7 @@ class BFMZeroPolicy:
                 self.t = self.t_stop
 
         elif cur_key == "R2":
-            self.use_policy_action = False
-            self.get_ready_state = False
+            self.enter_stop_latch("R2 stop command")
             logger.info(colored("Actions set to zero", "blue"))
         elif cur_key == "A":
             self.get_ready_state = True

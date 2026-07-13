@@ -8,6 +8,7 @@ stop: 0
 ctx_source: zmq
 ctx_zmq_addr: tcp://127.0.0.1:28711
 ctx_norm_ref: 16.0
+ctx_zmq_timeout_ms: 200
 
 gamma: 0.8
 window_size: 3

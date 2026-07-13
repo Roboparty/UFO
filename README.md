@@ -331,6 +331,7 @@ Run all three onboard launchers on the robot. PICO should connect to the robot I
 ctx_source: zmq
 ctx_zmq_addr: tcp://127.0.0.1:28711
 ctx_norm_ref: 16.0
+ctx_zmq_timeout_ms: 200
 ```
 
 Robot terminal A, PICO/GMR retargeting with browser viewer and Pico button PUB:
@@ -374,7 +375,11 @@ B      stop policy action and hold current joints
 X      reset tracking motion
 ```
 
-The G1 wireless controller remains active as a fallback. If wireless R2 stop is pressed in the same control frame as a Pico command, wireless R2 stop takes priority and Pico control is skipped for that frame. A physical e-stop is still required.
+The G1 wireless controller remains active as a fallback. Wireless R2 is a stop latch: while R2 is held, policy action and tracking motion are disabled and Pico control is skipped. After R2 is released, Pico A+B remains ignored until Pico A and B have both been released and then pressed again.
+
+The policy subscriber rejects invalid realtime `z` packets and stops policy action if no valid 256-dim finite `z` arrives within `ctx_zmq_timeout_ms`. Policy actions and final joint targets are checked for finite values, and final `q_target` commands are slew-rate limited using the configured G1 joint velocity limits.
+
+A physical e-stop is still required.
 
 ### 5B. Optional Advanced Split Workstation/Robot Flow
 
@@ -393,6 +398,7 @@ On the robot copy, set the workstation address in the same teleop task file:
 ctx_source: zmq
 ctx_zmq_addr: tcp://<WORKSTATION_IP>:28711
 ctx_norm_ref: 16.0
+ctx_zmq_timeout_ms: 200
 ```
 
 Workstation terminal A, PICO/GMR retargeting:
