@@ -316,9 +316,16 @@ Use the physical e-stop for emergencies.
 
 ## 5. Teleop Sim2Real
 
-The workstation publishes realtime `z`; the robot subscribes to it.
+The recommended release path is 5A direct PICO-to-robot onboard teleop. PICO connects to the robot IP, and the robot runs the retarget server, realtime `z` server, and policy locally. Because the realtime `z` server and policy are both onboard, `config/exp/tracking/teleop.yaml` can keep `ctx_zmq_addr: tcp://127.0.0.1:28711`.
 
-For direct PICO-to-robot teleop, run all three onboard launchers on the robot instead. PICO should connect to the robot IP, and `config/exp/tracking/teleop.yaml` can keep:
+| Flow | PICO connects to | Retarget server | Realtime `z` server | Policy | `ctx_zmq_addr` |
+| --- | --- | --- | --- | --- | --- |
+| 5A onboard | robot IP | robot | robot | robot | `tcp://127.0.0.1:28711` |
+| 5B split | workstation IP | workstation | workstation | robot | `tcp://<WORKSTATION_IP>:28711` |
+
+### 5A. Recommended Onboard PICO-To-Robot Flow
+
+Run all three onboard launchers on the robot. PICO should connect to the robot IP, and `config/exp/tracking/teleop.yaml` can keep:
 
 ```yaml
 ctx_source: zmq
@@ -358,7 +365,7 @@ UFO_REAL_ROBOT_OK=1 VENV_PATH=/home/unitree/bfm0real_venv/bin/activate \
   ./run_g1_teleop_policy_onboard.sh
 ```
 
-PICO policy controls:
+PICO policy controls are the primary onboard teleop controls:
 
 ```text
 A      interpolate to default standing pose
@@ -367,7 +374,11 @@ B      stop policy action and hold current joints
 X      reset tracking motion
 ```
 
-The older split workstation/robot flow is still supported:
+The G1 wireless controller remains active as a fallback. If wireless R2 stop is pressed in the same control frame as a Pico command, wireless R2 stop takes priority and Pico control is skipped for that frame. A physical e-stop is still required.
+
+### 5B. Optional Advanced Split Workstation/Robot Flow
+
+The split workstation/robot flow is still supported for advanced debugging:
 
 On the workstation, find the IP reachable from the robot:
 

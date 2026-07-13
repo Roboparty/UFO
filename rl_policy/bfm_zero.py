@@ -523,10 +523,11 @@ class BFMZeroPolicy:
         loop_start = time.perf_counter()
 
         with Timer(self.perf_dict, "prepare_low_state"):
+            wireless_r2_stop = False
             if self.use_joystick:
                 # print(f"Debug::process_joystick:")
-                self.process_joystick_input()
-            if self.pico_control_enabled:
+                wireless_r2_stop = self.process_joystick_input()
+            if self.pico_control_enabled and not wireless_r2_stop:
                 self.process_pico_control_input()
 
             if not self.state_processor._prepare_low_state():
@@ -666,10 +667,16 @@ class BFMZeroPolicy:
         try:
             self.wc_msg = self.robot.read_wireless_controller()
         except Exception:
-            return
+            return False
 
         if self.wc_msg is None:
-            return
+            return False
+
+        r2_stop_pressed = bool(self.wc_msg.R2 and not self.last_wc_msg.R2)
+        if r2_stop_pressed:
+            self.handle_joystick_button("R2")
+            self.last_wc_msg = self.wc_msg
+            return True
 
         # print(f"wc_msg.A: {self.wc_msg.A}")
         if self.wc_msg.A and not self.last_wc_msg.A:
@@ -686,10 +693,9 @@ class BFMZeroPolicy:
             self.handle_joystick_button("L2")
         if self.wc_msg.R1 and not self.last_wc_msg.R1:
             self.handle_joystick_button("R1")
-        if self.wc_msg.R2 and not self.last_wc_msg.R2:
-            self.handle_joystick_button("R2")
         
         self.last_wc_msg = self.wc_msg
+        return False
 
 
     def handle_joystick_button(self, cur_key):
