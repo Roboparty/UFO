@@ -45,10 +45,28 @@ def _resize_nearest(frame: np.ndarray, height: int, width: int) -> np.ndarray:
     return frame[y_idx[:, None], x_idx[None, :]]
 
 
-def _expert_qpos_from_obs(obs_dict: dict[str, torch.Tensor], *, num_dof: int) -> np.ndarray:
+def _control_to_qpos_order_indices(robot_training: Any) -> tuple[np.ndarray, list[str]]:
+    control_joint_names = list(robot_training.robot.control_joint_names)
+    qpos_joint_names = sorted(control_joint_names, key=lambda joint: robot_training.robot.joint_qpos_addr[joint])
+    qpos_addrs = [int(robot_training.robot.joint_qpos_addr[joint]) for joint in qpos_joint_names]
+    if len(set(qpos_addrs)) != len(qpos_addrs):
+        raise ValueError(f"Duplicate MuJoCo qpos addresses for control joints: {list(zip(qpos_joint_names, qpos_addrs))}")
+    index_by_control_joint = {joint: idx for idx, joint in enumerate(control_joint_names)}
+    return np.asarray([index_by_control_joint[joint] for joint in qpos_joint_names], dtype=np.int64), qpos_joint_names
+
+
+def _expert_qpos_from_obs(
+    obs_dict: dict[str, torch.Tensor],
+    *,
+    num_dof: int,
+    dof_qpos_order_indices: np.ndarray,
+) -> np.ndarray:
     root_pos = obs_dict["ref_body_pos"][:, 0].detach().cpu().numpy()
     root_quat_wxyz = np.roll(obs_dict["ref_body_rots"][:, 0].detach().cpu().numpy(), 1, axis=-1)
-    dof_pos = obs_dict["dof_pos"].detach().cpu().numpy()
+    # MotionLib stores dof_pos in policy/control-joint order. MuJoCo qpos playback
+    # expects hinge joints sorted by qpos address, which can differ for robots such
+    # as X2 where actuator order places head joints before arm joints.
+    dof_pos = obs_dict["dof_pos"].detach().cpu().numpy()[:, dof_qpos_order_indices]
     qpos = np.concatenate([root_pos, root_quat_wxyz, dof_pos], axis=-1)
     expected = 7 + int(num_dof)
     if qpos.shape[-1] != expected:
@@ -167,6 +185,7 @@ def run_tracking_inference(
         raise FileNotFoundError(f"Missing robot XML: {robot_xml}")
     control_joint_names = list(robot_training.robot.control_joint_names)
     num_dof = len(control_joint_names)
+    dof_qpos_order_indices, qpos_joint_names = _control_to_qpos_order_indices(robot_training)
 
     model_load_device = checkpoint_load_device(device)
     model = load_model_from_checkpoint_dir(checkpoint_dir, device=model_load_device)
@@ -196,6 +215,8 @@ def run_tracking_inference(
     print(f"[INFO] Rollout XML={env_cfg.mjcf_path}")
     print(f"[INFO] Motion data={env_cfg.lafan_tail_path}")
     print(f"[INFO] Expert renderer XML={robot_xml}")
+    if qpos_joint_names != control_joint_names:
+        print(f"[INFO] Expert qpos joint order differs from control order: {qpos_joint_names}")
     print(f"[INFO] device={device} disable_dr={disable_dr} disable_obs_noise={disable_obs_noise} save_mp4={save_mp4}")
 
     env._motion_lib.load_all_motions()
@@ -224,7 +245,11 @@ def run_tracking_inference(
             episode_len = int(z.shape[0])
             if max_steps is not None:
                 episode_len = min(episode_len, int(max_steps))
-            expert_qpos = _expert_qpos_from_obs(obs_dict, num_dof=num_dof)
+            expert_qpos = _expert_qpos_from_obs(
+                obs_dict,
+                num_dof=num_dof,
+                dof_qpos_order_indices=dof_qpos_order_indices,
+            )
             frames: list[np.ndarray] = []
             use_env_render = True
 

@@ -218,6 +218,18 @@ class RobotConfigTrainingTest(unittest.TestCase):
         ):
             core._validate_aux_reward_semantics(cfg)
 
+
+    def test_mjlab_action_input_reorders_policy_actions_to_action_term_order(self) -> None:
+        core = object.__new__(HumanoidVerseMjlabCore)
+        core.actions = torch.tensor([[10.0, 20.0, 30.0, 40.0]])
+        core.default_dof_pos_offset = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        core.action_target_scale = torch.tensor([[1.0, 2.0, 1.0, 4.0]])
+        core._action_term_dof_indices = torch.tensor([2, 0, 3, 1])
+
+        action_input = core._mjlab_action_input()
+
+        torch.testing.assert_close(action_input, torch.tensor([[33.0, 11.0, 41.0, 21.0]]))
+
     def test_yaml_actuator_missing_joint_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tiny_robot = _write_tiny_robot_with_training(Path(tmpdir), missing_actuator_joint=True)
@@ -234,7 +246,7 @@ class RobotConfigTrainingTest(unittest.TestCase):
             "ref_dof_vel": torch.ones(4, 2),
         }
         obs["ref_body_rots"][..., 3] = 1.0
-        qpos = _expert_qpos_from_obs(obs, num_dof=2)
+        qpos = _expert_qpos_from_obs(obs, num_dof=2, dof_qpos_order_indices=torch.tensor([0, 1]).numpy())
         self.assertEqual(qpos.shape, (4, 9))
         target = _target_states_from_obs(obs, device="cpu", num_dof=2)
         self.assertEqual(tuple(target["dof_states"].shape), (1, 2, 2))

@@ -646,6 +646,23 @@ class HumanoidVerseMjlabCore:
         self._joint_ids = torch.tensor([mjlab_joint_names.index(name) for name in self.dof_names], device=self.device, dtype=torch.long)
         self._body_ids = torch.tensor([mjlab_body_names.index(name) for name in self.body_names], device=self.device, dtype=torch.long)
 
+        action_term = self.mjlab_env.action_manager.get_term("actions")
+        action_target_names = tuple(action_term.target_names)
+        if len(action_target_names) != self.num_dof or set(action_target_names) != set(self.dof_names):
+            raise ValueError(
+                "MJLab action target joints do not match HumanoidVerse dof_names: "
+                f"target_names={list(action_target_names)}, dof_names={list(self.dof_names)}"
+            )
+        self._action_term_dof_indices = torch.tensor(
+            [self.dof_names.index(name) for name in action_target_names], device=self.device, dtype=torch.long
+        )
+        if action_target_names != self.dof_names:
+            print(
+                "[INFO] MJLab action target order differs from HumanoidVerse dof order: "
+                f"action_target_names={list(action_target_names)}",
+                flush=True,
+            )
+
         self.default_dof_pos = _default_joint_pos(hv_config).to(self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.default_dof_pos_offset = torch.zeros(self.num_envs, self.num_dof, device=self.device)
         self.action_target_scale = _action_target_scale(hv_config).to(self.device).unsqueeze(0)
@@ -1003,12 +1020,18 @@ class HumanoidVerseMjlabCore:
             actions = actions * float(self.config.robot.control.normalize_action_to) / float(self.config.robot.control.normalize_action_from)
         return torch.clamp(actions, -float(self.config.robot.control.action_clip_value), float(self.config.robot.control.action_clip_value))
 
+    def _mjlab_action_input(self) -> torch.Tensor:
+        action_indices = self._action_term_dof_indices
+        return self.actions[:, action_indices] + self.default_dof_pos_offset[:, action_indices] / torch.clamp(
+            self.action_target_scale[:, action_indices], min=1.0e-6
+        )
+
     def step(self, actions: torch.Tensor):
         actions = actions.to(self.device, dtype=torch.float32)
         self.last_actions[:] = self.actions
         self.last_dof_vel[:] = self.dof_vel
         self.actions[:] = self._normalized_action(actions)
-        mjlab_actions = self.actions + self.default_dof_pos_offset / torch.clamp(self.action_target_scale, min=1.0e-6)
+        mjlab_actions = self._mjlab_action_input()
         _, _, terminated, time_outs, _ = self.mjlab_env.step(mjlab_actions)
         self._refresh_state()
         reward, aux = self._compute_reward()
