@@ -1,8 +1,8 @@
 """Reward inference for the MJLab backend.
 
-This entrypoint avoids the legacy Isaac inference environment.  Reward relabel
-uses the MJLab G1 MJCF, and optional policy rollouts are generated in the
-MJLab environment used by training.
+This entrypoint avoids the legacy Isaac inference environment. Reward relabeling
+uses the selected robot XML, G1 keeps the full default task set, and non-G1
+robots currently support root/locomotion reward tasks only.
 """
 
 from __future__ import annotations
