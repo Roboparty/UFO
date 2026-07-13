@@ -1,8 +1,8 @@
 """Evaluate goal-reaching joint-position MAE for UFO policies.
 
-For each goal frame in the G1 LaFAN goal JSON, this script resets the robot to
-that motion's first frame, rolls out a fixed goal latent for N steps, and reports
-the final 29-DoF joint-position MAE against the target goal frame.
+For each goal frame in a goal JSON, this script resets the robot to that
+motion's first frame, rolls out a fixed goal latent for N steps, and reports
+the final joint-position MAE against the target goal frame.
 """
 
 from __future__ import annotations

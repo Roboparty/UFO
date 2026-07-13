@@ -1,8 +1,8 @@
 """Evaluate joint-position MAE for a model on a motion dataset.
 
-This script computes per-step MAE on 29-DoF joint positions by comparing
-policy rollout joint positions against motion targets generated from the
-same motion dataset. It reports global mean/std and per-motion stats.
+This script computes per-step MAE on robot joint positions by comparing
+policy rollout joint positions against motion targets generated from the same
+motion dataset. It reports global mean/std and per-motion stats.
 """
 
 from __future__ import annotations
@@ -262,7 +262,7 @@ def evaluate(args: argparse.Namespace) -> Path:
         "policy": model_folder.name,
         "model_folder": str(model_folder),
         "data_path": str(data_path),
-        "metric": "joint_pos_mae_abs_mean_over_29dof",
+        "metric": "joint_pos_mae_abs_mean_over_dof",
         "chunk_envs": int(args.chunk_envs),
         "agent_flag": agent_flag,
         "global_mean": float(arr_all.mean()),
