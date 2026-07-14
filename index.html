@@ -236,6 +236,28 @@
       height: auto;
     }
 
+    .motivation-video {
+      margin: 18px 0 8px;
+    }
+
+    .motivation-video-embed {
+      width: min(980px, 100%);
+      margin: 0 auto;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+      background: #000;
+      aspect-ratio: 16 / 9;
+    }
+
+    .motivation-video-embed iframe {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      display: block;
+    }
+
     .highlight-pin {
       position: absolute;
       transform: translate(-50%, -50%);
@@ -1443,6 +1465,21 @@
   </header>
 
   <main>
+    <section class="motivation-video" aria-label="Project video preview">
+      <div class="container">
+        <h2 id="teaser-video-title">Teaser Video</h2>
+        <div class="motivation-video-embed">
+          <iframe
+            src="https://www.youtube.com/embed/uJPcLdn9sNA"
+            title="UFO project video"
+            loading="lazy"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            referrerpolicy="strict-origin-when-cross-origin"
+            allowfullscreen>
+          </iframe>
+        </div>
+      </div>
+    </section>
     <section id="abstract">
       <div class="container">
         <h2 id="abstract-title">Motivation</h2>
@@ -2152,6 +2189,7 @@
             heroCode: "Code",
             heroVideo: "Video",
             heroPdf: "PDF",
+            teaserVideoTitle: "Teaser Video",
             abstractTitle: "Motivation",
             abstractLead: "<strong class=\"abstract-key\">Tracking-based control</strong> remains the dominant paradigm for humanoid robots, while <strong class=\"abstract-key\">unsupervised RL</strong> offers a complementary path toward general skill acquisition, with strong potential in <span class=\"abstract-item-1\">disturbance robustness</span>, <span class=\"abstract-item-2\">data efficiency</span>, <span class=\"abstract-item-3\">skill generalization</span>, and <span class=\"abstract-item-4\">behavior composition</span>.<br><br>Yet progress has been slowed by <strong class=\"abstract-key\">high training complexity</strong>, <strong class=\"abstract-key\">substantial engineering overhead</strong>, and the <strong class=\"abstract-key\">absence of unified infrastructure</strong>, which has limited broader follow-up work. <strong class=\"abstract-key\">UFO aims to lower this barrier</strong>, enabling wider exploration of unsupervised RL and accelerating the development of humanoid behavioral foundation models.",
             highlightsTitle: "Highlights",
@@ -2200,6 +2238,7 @@
             heroCode: "代码",
             heroVideo: "视频",
             heroPdf: "论文",
+            teaserVideoTitle: "先导视频",
             abstractTitle: "动机",
             abstractLead: "<strong class=\"abstract-key\">基于跟踪的控制</strong>仍是当前人形机器人最主流的范式，而<strong class=\"abstract-key\">无监督强化学习</strong>为通用技能学习提供了互补路径，在<span class=\"abstract-item-1\">抗扰动能力</span>、<span class=\"abstract-item-2\">数据效率</span>、<span class=\"abstract-item-3\">技能泛化</span>与<span class=\"abstract-item-4\">行为组合</span>方面展现出独特潜力。<br><br>但这一方向长期受限于<strong class=\"abstract-key\">训练复杂度高</strong>、<strong class=\"abstract-key\">工程实现成本大</strong>以及<strong class=\"abstract-key\">缺乏统一基础设施</strong>，导致后续研究推进缓慢。<strong class=\"abstract-key\">UFO 的目标是降低这一门槛</strong>，推动无监督强化学习的更广泛探索，并加速人形行为基础模型的发展。",
             highlightsTitle: "亮点",
@@ -2263,6 +2302,7 @@
           setText("hero-link-code", t.heroCode);
           setText("hero-link-video", t.heroVideo);
           setText("hero-link-pdf", t.heroPdf);
+          setText("teaser-video-title", t.teaserVideoTitle);
           setText("abstract-title", t.abstractTitle);
           setText("abstract-lead", t.abstractLead, true);
           setText("highlights-title", t.highlightsTitle);
