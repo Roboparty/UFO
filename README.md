@@ -9,45 +9,44 @@
 </p>
 
 <p align="center">
+  <a href="README.md">English</a> | <a href="README_zh-CN.md">中文</a>
+</p>
+
+<p align="center">
   <img src="./assets/UFO.png" alt="UFO" height="72" style="vertical-align: middle;" />
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" height="72" style="vertical-align: middle;" />
 </p>
 
+<p align="center">
+  <img src="./assets/teleop.gif" alt="Teleoperation Demo" width="760" />
+</p>
 
-UFO is an unsupervised reinforcement learning framework for humanoid control. The
-main branch provides MJLab training, robot-aware motion-data import, and policy
-inference, with a curated and best-tested path for Unitree G1.
+## Overview
 
-## Highlights
+UFO is an open-source unsupervised reinforcement learning framework for humanoid control. The `main` branch focuses on MJLab training, robot-aware motion-data import, tracking/goal/reward inference, and ONNX export. The most complete and best-tested path is currently Unitree G1.
 
-- FB and TeCH unsupervised RL presets.
-- G1 humanoid training in MJLab.
-- RobotState CSV and NPZ motion-data import.
-- Manifest-based, source-weighted multi-source data mixing.
-- Experimental `--robot-config` training initialization for bringing up new robots.
-- Robot-config-aware tracking inference and video export.
-- Robot-config-aware goal inference and limited reward inference bring-up paths.
+UFO is designed to separate the learning pipeline from robot-specific configuration where practical, but new robot bring-up is still experimental. A new robot requires a MuJoCo XML, optionally a matching URDF, and motion data that has already been adapted or retargeted to that robot in RobotState format. UFO does not automatically retarget human motion or another robot's motion to a new robot, and one checkpoint cannot be directly reused across robots with different bodies, actions, or observation dimensions.
 
-## Current Support Matrix
+## What is supported?
 
 | Capability | Status |
 | --- | --- |
-| G1 training | Supported and best tested |
+| Unitree G1 training | Supported and best tested |
 | Motion data: RobotState CSV / NPZ / `ufo_pkl` | Supported |
 | Multi-source data manifest | Supported |
 | Tracking inference | Robot-config aware |
 | Goal inference | Robot-config aware; non-G1 requires robot-specific goal JSON |
-| Reward inference | G1 full default tasks; non-G1 limited to root/locomotion tasks |
+| Reward inference | G1 full default tasks; non-G1 currently limited to root/locomotion tasks |
 | Deployment and teleoperation | Use the [`deploy` branch](https://github.com/Roboparty/UFO/tree/deploy) / UFO-Deploy runtime |
 | Automatic motion retargeting | Not supported |
 | Cross-robot shared-policy training | Not supported |
 
 > [!NOTE]
-> The `main` branch focuses on training, data import, and inference. Real-robot
-> deployment and teleoperation runtime live in the `deploy` branch (UFO-Deploy).
+> `main` branch = training / data import / inference / ONNX export.
+> `deploy` branch = G1 real-robot deployment / teleoperation runtime.
 
-## Install
+## Installation
 
 Clone UFO first:
 
@@ -76,19 +75,6 @@ Install the environment:
 uv sync
 ```
 
-## Motion Data
-
-Large motion datasets are hosted separately so that `git clone` only downloads
-the code. Download the default processed G1 LaFAN training data from the
-[`xuewang/UFO-MotionData`](https://huggingface.co/datasets/xuewang/UFO-MotionData)
-dataset:
-
-```bash
-bash scripts/download_data.sh g1_lafan
-```
-
-
-
 For W&B logging, authenticate before starting a multi-process run:
 
 ```bash
@@ -96,9 +82,22 @@ uv run wandb login
 # Or: export WANDB_API_KEY=your_wandb_api_key
 ```
 
-## Quick Start
+## Path A: Unitree G1 Quick Start
 
-### G1 Smoke Test
+The G1 path is the recommended route for first-time users because it is the most complete and best tested.
+
+### 1. Download G1 motion data
+
+Large motion datasets are hosted separately so that the Git repository only contains code and lightweight metadata. Download the processed G1 LaFAN data with:
+
+```bash
+bash scripts/download_data.sh g1_lafan
+ls -lh humanoidverse/data/lafan_29dof_10s-clipped.pkl
+```
+
+The download script verifies the SHA256 checksum and places the default processed training file under `humanoidverse/data/`.
+
+### 2. Run a G1 smoke test
 
 Run this first to verify the environment, motion data, and short training loop:
 
@@ -111,7 +110,7 @@ Run this first to verify the environment, motion data, and short training loop:
   --work-dir /tmp/ufo_smoke_g1
 ```
 
-### Full FB Training on 8 GPUs
+### 3. Full FB training on G1
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -128,7 +127,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --wandb-run-name ufo_fb_g1
 ```
 
-### TeCH Training
+### 4. TeCH training on G1
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -145,85 +144,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --wandb-run-name ufo_tech_g1
 ```
 
-TeCH was previously exposed as the TLDR preset in early UFO versions. `--agent tldr` is kept as a deprecated compatibility alias for `--agent tech`.
+TeCH was previously exposed as TLDR in early UFO versions. `--agent tldr` is kept as a deprecated compatibility alias for `--agent tech`.
 
-Core defaults live in `humanoidverse/train.py`. In particular, `--num-envs`
-and `--buffer-size` are per GPU, while `--num-env-steps` is the global sample
-budget.
+Core defaults live in `humanoidverse/train.py`. In particular, `--num-envs` and `--buffer-size` are per GPU, while `--num-env-steps` is the global sample budget.
 
-## Bring Up a New Robot
+### 5. Tracking inference and ONNX export
 
-This experimental path assumes you already have a MuJoCo XML and RobotState
-motion data for the same robot. UFO does not automatically retarget motion from
-another skeleton.
-
-`robot_inspect --hydra-out` can generate XML-derived draft RobotTrainingSpec
-and Hydra robot config files. If a matching URDF is available, pass `--urdf` to
-enrich draft hardware limits, dynamics, semantic hints, and symmetry metadata;
-MuJoCo XML still defines qpos/qvel/action layout and actuator order. See
-[Robot-Config Training](docs/robot_config_training.md).
-
-1. Generate robot YAML and Hydra config drafts from the XML, optionally assisted
-   by a matching URDF:
-
-   ```bash
-   uv run python -m humanoidverse.tools.robot_inspect \
-     --xml /path/to/robot.xml \
-     --urdf /path/to/robot.urdf \
-     --name my_robot \
-     --out configs/robots/my_robot.yaml \
-     --hydra-out humanoidverse/config/robot/my_robot/my_robot_auto.yaml
-   ```
-
-   Omit `--urdf` if you only have MJCF. URDF is auxiliary; it does not replace
-   the MuJoCo XML as the training/inference source of truth.
-
-2. Curate the generated YAML. Verify the base body, control-joint order, feet,
-   hands, key bodies, initial state, controller, and actuator fields. The draft
-   is not a finished robot configuration.
-
-3. Build the full inference pickle, clipped training pickle, and data manifest:
-
-   ```bash
-   uv run python -m humanoidverse.tools.data_build \
-     --robot configs/robots/my_robot.yaml \
-     --source "/path/to/motions/*.csv" \
-     --format robot_state_csv \
-     --name my_motion \
-     --fps 50 \
-     --clip-seconds 10 \
-     --out configs/data/my_motion_auto_build.yaml \
-     --rebuild-cache
-   ```
-
-   Headerless RobotState CSV files are accepted. Without a header, columns are
-   interpreted as `root_pos` xyz, `root_quat` xyzw, then DOF positions in the
-   robot XML/control-joint order; an optional leading `time` column is also
-   accepted.
-
-   Optional: run `humanoidverse.tools.data_inspect` first if you want to
-   validate the CSV schema without building cache files.
-
-4. Start with a smoke training run:
-
-   ```bash
-   ./run_train.sh \
-     --agent fb \
-     --robot-config configs/robots/my_robot.yaml \
-     --data-manifest configs/data/my_motion_auto_build.yaml \
-     --gpu-ids single \
-     --smoke \
-     --work-dir /tmp/ufo_smoke_my_robot
-   ```
-
-See [Import Wizard](docs/import_wizard.md) for data schemas and import commands,
-and [Robot-Config Training](docs/robot_config_training.md) for required training
-fields, current constraints, and bring-up guidance. New robots may still require
-environment and controller tuning before high-quality training.
-
-## Tracking Inference
-
-Use full motion sequences for inference, rather than clipped training data:
+Use full motion sequences for inference, not clipped training data:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -233,30 +160,95 @@ uv run python -m humanoidverse.tracking_inference \
   --device cuda:0 \
   --headless \
   --save-mp4 \
-  --motion-list 0
+  --motion-list 0 \
+  --export-onnx true
 ```
 
-Outputs are written to `<model-folder>/tracking_inference/`. Tracking, goal,
-and reward inference accept `--robot-config` and manifest-based inference data.
-Goal inference defaults to the curated G1 goal JSON for G1 checkpoints; non-G1
-goal inference requires a robot-specific `--goal-json`, because goal frames and
-joint targets are not shared across robot morphologies. Reward inference keeps
-the full default task set for G1. For non-G1 robots, the first robot-config-aware
-path is limited to rollout/relabel setup and root/locomotion tasks such as
-`move-ego-*` and `rotate-z-*` unless robot-specific reward semantics are added.
+Outputs are written to `<model-folder>/tracking_inference/`. With `--export-onnx`, tracking inference exports a robot-config-aware ONNX policy and a companion metadata JSON. The metadata records the robot config, XML path, controlled joints, actor input dimensions, z dimension, actor observation dimension, and output action dimension.
 
-With `--export-onnx`, tracking inference exports a policy ONNX that is aware of
-the selected robot config by deriving actor input dimensions from the loaded
-checkpoint's `obs_space` and actor `input_filter`. A companion metadata JSON is
-written next to the ONNX with the robot config, XML path, controlled joints,
-actor input dimensions, z dimension, actor observation dimension, and output
-action dimension. The exported ONNX is tied to that checkpoint's robot, action,
-and observation dimensions; one checkpoint cannot be reused across different
-robots. The deploy branch remains G1-only unless a robot-specific deploy config
-is created.
+The exported ONNX is tied to the checkpoint's robot, action, and observation dimensions. It should not be reused for another robot without training/exporting a checkpoint for that robot.
+
+## Path B: Bring Up a New Robot
+
+This path is experimental. It assumes you already have:
+
+- a MuJoCo XML for the target robot;
+- optionally a matching URDF;
+- RobotState motion data already adapted or retargeted to the same robot.
+
+UFO does not automatically retarget human motion or another robot's motion into a new robot. External retargeting tools such as `hhtools`, GMR, or custom pipelines can be used before importing data into UFO.
+
+### 1. Generate robot config drafts
+
+```bash
+uv run python -m humanoidverse.tools.robot_inspect \
+  --xml /path/to/robot.xml \
+  --urdf /path/to/robot.urdf \
+  --name my_robot \
+  --out configs/robots/my_robot.yaml \
+  --hydra-out humanoidverse/config/robot/my_robot/my_robot_auto.yaml
+```
+
+Omit `--urdf` if you only have MJCF. URDF is auxiliary. The MuJoCo XML remains the source of truth for qpos/qvel layout, action layout, and actuator order.
+
+### 2. Manually review robot semantics
+
+The generated files are drafts. Before large-scale training, manually review the base body, control-joint order, feet, hands, key bodies, initial state, PD gains, actuator limits, contact bodies, and termination/reward-related semantics.
+
+### 3. Build RobotState data manifest
+
+```bash
+uv run python -m humanoidverse.tools.data_build \
+  --robot configs/robots/my_robot.yaml \
+  --source "/path/to/motions/*.csv" \
+  --format robot_state_csv \
+  --name my_motion \
+  --fps 50 \
+  --clip-seconds 10 \
+  --out configs/data/my_motion_auto_build.yaml \
+  --rebuild-cache
+```
+
+Headerless RobotState CSV files are accepted. Without a header, columns are interpreted as `root_pos` xyz, `root_quat` xyzw, then DOF positions in the robot XML/control-joint order; an optional leading `time` column is also accepted.
+
+Optional: run `humanoidverse.tools.data_inspect` first if you want to validate the CSV schema without building cache files.
+
+### 4. Run smoke training
+
+```bash
+./run_train.sh \
+  --agent fb \
+  --robot-config configs/robots/my_robot.yaml \
+  --data-manifest configs/data/my_motion_auto_build.yaml \
+  --gpu-ids single \
+  --smoke \
+  --work-dir /tmp/ufo_smoke_my_robot
+```
+
+### 5. Known constraints for new robots
+
+- The robot-config path is experimental.
+- New robots may require environment, controller, reward, contact, or termination tuning.
+- Non-G1 goal inference needs robot-specific goal JSON.
+- Non-G1 reward inference currently focuses on root/locomotion tasks unless robot-specific semantics are added.
+- The `deploy` branch remains G1-oriented unless a robot-specific deploy runtime is created.
+- One checkpoint cannot be reused across robots with different morphology, action dimensions, or observation dimensions.
+
+See [Import Wizard](docs/import_wizard.md) for data schemas and import commands, and [Robot-Config Training](docs/robot_config_training.md) for required training fields, current constraints, and bring-up guidance.
+
+## Multi-source skill injection
+
+UFO supports manifest-based, source-weighted multi-source data mixing. This is useful for injecting rare agile skills, such as cartwheel motions, while preserving the base motion distribution. The dataset identity is sampled from a fixed source ratio, and prioritized sampling is applied within each source. See `configs/data/example_mix.yaml` for a compact manifest example.
 
 ## Documentation
 
 - [Import Wizard](docs/import_wizard.md): RobotState schemas, inspection, and data building.
 - [Robot-Config Training](docs/robot_config_training.md): experimental robot-aware training initialization.
 - [Training and Inference](docs/TRAIN_INFERENCE.md): additional commands and runtime notes.
+- [Deploy branch](https://github.com/Roboparty/UFO/tree/deploy): G1 real-robot deployment and teleoperation runtime.
+
+## Citation / License
+
+Citation coming soon.
+
+License: see [LICENSE](LICENSE).
