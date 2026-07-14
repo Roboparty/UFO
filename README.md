@@ -18,9 +18,9 @@
   <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" height="72" style="vertical-align: middle;" />
 </p>
 
-<p align="center">
+<!-- <p align="center">
   <img src="./assets/teleop.gif" alt="Teleoperation Demo" width="760" />
-</p>
+</p> -->
 
 ## Overview
 
@@ -249,6 +249,16 @@ UFO supports manifest-based, source-weighted multi-source data mixing. This is u
 
 ## Citation / License
 
-Citation coming soon.
+If you find UFO useful in your research, please cite:
+
+```bibtex
+@misc{ufo2026,
+  author       = {{RoboParty Lab Team}},
+  title        = {UFO: An Unsupervised Reinforcement Learning Framework for Humanoid Control},
+  year         = {2026},
+  howpublished = {\url{https://github.com/Roboparty/UFO}},
+  note         = {Project page: \url{https://roboparty.github.io/UFO/}}
+}
+```
 
 License: see [LICENSE](LICENSE).

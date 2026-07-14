@@ -236,6 +236,18 @@ UFO 支持基于 manifest 的多数据源混合。每个数据源之间的采样
 
 ## 引用 / 许可证
 
-Citation coming soon.
+如果你在研究中使用了 UFO，请引用：
+
+```bibtex
+@misc{ufo2026,
+  author       = {{RoboParty Lab Team}},
+  title        = {UFO: An Unsupervised Reinforcement Learning Framework for Humanoid Control},
+  year         = {2026},
+  howpublished = {\url{https://github.com/Roboparty/UFO}},
+  note         = {Project page: \url{https://roboparty.github.io/UFO/}}
+}
+```
+
+在 LaTeX 中，将上述条目加入 `.bib` 文件后，使用 `\cite{ufo2026}` 即可。
 
 License: see [LICENSE](LICENSE).
