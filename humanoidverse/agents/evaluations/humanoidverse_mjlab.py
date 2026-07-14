@@ -228,7 +228,7 @@ def get_backward_observation(env, motion_id, include_last_action, velocity_multi
         # ref_dof_vel = motion_state["dof_vel"]
         ref_ang_vel = reference_base_ang_vel(env, base_quat, ref_body_angular_vels[:, 0])
         projected_gravity = quat_rotate_inverse(base_quat, env.gravity_vec[0:1].repeat(max_local_self_obs.shape[0], 1), w_last=True)
-        bogus_actions = ref_dof_pos
+        bogus_actions = torch.zeros_like(ref_dof_pos)
 
         bogus_history_actor = torch.cat([bogus_actions, ref_ang_vel, ref_dof_pos, ref_dof_vel, projected_gravity], dim=-1).repeat(1, 4)
         # obs = torch.cat([bogus_actions, ref_ang_vel, ref_dof_pos, ref_dof_vel, bogus_history_actor, max_local_self_obs, projected_gravity], dim=-1)
@@ -269,8 +269,7 @@ def get_backward_observation(env, motion_id, include_last_action, velocity_multi
         ],
         dim=-1,
     )
-    bogus_actions = ref_dof_pos
-    g1env_last_action = bogus_actions
+    g1env_last_action = torch.zeros_like(ref_dof_pos)
 
     g1env_privileged_obs = ref_dict["max_local_self_obs"]
 
@@ -280,8 +279,7 @@ def get_backward_observation(env, motion_id, include_last_action, velocity_multi
     }
 
     if include_last_action:
-        # NOTE we multiply by zero to align with mujoco data
-        g1env_obs["last_action"] = g1env_last_action * 0
+        g1env_obs["last_action"] = g1env_last_action
 
     return g1env_obs, ref_dict
 

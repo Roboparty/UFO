@@ -71,3 +71,27 @@ class ReferenceObservationsTest(unittest.TestCase):
                     assigns_ref_ang_vel = any(isinstance(target, ast.Name) and target.id == "ref_ang_vel" for target in node.targets)
                     if assigns_ref_ang_vel:
                         self.assertNotEqual(ast.unparse(node.value), "ref_body_angular_vels[:, 0]", relative_path)
+
+    def test_reference_backward_helpers_use_zero_fake_actions(self) -> None:
+        paths = [
+            "humanoidverse/utils/helpers.py",
+            "humanoidverse/agents/evaluations/humanoidverse_mjlab.py",
+        ]
+        for relative_path in paths:
+            with self.subTest(path=relative_path):
+                tree = ast.parse((REPO_ROOT / relative_path).read_text())
+                zero_action_assignments = 0
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Assign):
+                        continue
+                    assigns_bogus_actions = any(isinstance(target, ast.Name) and target.id == "bogus_actions" for target in node.targets)
+                    if not assigns_bogus_actions:
+                        continue
+                    value = ast.unparse(node.value)
+                    self.assertNotEqual(value, "ref_dof_pos", relative_path)
+                    zero_action_assignments += value == "torch.zeros_like(ref_dof_pos)"
+                self.assertGreaterEqual(
+                    zero_action_assignments,
+                    1,
+                    relative_path,
+                )

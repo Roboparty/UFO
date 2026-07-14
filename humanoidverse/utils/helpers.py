@@ -202,7 +202,7 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
             env.gravity_vec[0:1].repeat(max_local_self_obs.shape[0], 1),
             w_last=True
         )
-        bogus_actions = ref_dof_pos
+        bogus_actions = torch.zeros_like(ref_dof_pos)
 
         bogus_history_actor = torch.cat([bogus_actions, ref_ang_vel, ref_dof_pos, ref_dof_vel, projected_gravity], dim=-1).repeat(1, 4)
         ref_dict = {
