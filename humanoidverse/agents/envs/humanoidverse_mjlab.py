@@ -645,13 +645,6 @@ class HumanoidVerseMjlabCore:
             raise ValueError(f"MJLab robot asset is missing bodies from HumanoidVerse config: {missing_bodies}")
         self._joint_ids = torch.tensor([mjlab_joint_names.index(name) for name in self.dof_names], device=self.device, dtype=torch.long)
         self._body_ids = torch.tensor([mjlab_body_names.index(name) for name in self.body_names], device=self.device, dtype=torch.long)
-        qpos_dof_names = tuple(name for name in mjlab_joint_names if name in self.dof_names)
-        if len(qpos_dof_names) != self.num_dof or set(qpos_dof_names) != set(self.dof_names):
-            raise ValueError(
-                "MJLab qpos joints do not match HumanoidVerse dof_names: "
-                f"qpos_dof_names={list(qpos_dof_names)}, dof_names={list(self.dof_names)}"
-            )
-        self._qpos_dof_indices = torch.tensor([self.dof_names.index(name) for name in qpos_dof_names], device=self.device, dtype=torch.long)
 
         action_term = self.mjlab_env.action_manager.get_term("actions")
         action_target_names = tuple(action_term.target_names)
@@ -1233,10 +1226,8 @@ class HumanoidVerseMjlabVectorEnv(VectorEnv):
 
     def _get_qpos_qvel(self, to_numpy: bool = True):
         base_pos_wxyz = torch.cat([self._env.robot_root_states[:, :3], xyzw_to_wxyz(self._env.robot_root_states[:, 3:7])], dim=-1)
-        qpos_dof = self._env.dof_pos[:, self._env._qpos_dof_indices]
-        qvel_dof = self._env.dof_vel[:, self._env._qpos_dof_indices]
-        qpos = torch.cat([base_pos_wxyz, qpos_dof], dim=-1)
-        qvel = torch.cat([self._env.robot_root_states[:, 7:10], self._env.base_ang_vel, qvel_dof], dim=-1)
+        qpos = torch.cat([base_pos_wxyz, self._env.dof_pos], dim=-1)
+        qvel = torch.cat([self._env.robot_root_states[:, 7:10], self._env.base_ang_vel, self._env.dof_vel], dim=-1)
         if to_numpy:
             return qpos.detach().cpu().numpy(), qvel.detach().cpu().numpy()
         return qpos, qvel

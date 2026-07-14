@@ -9,7 +9,7 @@ from unittest.mock import patch
 import torch
 from omegaconf import OmegaConf
 
-from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabCore, HumanoidVerseMjlabVectorEnv
+from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabCore
 from humanoidverse.train import _resolve_training_robot_config, build_ufo_mjlab_config, parse_args as parse_train_args
 from humanoidverse.tracking_inference import (
     _expert_qpos_from_obs,
@@ -218,23 +218,6 @@ class RobotConfigTrainingTest(unittest.TestCase):
         ):
             core._validate_aux_reward_semantics(cfg)
 
-
-
-    def test_vector_env_qpos_output_reorders_dofs_to_qpos_order(self) -> None:
-        wrapped = object.__new__(HumanoidVerseMjlabVectorEnv)
-        core = object.__new__(HumanoidVerseMjlabCore)
-        core.robot_root_states = torch.tensor([[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, 4.0, 5.0, 6.0]])
-        core.base_ang_vel = torch.tensor([[7.0, 8.0, 9.0]])
-        core.dof_pos = torch.tensor([[10.0, 20.0, 30.0, 40.0]])
-        core.dof_vel = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
-        core._qpos_dof_indices = torch.tensor([2, 0, 3, 1])
-        core.mjlab_env = type("DummyMjlabEnv", (), {"close": lambda self: None})()
-        wrapped._env = core
-
-        qpos, qvel = wrapped._get_qpos_qvel(to_numpy=False)
-
-        torch.testing.assert_close(qpos, torch.tensor([[1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 30.0, 10.0, 40.0, 20.0]]))
-        torch.testing.assert_close(qvel, torch.tensor([[4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 3.0, 1.0, 4.0, 2.0]]))
 
     def test_mjlab_action_input_reorders_policy_actions_to_action_term_order(self) -> None:
         core = object.__new__(HumanoidVerseMjlabCore)
