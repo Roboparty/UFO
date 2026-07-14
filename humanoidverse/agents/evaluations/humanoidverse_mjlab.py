@@ -127,6 +127,9 @@ def get_backward_observation(env, motion_id, include_last_action, velocity_multi
     )
     from humanoidverse.utils.torch_utils import quat_rotate_inverse
 
+    if not env.config.obs.use_obs_filter:
+        raise ValueError("MJLab tracking evaluation requires obs.use_obs_filter=True")
+
     motion_times = torch.arange(int(np.ceil((env._motion_lib._motion_lengths[motion_id] / env.dt).cpu()))).to(env.device) * env.dt
     # motion_times = torch.arange(0, env._motion_lib._motion_num_frames.item() * frame_interval, frame_interval, device=env.device)
 

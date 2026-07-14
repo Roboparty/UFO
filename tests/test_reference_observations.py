@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 import torch
 
+from humanoidverse.agents.evaluations.humanoidverse_mjlab import (
+    get_backward_observation as get_mjlab_eval_backward_observation,
+)
 from humanoidverse.utils.reference_observations import reference_base_ang_vel
 from humanoidverse.utils.torch_utils import quat_rotate_inverse
 
@@ -46,6 +49,12 @@ class ReferenceObservationsTest(unittest.TestCase):
         actual = reference_base_ang_vel(env, base_quat, world_ang_vel)
 
         self.assertTrue(torch.equal(actual, world_ang_vel))
+
+    def test_mjlab_eval_backward_observation_requires_obs_filter(self) -> None:
+        env = SimpleNamespace(config=SimpleNamespace(obs=SimpleNamespace(use_obs_filter=False)))
+
+        with self.assertRaisesRegex(ValueError, "requires obs.use_obs_filter=True"):
+            get_mjlab_eval_backward_observation(env, motion_id=0, include_last_action=False)
 
     def test_reference_paths_do_not_directly_assign_world_base_ang_vel(self) -> None:
         paths = [
