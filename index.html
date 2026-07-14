@@ -472,6 +472,23 @@
       font-weight: 700;
     }
 
+    .section3-schema {
+      margin: 2px 0 6px;
+      border: 1px solid #bbf7d0;
+      border-radius: 12px;
+      background: #f7fee7;
+      padding: 10px;
+      box-shadow: 0 10px 24px rgba(22, 163, 74, 0.08);
+    }
+
+    .section3-schema svg {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
     .section3-intro {
       margin: 4px 0 2px;
       color: #166534;
@@ -947,6 +964,24 @@
 
     .gallery-h4 {
       --gallery-accent: #3b82f6;
+    }
+
+    .gallery-h3 {
+      --gallery-accent: #22c55e;
+    }
+
+    .section3-gallery-title {
+      margin: 10px 0 2px;
+      color: #166534;
+      font-size: clamp(1.02rem, 1.45vw, 1.16rem);
+      font-weight: 700;
+    }
+
+    .section3-gallery-note {
+      margin: 0 0 4px;
+      color: #15803d;
+      font-size: clamp(0.98rem, 1.25vw, 1.08rem);
+      font-weight: 600;
     }
 
     .section1-gallery-caption {
@@ -1561,11 +1596,74 @@
           <h3 id="detail-h3-title">Highlight 3: General & Extensible Framework</h3>
           <div class="section3-block">
             <p class="section3-keypoint" id="section3-li-1">Diverse Robot Platforms</p>
-            <figure class="section3-figure">
-              <video controls muted loop playsinline preload="metadata" aria-label="Section 3 RP1 split video">
-                <source src="./section3/RP1.mp4" type="video/mp4">
-              </video>
+            <figure class="section3-schema" aria-label="UFO general robot interface diagram">
+              <svg viewBox="0 0 980 560" role="img" aria-label="UFO General Robot Interface">
+                <defs>
+                  <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#16a34a"></path>
+                  </marker>
+                </defs>
+
+                <text x="490" y="36" text-anchor="middle" font-size="26" font-weight="700" fill="#166534">UFO General Robot Interface</text>
+
+                <rect x="36" y="64" width="180" height="58" rx="10" fill="#f0fdf4" stroke="#86efac" stroke-width="2"></rect>
+                <rect x="256" y="64" width="180" height="58" rx="10" fill="#f0fdf4" stroke="#86efac" stroke-width="2"></rect>
+                <rect x="476" y="64" width="180" height="58" rx="10" fill="#f0fdf4" stroke="#86efac" stroke-width="2"></rect>
+                <rect x="696" y="64" width="180" height="58" rx="10" fill="#f0fdf4" stroke="#86efac" stroke-width="2"></rect>
+                <text x="126" y="99" text-anchor="middle" font-size="19" font-weight="600" fill="#14532d">Unitree G1</text>
+                <text x="346" y="99" text-anchor="middle" font-size="19" font-weight="600" fill="#14532d">Unitree H1</text>
+                <text x="566" y="99" text-anchor="middle" font-size="19" font-weight="600" fill="#14532d">RoboParty RP1</text>
+                <text x="786" y="99" text-anchor="middle" font-size="19" font-weight="600" fill="#14532d">RoboParty RP0 ...</text>
+
+                <line x1="126" y1="124" x2="126" y2="170" stroke="#16a34a" stroke-width="2.6"></line>
+                <line x1="346" y1="124" x2="346" y2="170" stroke="#16a34a" stroke-width="2.6"></line>
+                <line x1="566" y1="124" x2="566" y2="170" stroke="#16a34a" stroke-width="2.6"></line>
+                <line x1="786" y1="124" x2="786" y2="170" stroke="#16a34a" stroke-width="2.6"></line>
+                <line x1="126" y1="170" x2="346" y2="170" stroke="#16a34a" stroke-width="2.6"></line>
+                <line x1="346" y1="170" x2="566" y2="170" stroke="#16a34a" stroke-width="2.6"></line>
+                <line x1="566" y1="170" x2="786" y2="170" stroke="#16a34a" stroke-width="2.6"></line>
+
+                <line x1="250" y1="170" x2="250" y2="230" stroke="#16a34a" stroke-width="2.6" marker-end="url(#arrow-green)"></line>
+                <line x1="662" y1="170" x2="662" y2="230" stroke="#16a34a" stroke-width="2.6" marker-end="url(#arrow-green)"></line>
+                <a href="https://github.com/Roboparty/UFO/blob/main/humanoidverse/tools/robot_inspect.py" target="_blank" rel="noopener noreferrer">
+                  <text x="268" y="216" text-anchor="start" font-size="21" font-weight="800" fill="#dc2626" text-decoration="underline">Auto Convert</text>
+                </a>
+                <a href="https://github.com/Roboparty/human-humanoid-tools" target="_blank" rel="noopener noreferrer">
+                  <text x="706" y="216" text-anchor="start" font-size="21" font-weight="800" fill="#dc2626" text-decoration="underline">hhtools</text>
+                </a>
+
+                <rect x="86" y="234" width="328" height="78" rx="12" fill="#ecfeff" stroke="#67e8f9" stroke-width="2"></rect>
+                <rect x="498" y="234" width="328" height="78" rx="12" fill="#eff6ff" stroke="#93c5fd" stroke-width="2"></rect>
+                <text x="250" y="268" text-anchor="middle" font-size="21" font-weight="700" fill="#155e75">RobotTrainingSpec</text>
+                <text x="250" y="293" text-anchor="middle" font-size="16" fill="#0f766e">(Robot Config YAML)</text>
+                <text x="662" y="268" text-anchor="middle" font-size="21" font-weight="700" fill="#1e3a8a">Motion Dataset</text>
+                <text x="662" y="293" text-anchor="middle" font-size="16" fill="#1d4ed8">(Retargeted Motion)</text>
+
+                <line x1="250" y1="312" x2="250" y2="350" stroke="#16a34a" stroke-width="2.6"></line>
+                <line x1="662" y1="312" x2="662" y2="350" stroke="#16a34a" stroke-width="2.6"></line>
+                <line x1="250" y1="350" x2="662" y2="350" stroke="#16a34a" stroke-width="2.6"></line>
+                <line x1="456" y1="350" x2="456" y2="476" stroke="#16a34a" stroke-width="2.6" marker-end="url(#arrow-green)"></line>
+
+                <text x="456" y="533" text-anchor="middle" font-size="20" font-weight="700" fill="#14532d">Shared Training / Inference Pipeline</text>
+              </svg>
             </figure>
+
+            <p class="section3-gallery-title" id="section3-gallery-title">Robot Demo Gallery</p>
+            <p class="section3-gallery-note" id="section3-gallery-note">Each robot trains in 2-3 hours.</p>
+            <div class="section1-gallery gallery-h3" aria-label="Section 3 robot demo gallery">
+              <figure class="section1-gallery-item">
+                <video controls muted loop playsinline preload="metadata">
+                  <source src="./section3/RP1.mp4" type="video/mp4">
+                </video>
+                <figcaption class="section1-gallery-caption">Roboparty RP1</figcaption>
+              </figure>
+              <figure class="section1-gallery-item">
+                <video controls muted loop playsinline preload="metadata">
+                  <source src="./section3/RPO.mp4" type="video/mp4">
+                </video>
+                <figcaption class="section1-gallery-caption">Roboparty RPO</figcaption>
+              </figure>
+            </div>
             <p class="section3-keypoint" id="section3-li-2">Stable Skill Injection</p>
             <p class="section3-intro" id="section3-intro">
               UFO supports behavioral extensibility: new skills can be injected without collapsing the broad behavior distribution learned from the foundation dataset. This stability is key for rare agile motions, and below we show a cartwheel case enabled by fixed-ratio inter-dataset sampling.
@@ -2083,6 +2181,8 @@
             section3Li1: "Diverse Robot Platforms",
             section3Li2: "Stable Skill Injection",
             section3Intro: "UFO supports behavioral extensibility: new skills can be injected without collapsing the broad behavior distribution learned from the foundation dataset. This stability is key for rare agile motions, and below we show a cartwheel case enabled by fixed-ratio inter-dataset sampling.",
+            section3GalleryTitle: "Robot Demo Gallery",
+            section3GalleryNote: "Each robot trains in 2-3 hours.",
             detailH4Title: "Highlight 4: Real-world Robust Teleoperation",
             footerText: "UFO project page skeleton. Send the four highlight images and I will wire them in directly.",
             pageviewLabel: "Total visitors:",
@@ -2129,6 +2229,8 @@
             section3Li1: "多样机器人平台",
             section3Li2: "稳定技能注入",
             section3Intro: "UFO 支持行为可扩展性：在不破坏基础数据集广泛行为分布的前提下，可持续注入新技能。对侧空翻这类稀有高动态动作，这种稳定性尤为关键，下面视频展示了基于固定比例跨数据集采样获得的侧空翻效果。",
+            section3GalleryTitle: "机器人 Demo 画廊",
+            section3GalleryNote: "每个机器人训练约 2-3 小时。",
             detailH4Title: "亮点 4：鲁棒真实世界遥操作",
             footerText: "UFO 项目页面框架。发送四个亮点图片后可进一步直连替换。",
             pageviewLabel: "总访客数：",
@@ -2190,6 +2292,8 @@
           setText("section3-li-1", t.section3Li1);
           setText("section3-li-2", t.section3Li2);
           setText("section3-intro", t.section3Intro);
+          setText("section3-gallery-title", t.section3GalleryTitle);
+          setText("section3-gallery-note", t.section3GalleryNote);
           setText("detail-h4-title", t.detailH4Title);
           setText("footer-text", t.footerText);
           setText("pageview-label", t.pageviewLabel);
