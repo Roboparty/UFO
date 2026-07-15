@@ -21,6 +21,13 @@ Supported deployment flows:
 
 This README is written for a new user cloning the repository from GitHub.
 
+## Not Supported By This Branch
+
+This branch does not train policies.
+This branch does not retarget arbitrary robot morphologies.
+This branch does not include model artifacts in git.
+Only the released Unitree G1 29DoF policy artifact layout documented below is release-supported.
+
 ## What You Need
 
 Workstation:
@@ -48,7 +55,7 @@ Robot:
 ## Clone And Install
 
 ```bash
-git clone --branch deploy --single-branch https://github.com/Xuewang01/UFO.git UFO-Deploy
+git clone --branch deploy --single-branch https://github.com/Roboparty/UFO.git UFO-Deploy
 cd UFO-Deploy
 export UFO_ROOT=$PWD
 
@@ -78,18 +85,22 @@ Released artifact:
 ```text
 HF repo: xuewang/ufo-g1-policy
 HF revision: fc5efb7b3bb7a82270abaeabb0cf3c1194f1c7e6
+Runtime repo: Roboparty/UFO
+Runtime branch: deploy
 Runtime commit: 5669f2c9d6fb5e3cfdc75a27ef8d3f7b616b7cb6
 ```
 
-The policy directory expected by the commands is:
+The policy directory expected by the runtime is:
 
 ```text
 model/g1_policy/
-  exported/FBcprAuxModel.onnx
-  exported/backward_encoder.onnx
+  exported/
+    FBcprAuxModel.onnx
+    backward_encoder.onnx
   tracking_inference_mjlab/*.pkl
   reward_inference_mjlab/*.pkl
   goal_inference_mjlab/*.pkl
+  release_manifest.yaml
 ```
 
 `model/` is ignored by git because the ONNX model is larger than GitHub's normal file limit. After cloning, put the released model artifact at `model/g1_policy`.
@@ -99,13 +110,17 @@ root by default. The released artifact layout must match the tree above.
 Download the runtime artifact:
 
 ```bash
+export HF_REPO_ID=xuewang/ufo-g1-policy
+export HF_REVISION=fc5efb7b3bb7a82270abaeabb0cf3c1194f1c7e6
+
 python - <<'PY'
+import os
 from huggingface_hub import snapshot_download
 
 snapshot_download(
-    repo_id="xuewang/ufo-g1-policy",
+    repo_id=os.environ["HF_REPO_ID"],
     repo_type="model",
-    revision="fc5efb7b3bb7a82270abaeabb0cf3c1194f1c7e6",
+    revision=os.environ["HF_REVISION"],
     local_dir="model",
     allow_patterns=[
         "g1_policy/exported/**",
@@ -140,6 +155,42 @@ test -f model/g1_policy/exported/FBcprAuxModel.onnx
 test -f model/g1_policy/exported/backward_encoder.onnx
 test -f model/g1_policy/tracking_inference_mjlab/zs_7.pkl
 test -f model/g1_policy/release_manifest.yaml
+```
+
+Verify the required artifact hashes against `release_manifest.yaml`:
+
+```bash
+python - <<'PY'
+import hashlib
+from pathlib import Path
+import yaml
+
+root = Path("model/g1_policy")
+manifest = yaml.safe_load((root / "release_manifest.yaml").read_text())
+
+files = {
+    "policy_onnx": root / "exported" / "FBcprAuxModel.onnx",
+    "backward_encoder_onnx": root / "exported" / "backward_encoder.onnx",
+    "tracking_context": root / "tracking_inference_mjlab" / "zs_7.pkl",
+}
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+for key, path in files.items():
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    expected = manifest["sha256"][key]
+    got = sha256(path)
+    if got != expected:
+        raise RuntimeError(f"{key} sha256 mismatch: got {got}, expected {expected}")
+
+print("model artifact sha256 ok")
+PY
 ```
 
 ## Repository Map
@@ -361,6 +412,44 @@ Y    next reward/goal z for reward/goal tasks
 
 Use the physical e-stop for emergencies.
 
+## Real Robot Safety Checklist
+
+Before enabling policy action on the real robot:
+
+- [ ] Physical e-stop is reachable and tested.
+- [ ] Robot is on hoist/support for first run.
+- [ ] `cat /sys/devices/system/cpu/online` reports `0-7`.
+- [ ] ONNX sessions load on the robot.
+- [ ] `config/robot/g1_real.yaml` uses the correct network interface from `ip -br addr`.
+- [ ] Ordinary sim2sim passes.
+- [ ] Teleop sim2sim passes.
+- [ ] Wireless R2 stop latch is tested.
+- [ ] Realtime z watchdog is tested by disconnecting PICO/GMR/ZMQ.
+- [ ] `UFO_REAL_ROBOT_OK=1` is set only immediately before real robot control.
+
+## Ports And Network Topology
+
+| Port | Direction | Used by | Notes |
+| --- | --- | --- | --- |
+| 28701 | realtime z server -> teleop bridge | pose request | Localhost in onboard flow; workstation-local in split flow |
+| 28702 | teleop bridge -> realtime z server | pose reply | Localhost in onboard flow; workstation-local in split flow |
+| 28703 | teleop bridge -> realtime z server | Pico button/control channel | Used by realtime z server |
+| 28704 | teleop bridge -> policy | optional Pico button PUB | Used by onboard policy launcher when enabled |
+| 28711 | realtime z server -> policy | realtime latent z PUB | `127.0.0.1` for onboard flow; workstation IP for split flow |
+| 8080 | browser -> retarget viewer | optional web viewer | Debug only |
+
+In the onboard flow, `ctx_zmq_addr` should be:
+
+```text
+tcp://127.0.0.1:28711
+```
+
+In the split workstation/robot flow, the robot-side `ctx_zmq_addr` should be:
+
+```text
+tcp://<WORKSTATION_IP>:28711
+```
+
 ## 5. Teleop Sim2Real
 
 The recommended release path is 5A direct PICO-to-robot onboard teleop. PICO connects to the robot IP, and the robot runs the retarget server, realtime `z` server, and policy locally. Because the realtime `z` server and policy are both onboard, `config/exp/tracking/teleop.yaml` can keep `ctx_zmq_addr: tcp://127.0.0.1:28711`.
@@ -505,7 +594,7 @@ X stops motion, R2 stops policy action.
 If the robot does not react to teleop:
 
 - the workstation realtime server should print `pose ok`
-- `ctx_zmq_addr` must use the workstation IP, not `127.0.0.1`
+- for 5B split flow, `ctx_zmq_addr` must use the workstation IP, not `127.0.0.1`
 - robot and workstation must be on the same reachable network
 - TCP port `28711` must not be blocked
 
@@ -516,7 +605,7 @@ Run locally before pushing changes from an environment with the repository depen
 ```bash
 conda activate ufo-deploy
 # Or, on the robot:
-# source /home/unitree/bfm0real_venv/bin/activate
+# source /home/unitree/ufo_deploy_venv/bin/activate
 
 python -m py_compile \
   rl_policy/ufo_policy.py \
