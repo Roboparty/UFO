@@ -72,11 +72,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ -n "${HF_BIN:-}" ]]; then
+  :
+elif [[ -x ".venv/bin/hf" ]]; then
+  HF_BIN=".venv/bin/hf"
+elif command -v hf >/dev/null 2>&1; then
+  HF_BIN="$(command -v hf)"
+else
+  HF_BIN=""
+fi
+
+if [[ -n "${PYTHON:-}" ]]; then
+  PYTHON_BIN="${PYTHON}"
+elif [[ -x ".venv/bin/python" ]]; then
+  PYTHON_BIN=".venv/bin/python"
+else
+  PYTHON_BIN="python3"
+fi
+
 download_one() {
   local dataset_file="$1"
 
-  if command -v hf >/dev/null 2>&1; then
-    hf download "${DATASET_REPO}" \
+  if [[ -n "${HF_BIN}" ]]; then
+    "${HF_BIN}" download "${DATASET_REPO}" \
       "${dataset_file}" \
       --repo-type dataset \
       --revision "${DATASET_REVISION}" \
@@ -84,11 +102,11 @@ download_one() {
     return
   fi
 
-  if python3 - <<'PYTEST' >/dev/null 2>&1
+  if "${PYTHON_BIN}" - <<'PYTEST' >/dev/null 2>&1
 import huggingface_hub
 PYTEST
   then
-    python3 - "${DATASET_REPO}" "${dataset_file}" "${DATASET_REVISION}" "${tmpdir}" <<'PYDL'
+    "${PYTHON_BIN}" - "${DATASET_REPO}" "${dataset_file}" "${DATASET_REVISION}" "${tmpdir}" <<'PYDL'
 import sys
 from huggingface_hub import hf_hub_download
 

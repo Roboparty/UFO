@@ -228,7 +228,7 @@ def build_ufo_mjlab_config(
         use_trajectory_buffer=train_runtime["use_trajectory_buffer"],
         buffer_size=int(buffer_size),
         use_wandb=use_wandb,
-        wandb_ename=os.environ.get("WANDB_ENTITY", "xuewangusst-1"),
+        wandb_ename=os.environ.get("WANDB_ENTITY"),
         wandb_gname=wandb_group,
         wandb_pname=wandb_project,
         wandb_run_name=wandb_run_name or f"ufo_{agent}",

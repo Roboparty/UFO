@@ -20,7 +20,7 @@
 
 ## UFO 是什么？
 
-UFO 是一个开源的无监督强化学习人形机器人控制框架。`main` 分支主要用于 MJLab 训练、RobotState 数据导入、tracking/goal/reward inference，以及 ONNX 导出。`deploy` 分支用于 Unitree G1 实机部署和遥操作运行时。
+UFO 是一个面向人形机器人控制、源代码可用的科研框架。`main` 分支主要用于 MJLab 训练、RobotState 数据导入、tracking/goal/reward inference，以及 ONNX 导出。`deploy` 分支用于 Unitree G1 实机部署和遥操作运行时。
 
 当前最完整、测试最充分的路线是 Unitree G1。新机器人适配已经有实验性接口，但需要用户准备目标机器人的 MuJoCo XML、可选 URDF，以及已经 retarget 到该机器人的 RobotState motion data。UFO 不会自动把人类动作或其他机器人的动作 retarget 到新机器人；不同机器人之间也不能直接复用同一个 checkpoint。
 
@@ -71,11 +71,14 @@ export PATH="$HOME/.local/bin:$PATH"
 uv sync
 ```
 
-如需使用 W&B：
+### 可选：W&B logging
+
+W&B logging 是可选功能。如需启用，请先登录，按需设置自己的 entity，然后在训练命令中加入 `--use-wandb --wandb-run-name ...`：
 
 ```bash
 uv run wandb login
-# 或者: export WANDB_API_KEY=your_wandb_api_key
+export WANDB_ENTITY=your_entity   # optional
+# 然后加入 --use-wandb --wandb-run-name ufo_fb_g1
 ```
 
 ### 2. 下载 G1 LaFAN 数据
@@ -110,9 +113,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --work-dir runs/ufo_fb_g1 \
   --data-path humanoidverse/data/lafan_29dof_10s-clipped.pkl \
   --update-z-every-step 100 \
-  --buffer-size 5120000 \
-  --use-wandb \
-  --wandb-run-name ufo_fb_g1
+  --buffer-size 5120000
 ```
 
 ### 5. TeCH 训练
@@ -127,9 +128,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --work-dir runs/ufo_tech_g1 \
   --data-path humanoidverse/data/lafan_29dof_10s-clipped.pkl \
   --update-z-every-step 10 \
-  --buffer-size 5120000 \
-  --use-wandb \
-  --wandb-run-name ufo_tech_g1
+  --buffer-size 5120000
 ```
 
 TeCH 在早期 UFO 版本中曾经叫 TLDR。`--agent tldr` 仍然保留为 `--agent tech` 的兼容 alias，但已经不推荐继续使用。
@@ -250,4 +249,4 @@ UFO 支持基于 manifest 的多数据源混合。每个数据源之间的采样
 
 在 LaTeX 中，将上述条目加入 `.bib` 文件后，使用 `\cite{ufo2026}` 即可。
 
-License: see [LICENSE](LICENSE).
+UFO 当前基于 CC BY-NC 4.0 发布，主要面向非商业科研使用，具体以 [LICENSE](LICENSE) 文件为准。
