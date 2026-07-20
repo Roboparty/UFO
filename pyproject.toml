@@ -13,6 +13,7 @@ dependencies = [
     "easydict>=1.13",
     "gymnasium>=0.29.0",
     "h5py>=3.14.0",
+    "huggingface-hub>=0.24.0",
     "hydra-core>=1.2.0",
     "joblib>=1.4.2",
     "loguru>=0.7.3",

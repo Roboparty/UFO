@@ -8,8 +8,12 @@ export CUDA_VISIBLE_DEVICES
 
 echo "[smoke_release] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 
+uv run python tests/test_reference_observations.py
 uv run python tests/test_motion_data_adapter.py
 uv run python tests/test_import_tools.py
+uv run python tests/test_robot_config_training.py
+uv run python tests/test_robot_config_goal_reward_inference.py
+uv run python tests/test_robot_config_onnx_export.py
 uv run python -m compileall -q humanoidverse tests
 git diff --check
 

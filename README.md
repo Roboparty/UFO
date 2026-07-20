@@ -24,7 +24,7 @@
 
 ## Overview
 
-UFO is an open-source unsupervised reinforcement learning framework for humanoid control. The `main` branch focuses on MJLab training, robot-aware motion-data import, tracking/goal/reward inference, and ONNX export. The most complete and best-tested path is currently Unitree G1.
+UFO is a source-available research framework for humanoid control. The `main` branch focuses on MJLab training, robot-aware motion-data import, tracking/goal/reward inference, and ONNX export. The most complete and best-tested path is currently Unitree G1.
 
 UFO is designed to separate the learning pipeline from robot-specific configuration where practical, but new robot bring-up is still experimental. A new robot requires a MuJoCo XML, optionally a matching URDF, and motion data that has already been adapted or retargeted to that robot in RobotState format. UFO does not automatically retarget human motion or another robot's motion to a new robot, and one checkpoint cannot be directly reused across robots with different bodies, actions, or observation dimensions.
 
@@ -75,11 +75,14 @@ Install the environment:
 uv sync
 ```
 
-For W&B logging, authenticate before starting a multi-process run:
+### Optional: W&B logging
+
+W&B logging is optional. To enable it, authenticate first, optionally set your own entity, then add `--use-wandb --wandb-run-name ...` to a training command:
 
 ```bash
 uv run wandb login
-# Or: export WANDB_API_KEY=your_wandb_api_key
+export WANDB_ENTITY=your_entity   # optional
+# then add --use-wandb --wandb-run-name ufo_fb_g1
 ```
 
 ## Path A: Unitree G1 Quick Start
@@ -122,9 +125,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --work-dir runs/ufo_fb_g1 \
   --data-path humanoidverse/data/lafan_29dof_10s-clipped.pkl \
   --update-z-every-step 100 \
-  --buffer-size 5120000 \
-  --use-wandb \
-  --wandb-run-name ufo_fb_g1
+  --buffer-size 5120000
 ```
 
 ### 4. TeCH training on G1
@@ -139,9 +140,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --work-dir runs/ufo_tech_g1 \
   --data-path humanoidverse/data/lafan_29dof_10s-clipped.pkl \
   --update-z-every-step 10 \
-  --buffer-size 5120000 \
-  --use-wandb \
-  --wandb-run-name ufo_tech_g1
+  --buffer-size 5120000
 ```
 
 TeCH was previously exposed as TLDR in early UFO versions. `--agent tldr` is kept as a deprecated compatibility alias for `--agent tech`.
@@ -261,4 +260,4 @@ If you find UFO useful in your research, please cite:
 }
 ```
 
-License: see [LICENSE](LICENSE).
+UFO is released under CC BY-NC 4.0 for non-commercial research use. See [LICENSE](LICENSE) for details.
