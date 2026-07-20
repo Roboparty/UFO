@@ -84,11 +84,15 @@ Released artifact:
 
 ```text
 HF repo: xuewang/ufo-g1-policy
-HF revision: fc5efb7b3bb7a82270abaeabb0cf3c1194f1c7e6
 Runtime repo: Roboparty/UFO
 Runtime branch: deploy
-Runtime commit: 5669f2c9d6fb5e3cfdc75a27ef8d3f7b616b7cb6
+Runtime policy: latest deploy HEAD
 ```
+
+The `deploy` branch tracks the latest supported G1 runtime. The default README workflow
+uses the current `deploy` HEAD and the current model artifact from the HF repo. Older
+model/runtime pairs should be accessed through explicit Git tags and Hugging Face
+revisions, not through the README main flow.
 
 The policy directory expected by the runtime is:
 
@@ -111,7 +115,8 @@ Download the runtime artifact:
 
 ```bash
 export HF_REPO_ID=xuewang/ufo-g1-policy
-export HF_REVISION=fc5efb7b3bb7a82270abaeabb0cf3c1194f1c7e6
+# Optional: pin a specific artifact revision if needed.
+# export HF_REVISION=<specific_revision>
 
 python - <<'PY'
 import os
@@ -120,7 +125,7 @@ from huggingface_hub import snapshot_download
 snapshot_download(
     repo_id=os.environ["HF_REPO_ID"],
     repo_type="model",
-    revision=os.environ["HF_REVISION"],
+    revision=os.environ.get("HF_REVISION"),
     local_dir="model",
     allow_patterns=[
         "g1_policy/exported/**",
@@ -143,10 +148,12 @@ Additional `tracking_inference_mjlab/zs_*.pkl` files are included for offline co
 and manual selection.
 
 > **Safety Alert**
-> Keep the HF artifact revision paired with the runtime commit listed above. The MP4
-> files are rollout previews for inspection only and are not evidence of real-robot
-> safety. Before real robot use, complete sim2sim, hoist/support checks, realtime `z`
-> watchdog and R2 stop-latch checks, and use a physical e-stop.
+> The ONNX policy, backward encoder, context files, and deploy runtime should be
+> validated as one release unit. Do not mix an arbitrary old artifact with the latest
+> deploy runtime unless it is explicitly marked compatible. The MP4 files are rollout
+> previews for inspection only and are not evidence of real-robot safety. Before real
+> robot use, complete sim2sim, hoist/support checks, realtime `z` watchdog and R2
+> stop-latch checks, and use a physical e-stop.
 
 Verify:
 
