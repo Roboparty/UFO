@@ -258,10 +258,12 @@ python setup.py install
 ```
 
 For Jetson/headless installs, use the arm64 native library from the XRoboToolkit service
-release. If the library is placed outside the Python package, export its path, for example:
+release. Prefer keeping it under the UFO checkout, for example:
 
 ```bash
-export LD_LIBRARY_PATH=/home/unitree/sim2real/external/XRoboToolkit-PC-Service-Pybind/lib/aarch64:$LD_LIBRARY_PATH
+mkdir -p /home/unitree/UFO-Deploy/external/XRoboToolkit-PC-Service-Pybind/lib/aarch64
+# copy libPXREARobotSDK.so into that directory
+export LD_LIBRARY_PATH=/home/unitree/UFO-Deploy/external/XRoboToolkit-PC-Service-Pybind/lib/aarch64:$LD_LIBRARY_PATH
 ```
 
 Remember that this step installs the Python binding only. The XRoboToolkit service must be
@@ -396,7 +398,6 @@ Useful onboard environment variables:
 ```bash
 export UFO_ROOT=/home/unitree/UFO-Deploy
 export TELEOP_PY=/home/unitree/ufo_teleop_venv/bin/python
-export SIM2REAL_ROOT=/home/unitree/sim2real
 export WEB_VISUALIZE=1
 export WEB_PORT=8080
 ```
@@ -404,6 +405,21 @@ export WEB_PORT=8080
 The onboard launcher automatically derives `UFO_ROOT` from its own path if `UFO_ROOT` is
 not set. It checks the Python executable, GMR, `xrobotoolkit_sdk`, XRoboToolkit service,
 and required local ZMQ ports before starting `xrobot_teleop_to_pose_zmq_server.py`.
+It searches UFO-specific environments first:
+
+```text
+${UFO_ROOT}/.venv/bin/python
+${UFO_ROOT}/venv/bin/python
+/home/unitree/ufo_teleop_venv/bin/python
+/home/unitree/ufo_deploy_venv/bin/python
+/home/unitree/miniconda3/envs/ufo-teleop/bin/python
+/home/unitree/miniconda3/envs/ufo-deploy/bin/python
+```
+
+If none of those exists, set `TELEOP_PY` explicitly. The launcher refuses to fall back to
+system `python3` by default because the Jetson system Python usually does not contain GMR,
+`xrobotoolkit_sdk`, `torch`, and `numpy`. Set `TELEOP_ALLOW_SYSTEM_PY=1` only for manual
+debugging.
 
 During the first few seconds after starting the bridge, stand in a stable neutral posture.
 The bridge uses startup foot height to align the z-axis offset; starting from a crouched or

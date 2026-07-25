@@ -14,8 +14,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_UFO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
 UFO_ROOT="${UFO_ROOT:-${DEFAULT_UFO_ROOT}}"
-SIM2REAL_ROOT="${SIM2REAL_ROOT:-/home/unitree/sim2real}"
 TELEOP_PY="${TELEOP_PY:-}"
+TELEOP_ALLOW_SYSTEM_PY="${TELEOP_ALLOW_SYSTEM_PY:-0}"
 START_XROBOT_SERVICE="${START_XROBOT_SERVICE:-1}"
 WEB_VISUALIZE="${WEB_VISUALIZE:-1}"
 WEB_PORT="${WEB_PORT:-8080}"
@@ -28,9 +28,12 @@ CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-tcp://*:28704}"
 
 if [[ -z "${TELEOP_PY}" ]]; then
   for candidate in \
-    "${SIM2REAL_ROOT}/venv/teleop/.venv/bin/python" \
+    "${UFO_ROOT}/.venv/bin/python" \
+    "${UFO_ROOT}/venv/bin/python" \
     "/home/unitree/ufo_teleop_venv/bin/python" \
-    "${UFO_ROOT}/.venv/bin/python"; do
+    "/home/unitree/ufo_deploy_venv/bin/python" \
+    "/home/unitree/miniconda3/envs/ufo-teleop/bin/python" \
+    "/home/unitree/miniconda3/envs/ufo-deploy/bin/python"; do
     if [[ -x "${candidate}" ]]; then
       TELEOP_PY="${candidate}"
       break
@@ -39,13 +42,17 @@ if [[ -z "${TELEOP_PY}" ]]; then
 fi
 
 if [[ -z "${TELEOP_PY}" ]]; then
-  if command -v python3 >/dev/null 2>&1; then
-    TELEOP_PY="python3"
-  elif command -v python >/dev/null 2>&1; then
-    TELEOP_PY="python"
-  else
-    fail "no Python executable found; set TELEOP_PY=/path/to/python"
+  if [[ "${TELEOP_ALLOW_SYSTEM_PY}" == "1" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      TELEOP_PY="python3"
+    elif command -v python >/dev/null 2>&1; then
+      TELEOP_PY="python"
+    fi
   fi
+fi
+
+if [[ -z "${TELEOP_PY}" ]]; then
+  fail "no UFO teleop Python environment found. Create /home/unitree/ufo_teleop_venv, ${UFO_ROOT}/.venv, or set TELEOP_PY=/path/to/python. Refusing system python by default; set TELEOP_ALLOW_SYSTEM_PY=1 only for debugging."
 fi
 
 if [[ ! -x "${TELEOP_PY}" ]] && ! command -v "${TELEOP_PY}" >/dev/null 2>&1; then
@@ -54,8 +61,6 @@ fi
 
 ld_parts=()
 for candidate in \
-  "${SIM2REAL_ROOT}/external/XRoboToolkit-PC-Service-Pybind/lib/aarch64" \
-  "${SIM2REAL_ROOT}/external/XRoboToolkit-PC-Service-Pybind/lib" \
   "${UFO_ROOT}/external/XRoboToolkit-PC-Service-Pybind/lib/aarch64" \
   "${UFO_ROOT}/external/XRoboToolkit-PC-Service-Pybind/lib"; do
   [[ -d "${candidate}" ]] && ld_parts+=("${candidate}")
