@@ -3,8 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-actual_human_height="${ACTUAL_HUMAN_HEIGHT:-1.6}"
-lookback_ms="${LOOKBACK_MS:-25}"
+actual_human_height="${ACTUAL_HUMAN_HEIGHT:-1.75}"
+lookback_ms="${LOOKBACK_MS:-50}"
 log_interval_s="${LOG_INTERVAL_S:-1}"
 
 cmd=(
@@ -18,11 +18,11 @@ cmd=(
     --req_bind_addr tcp://*:28701
     --rep_bind_addr tcp://*:28702
     --ctrl_bind_addr tcp://*:28703
-    --min_link_height 0.0
-    --min_link_height_align_strategy startup_fixed
-    --min_link_height_bootstrap_frames 10
-    --visualize
     --vis_fps 5
 )
+
+if [[ "${WEB_VISUALIZE:-0}" == "1" ]]; then
+    cmd+=(--web-visualize --web-port "${WEB_PORT:-8080}")
+fi
 
 "${cmd[@]}" "$@"

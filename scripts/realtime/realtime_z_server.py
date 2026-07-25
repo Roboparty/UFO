@@ -3,7 +3,7 @@
 Realtime z server (deploy-only stack).
 
 Pipeline:
-    PICO/GMR teleop pose (JSON over ZMQ)
+    PICO/XRobot canonical teleop pose (JSON over ZMQ)
         -> MuJoCo forward kinematics (numpy)
         -> obs construction (state, privileged_state)
         -> backward_encoder.onnx

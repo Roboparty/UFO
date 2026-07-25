@@ -19,6 +19,7 @@ TASK_CONFIG="${TASK_CONFIG:-${UFO_ROOT}/config/exp/tracking/teleop.yaml}"
 ROBOT_CONFIG="${ROBOT_CONFIG:-${UFO_ROOT}/config/robot/g1_real.yaml}"
 MODEL_PATH="${MODEL_PATH:-${MODEL_DIR}/exported/FBcprAuxModel.onnx}"
 PICO_CONTROL_ADDR="${PICO_CONTROL_ADDR:-tcp://127.0.0.1:28704}"
+ENABLE_PICO_POLICY_CONTROL="${ENABLE_PICO_POLICY_CONTROL:-0}"
 
 cd "${UFO_ROOT}"
 
@@ -53,14 +54,25 @@ echo "[run_g1_teleop_policy_onboard] python: $(command -v python)"
 echo "[run_g1_teleop_policy_onboard] model: ${MODEL_PATH}"
 echo "[run_g1_teleop_policy_onboard] policy: ${POLICY_CONFIG}"
 echo "[run_g1_teleop_policy_onboard] task: ${TASK_CONFIG}"
-echo "[run_g1_teleop_policy_onboard] pico_control_addr: ${PICO_CONTROL_ADDR}"
-echo "[run_g1_teleop_policy_onboard] Pico controls: A=init, A+B=enable/start, B=stop, X=reset"
+pico_policy_control_state="disabled"
+if [[ "${ENABLE_PICO_POLICY_CONTROL}" == "1" ]]; then
+  pico_policy_control_state="enabled legacy/debug compatibility mode"
+fi
+echo "[run_g1_teleop_policy_onboard] pico_policy_control: ${pico_policy_control_state}"
+if [[ "${ENABLE_PICO_POLICY_CONTROL}" == "1" ]]; then
+  echo "[run_g1_teleop_policy_onboard] WARNING: legacy/debug compatibility mode; PICO policy buttons can control policy state via ${PICO_CONTROL_ADDR}"
+fi
 
-exec python rl_policy/ufo_policy.py \
-  --robot_config "${ROBOT_CONFIG}" \
-  --policy_config "${POLICY_CONFIG}" \
-  --model_path "${MODEL_PATH}" \
-  --task "${TASK_CONFIG}" \
-  --pico-control \
-  --pico-control-addr "${PICO_CONTROL_ADDR}" \
-  "$@"
+cmd=(
+  python rl_policy/ufo_policy.py
+  --robot_config "${ROBOT_CONFIG}"
+  --policy_config "${POLICY_CONFIG}"
+  --model_path "${MODEL_PATH}"
+  --task "${TASK_CONFIG}"
+)
+
+if [[ "${ENABLE_PICO_POLICY_CONTROL}" == "1" ]]; then
+  cmd+=(--pico-control --pico-control-addr "${PICO_CONTROL_ADDR}")
+fi
+
+exec "${cmd[@]}" "$@"

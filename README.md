@@ -14,7 +14,7 @@ documented and tested in this branch.
 Supported deployment flows:
 
 - local MuJoCo sim2sim
-- local PICO/GMR teleop sim2sim
+- local PICO/XRobot canonical retarget teleop sim2sim
 - onboard G1 sim2real
 - teleop sim2real, where the workstation retargets PICO motion, encodes realtime latent `z`, and the robot subscribes over ZMQ
 - onboard PICO teleop sim2real, where PICO connects directly to the robot
@@ -39,8 +39,9 @@ Workstation:
 
 Teleop workstation:
 
-- `general_motion_retargeting`
 - patched `xrobotoolkit_sdk` with callback APIs or polling APIs
+- vendored `motion_tracking_retarget` code and G1 assets included in this repo
+- `mink`, `mujoco`, `numpy`, `scipy`, `pyyaml`, and `pyzmq`
 - PICO/XRobot runtime set up outside this repo
 - optional `viser` and `mjviser` for the browser retarget viewer
 
@@ -52,7 +53,7 @@ Robot:
 - CycloneDDS runtime
 - low-level network interface configured in `config/robot/g1_real.yaml`
 - XRoboToolkit headless service for onboard PICO teleop
-- GMR and `xrobotoolkit_sdk` in the onboard teleop Python environment
+- `xrobotoolkit_sdk` and canonical retarget dependencies in the onboard teleop Python environment
 - PICO headset with trackers/controllers for onboard teleop
 
 ## Clone And Install
@@ -80,8 +81,9 @@ python -c "import mujoco, onnxruntime, zmq, yaml, numpy; print('base deps ok')"
 ```
 
 Use this `ufo-deploy` environment for MuJoCo, realtime `z`, and policy inference. Use a
-separate `ufo-teleop` environment for the PICO/GMR bridge; for that environment, PICO/XRobot
-setup, and online GMR retargeting checks, follow [scripts/teleop/README.md](scripts/teleop/README.md).
+separate `ufo-teleop` environment for the PICO/XRobot retarget bridge; for that environment,
+PICO/XRobot setup, and canonical retarget checks, follow
+[scripts/teleop/README.md](scripts/teleop/README.md).
 
 ## Model Files
 
@@ -236,8 +238,8 @@ Run in this order when bringing up a new machine, model, or teleop setup:
 2. local teleop sim2sim
 3. onboard ordinary sim2real with hoist/support
 4. onboard PICO teleop sim2real, first observe realtime z and robot state without enabling policy
-5. A initializes stable standing -> A+B enables/starts policy -> test B/R2 stop
-6. deliberately disconnect PICO/GMR/ZMQ and confirm the watchdog stops policy action
+5. G1 A initializes stable standing -> G1 R1 enables policy action -> G1 B starts tracking -> test X/R2 stop
+6. deliberately disconnect PICO/XRobot/ZMQ and confirm the watchdog stops policy action
 ```
 
 ## 1. Ordinary Sim2Sim
@@ -289,7 +291,7 @@ python -m sim_env.base_sim \
   --scene_config ./config/scene/g1_29dof.yaml
 ```
 
-Terminal B, PICO/GMR retargeting server:
+Terminal B, PICO/XRobot canonical retarget server:
 
 ```bash
 cd "$UFO_ROOT"
@@ -437,7 +439,7 @@ Before enabling policy action on the real robot:
 - [ ] Ordinary sim2sim passes.
 - [ ] Teleop sim2sim passes.
 - [ ] Wireless R2 stop latch is tested.
-- [ ] Realtime z watchdog is tested by disconnecting PICO/GMR/ZMQ.
+- [ ] Realtime z watchdog is tested by disconnecting PICO/XRobot/ZMQ.
 - [ ] `UFO_REAL_ROBOT_OK=1` is set only immediately before real robot control.
 
 ## Ports And Network Topology
@@ -447,7 +449,7 @@ Before enabling policy action on the real robot:
 | 28701 | realtime z server -> teleop bridge | pose request | Localhost in onboard flow; workstation-local in split flow |
 | 28702 | teleop bridge -> realtime z server | pose reply | Localhost in onboard flow; workstation-local in split flow |
 | 28703 | teleop bridge -> realtime z server | Pico button/control channel | Used by realtime z server |
-| 28704 | teleop bridge -> policy | optional Pico button PUB | Used by onboard policy launcher when enabled |
+| 28704 | teleop bridge -> policy | legacy/debug optional PICO button PUB | Disabled by default; used only when both teleop and policy launchers opt in |
 | 28711 | realtime z server -> policy | realtime latent z PUB | `127.0.0.1` for onboard flow; workstation IP for split flow |
 | 8080 | browser -> retarget viewer | optional web viewer | Debug only |
 
@@ -467,8 +469,8 @@ tcp://<WORKSTATION_IP>:28711
 
 Onboard PICO teleop is the direct PICO-to-G1 flow. The teleop host is the Unitree G1
 onboard Jetson, not the workstation. The PICO app connects to the robot IP, and the robot
-runs the XRoboToolkit headless service, GMR retargeting bridge, realtime `z` server, and
-UFO policy locally.
+runs the XRoboToolkit headless service, vendored canonical retarget bridge, realtime `z`
+server, and UFO policy locally.
 
 Hardware:
 
@@ -479,8 +481,9 @@ Hardware:
 Software on the G1 Jetson:
 
 - XRoboToolkit headless service
-- `general_motion_retargeting` (GMR)
 - `xrobotoolkit_sdk` Python binding
+- vendored `motion_tracking_retarget` code and G1 assets included in UFO-Deploy
+- `mink`, `mujoco`, `numpy`, `scipy`, `pyyaml`, and `pyzmq` in the teleop Python environment
 - UFO-Deploy runtime and released `model/g1_policy` artifact
 
 Flow:
@@ -492,7 +495,7 @@ PICO XRoboToolkit client
  |
  G1 Jetson XRoboToolkit headless service
  |
- GMR
+ motion_tracking_retarget
  |
  xrobot_teleop_to_pose_zmq_server.py
  |
@@ -504,8 +507,11 @@ PICO XRoboToolkit client
 ```
 
 Before startup, follow [scripts/teleop/README.md](scripts/teleop/README.md) to install
-the XRoboToolkit headless service, GMR, and `xrobotoolkit_sdk`. `xrobotoolkit_sdk` is only
-the Python binding; the XRoboToolkit service must be installed and running separately.
+the XRoboToolkit headless service, `xrobotoolkit_sdk`, and teleop Python dependencies.
+Users only need to clone UFO-Deploy; the canonical retarget code, config, G1 XML, and mesh
+assets are vendored under `scripts/teleop/motion_tracking_retarget/`.
+`xrobotoolkit_sdk` is only the Python binding; the XRoboToolkit service must be installed
+and running separately.
 
 Step 1, start XRoboToolkit service:
 
@@ -526,15 +532,15 @@ scripts/teleop/teleop_pose_50hz_onboard.sh
 ```
 
 This runs `xrobot_teleop_to_pose_zmq_server.py`: PICO/XRoboToolkit data is retargeted
-with GMR and published as G1 poses on ZMQ ports `28701`, `28702`, `28703`, and optionally
-PICO policy-control PUB port `28704`. It does not start policy inference and it does not
-encode latent `z`.
+with the vendored canonical retargeter and published as G1 poses on ZMQ ports `28701`,
+`28702`, and `28703`. The legacy/debug PICO policy-control PUB port `28704` is disabled
+by default. It does not start policy inference and it does not encode latent `z`.
 It also does not auto-start the XRoboToolkit service by default; use
 `START_XROBOT_SERVICE=1 scripts/teleop/teleop_pose_50hz_onboard.sh` only after the
 installed headless service has been verified.
 
 The onboard web viewer is optional and is off by default so port `8080` cannot block the
-core PICO -> GMR -> ZMQ path. Enable it only for debugging:
+core PICO -> canonical retarget -> ZMQ path. Enable it only for debugging:
 
 ```bash
 WEB_VISUALIZE=1 scripts/teleop/teleop_pose_50hz_onboard.sh
@@ -586,7 +592,7 @@ ctx_norm_ref: 16.0
 ctx_zmq_timeout_ms: 200
 ```
 
-Robot terminal A, PICO/GMR retargeting with Pico button PUB:
+Robot terminal A, PICO/XRobot canonical retarget bridge:
 
 ```bash
 cd /home/unitree/UFO-Deploy
@@ -617,7 +623,7 @@ Z_PY=/home/unitree/ufo_deploy_venv/bin/python \
   scripts/realtime/run_realtime_z_server_onboard.sh
 ```
 
-Robot terminal C, real policy controlled by Pico buttons:
+Robot terminal C, real policy controlled by the G1 wireless remote:
 
 ```bash
 cd /home/unitree/UFO-Deploy
@@ -626,16 +632,31 @@ UFO_REAL_ROBOT_OK=1 VENV_PATH=/home/unitree/ufo_deploy_venv/bin/activate \
   ./run_g1_teleop_policy_onboard.sh
 ```
 
-PICO policy controls are the primary onboard teleop controls:
+G1 wireless remote controls robot and policy state:
 
 ```text
-A      interpolate to default standing pose
-A+B    enable policy action and start tracking
-B      stop policy action and hold current joints
-X      reset tracking motion
+G1 A    interpolate to default standing pose
+G1 R1   enable policy action
+G1 B    start tracking
+G1 X    reset tracking/reference
+G1 R2   global stop latch
 ```
 
-The G1 wireless controller remains active as a fallback. Wireless R2 is a global stop latch: policy action and tracking motion are disabled, Pico control is skipped while R2 is held, and enable/start inputs cannot directly clear the latch. After R2 is released, release enable/start inputs first; then re-arm explicitly with Pico A+B or wireless R1+B.
+PICO buttons control only the live motion reference stream:
+
+```text
+PICO right_key_one / right-hand A   follow or resume live reference
+PICO left_key_one / left-hand X     freeze current reference/z
+```
+
+PICO buttons do not enable policy, clear R2, enter default pose, reset the real policy
+state machine, or bypass the physical e-stop in the default flow. The legacy/debug 28704
+PICO policy-control path is off unless both `CTRL_PUB_BIND_ADDR=tcp://*:28704` and
+`ENABLE_PICO_POLICY_CONTROL=1` are set explicitly.
+
+Wireless R2 is a global stop latch: policy action and tracking motion are disabled while
+R2 is held, and enable/start inputs cannot directly clear the latch. After R2 is released,
+release enable/start inputs first; then re-arm explicitly with wireless R1+B.
 
 The realtime `z` server stops publishing valid `z` when the teleop pose stream is stale or invalid. The policy subscriber rejects invalid realtime `z` packets and stops policy action if no valid 256-dim finite `z` arrives within `ctx_zmq_timeout_ms`. Policy actions and final joint targets are checked for finite values, and final `q_target` commands are slew-rate limited using the configured G1 joint velocity limits.
 
@@ -661,7 +682,7 @@ ctx_norm_ref: 16.0
 ctx_zmq_timeout_ms: 200
 ```
 
-Workstation terminal A, PICO/GMR retargeting:
+Workstation terminal A, PICO/XRobot canonical retargeting:
 
 ```bash
 cd "$UFO_ROOT"
@@ -737,6 +758,7 @@ python -m py_compile \
   scripts/realtime/realtime_z_server.py \
   scripts/teleop/check_teleop_env.py \
   scripts/teleop/xrobot_teleop_to_pose_zmq_server.py \
+  scripts/teleop/motion_tracking_retarget/*.py \
   sim_env/base_sim.py \
   sim_env/utils/simulation_bridge.py \
   rl_policy/utils/state_processor.py \
@@ -747,7 +769,11 @@ python -m py_compile \
   tests/test_ufo_policy_safety.py \
   tests/test_realtime_z_server_safety.py
 
-bash -n scripts/teleop/teleop_pose_50hz_onboard.sh
+bash -n \
+  scripts/teleop/teleop_pose_50hz_onboard.sh \
+  scripts/realtime/run_realtime_z_server_onboard.sh \
+  run_g1_teleop_policy_onboard.sh
+python tests/test_motion_tracking_retarget.py
 python tests/test_ufo_policy_safety.py
 python tests/test_realtime_z_server_safety.py
 

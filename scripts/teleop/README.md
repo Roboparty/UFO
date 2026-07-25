@@ -1,6 +1,6 @@
 # Teleop Bridge Setup Guide
 
-This guide covers the PICO/XRoboToolkit/GMR teleoperation bridge used by UFO-Deploy.
+This guide covers the PICO/XRoboToolkit canonical teleoperation bridge used by UFO-Deploy.
 It is written for two deployment modes:
 
 - workstation teleop, where the PICO streams to an Ubuntu PC
@@ -15,7 +15,7 @@ the teleop host moves from the workstation to the robot.
 The scripts in this folder only do the PICO-to-G1-pose part of the stack:
 
 1. read live body, headset, and controller data from XRoboToolkit,
-2. retarget the human motion to Unitree G1 with `general_motion_retargeting` (GMR),
+2. retarget the human motion to Unitree G1 with UFO's vendored `motion_tracking_retarget`,
 3. publish retargeted G1 pose frames over ZMQ for `scripts/realtime/realtime_z_server.py`.
 
 They do not start the realtime latent `z` encoder and they do not start the UFO policy.
@@ -23,7 +23,7 @@ The runtime split is:
 
 ```text
 scripts/teleop/teleop_pose_50hz_onboard.sh:
-  PICO -> XRoboToolkit -> xrobotoolkit_sdk -> GMR -> ZMQ pose server
+  PICO -> XRoboToolkit -> xrobotoolkit_sdk -> motion_tracking_retarget -> ZMQ pose server
 
 scripts/realtime/realtime_z_server.py:
   ZMQ pose -> backward_encoder.onnx -> latent z
@@ -54,7 +54,7 @@ PICO
  |
  PC
  |
- GMR
+ motion_tracking_retarget
  |
  xrobot_teleop_to_pose_zmq_server.py
  |
@@ -87,7 +87,7 @@ PICO XRoboToolkit client
  |
  xrobotoolkit_sdk
  |
- GMR
+ motion_tracking_retarget
  |
  xrobot_teleop_to_pose_zmq_server.py
  |
@@ -111,7 +111,8 @@ teleop this is the Ubuntu PC. For onboard teleop this is the G1 Jetson.
 - XRoboToolkit PICO app, installed on the headset
 - XRoboToolkit PC Service on x86 Ubuntu, or XRoboToolkit headless service on G1 Jetson
 - `xrobotoolkit_sdk` Python binding
-- `general_motion_retargeting` (GMR)
+- vendored `motion_tracking_retarget` code and G1 assets included in UFO-Deploy
+- `mink`, `mujoco`, `numpy`, `scipy`, `pyyaml`
 - `pyzmq`
 
 Important: `xrobotoolkit_sdk` is only the Python binding. It depends on the XRoboToolkit
@@ -120,8 +121,9 @@ start or replace the XRoboToolkit service.
 
 The upstream teleop dependencies are pinned in
 [requirements-lock.md](requirements-lock.md). Use those commits for release deployments so
-GMR robot assets, XRoboToolkit SDK ABI, and `xrobotoolkit_sdk` APIs do not silently drift
-with upstream `main` or `master`.
+canonical retarget assets, XRoboToolkit SDK ABI, and `xrobotoolkit_sdk` APIs do not
+silently drift with upstream `main` or `master`. Users only need to clone UFO-Deploy; no
+runtime clone of `motion_tracking` is required.
 
 ## Python Environment
 
@@ -130,7 +132,7 @@ Create a Python 3.10 environment on the teleop host:
 ```bash
 conda create -n ufo-teleop python=3.10 -y
 conda activate ufo-teleop
-pip install pyzmq
+python -m pip install mink mujoco numpy scipy pyyaml pyzmq
 ```
 
 Use this `ufo-teleop` environment for `scripts/teleop/teleop_pose_50hz.sh` and the onboard
@@ -143,32 +145,31 @@ On the G1 Jetson you can also use a venv, for example:
 python3 -m venv /home/unitree/ufo_teleop_venv
 source /home/unitree/ufo_teleop_venv/bin/activate
 pip install --upgrade pip
-pip install pyzmq
+python -m pip install mink mujoco numpy scipy pyyaml pyzmq
 ```
 
 If the XRoboToolkit binding ships a native `.so`, make sure its directory is in
 `LD_LIBRARY_PATH` before importing `xrobotoolkit_sdk`.
 
-## Install GMR
-
-Install GMR into the same Python environment used by the teleop bridge:
+Use a workspace for external XRoboToolkit service/source checkouts:
 
 ```bash
 export TELEOP_WORKSPACE=${TELEOP_WORKSPACE:-$HOME/teleop_ws}
 mkdir -p "$TELEOP_WORKSPACE"
-cd "$TELEOP_WORKSPACE"
-
-git clone https://github.com/YanjieZe/GMR.git
-cd GMR
-git checkout bb1bbe40774794fceb2a7c579a3464a28e68c844
-pip install -e .
 ```
 
-Verify:
+## Canonical Retarget Assets
 
-```bash
-python -c "import general_motion_retargeting; print('GMR OK')"
+UFO-Deploy vendors the minimal motion_tracking retarget path under:
+
+```text
+scripts/teleop/motion_tracking_retarget/
 ```
+
+This includes the canonical XRobot parser, G1 Mink IK retargeter, `xrobot_to_g1.json`,
+G1 XML, and required mesh assets. The canonical boundary is `PICO/XRobot raw body data ->
+G1 qpos`; UFO's realtime `z`, backward encoder, policy, and robot command path remain UFO
+code.
 
 ## Install XRoboToolkit Service
 
@@ -359,14 +360,17 @@ python scripts/teleop/check_teleop_env.py
 Expected healthy preflight output includes lines like:
 
 ```text
-[OK] GMR installed
-[OK] GMR robot registered: unitree_g1
-[OK] GMR robot XML exists: ...
-[OK] GMR robot XML loads: unitree_g1
-[OK] GMR IK config exists: xrobot -> unitree_g1: ...
-[OK] GMR IK config valid: xrobot -> unitree_g1
+[OK] mink installed
+[OK] mujoco installed
+[OK] numpy installed
+[OK] scipy installed
+[OK] pyyaml installed
 [OK] xrobotoolkit_sdk installed
 [OK] pyzmq installed
+[OK] motion_tracking_retarget package available
+[OK] canonical G1 XML loads with MuJoCo
+[OK] xrobot_to_g1.json required fields present
+[OK] canonical -> UFO joint permutation valid
 [OK] XRoboToolkit service running
 [OK] port 28701 available
 [OK] port 28702 available
@@ -377,11 +381,10 @@ Before starting the teleop bridge, ports `28701`, `28702`, and `28703` should no
 available. If a previous teleop process is still running, the checker will report the
 occupied port so you can stop the stale process.
 
-The GMR check is more than an import check. By default it verifies that the installed GMR
-package has the `unitree_g1` robot XML, that the XML can be loaded by MuJoCo, and that the
-`xrobot -> unitree_g1` IK config JSON exists and contains the required retargeting keys.
-This catches incomplete GMR installs before `xrobot_teleop_to_pose_zmq_server.py` starts
-its retarget worker.
+The canonical retarget check is more than an import check. It verifies the vendored
+24-joint XRobot names, G1 XML, `xrobot_to_g1.json`, toe bodies, canonical 29-joint order,
+UFO output joint order, qpos size, and joint-name permutation before
+`xrobot_teleop_to_pose_zmq_server.py` starts its retarget worker.
 
 To check the realtime `z` server port separately, use the realtime profile:
 
@@ -406,12 +409,16 @@ The minimum import check is:
 
 ```bash
 python - <<'PY'
-import general_motion_retargeting
+import mink
+import mujoco
+import numpy
+import scipy
+import yaml
 import xrobotoolkit_sdk
 import zmq
-print("general_motion_retargeting: OK")
+import motion_tracking_retarget
+print("canonical teleop deps: OK")
 print("xrobotoolkit_sdk: OK")
-print("pyzmq: OK")
 PY
 ```
 
@@ -465,13 +472,14 @@ UFO-Deploy uses these local ZMQ ports:
 | 28701 | teleop bridge | pose request socket from `realtime_z_server.py` |
 | 28702 | teleop bridge | pose reply socket to `realtime_z_server.py` |
 | 28703 | teleop bridge | PICO button/control channel to `realtime_z_server.py` |
-| 28704 | teleop bridge | optional PICO button PUB channel to onboard policy |
+| 28704 | teleop bridge | legacy/debug optional PICO button PUB channel to onboard policy |
 | 28711 | realtime `z` server | latent `z` PUB channel to policy |
 
 The preflight checker uses the `teleop` port profile by default, so it checks only
 `28701`, `28702`, and `28703`. Use `--port-profile realtime` to check `28711`, or
-`--port-profile all` to check both groups. The onboard teleop launcher also checks `28704`
-when the PICO policy-control PUB channel is enabled.
+`--port-profile all` to check both groups. Port `28704` is off by default. It is checked
+only when `CTRL_PUB_BIND_ADDR` is explicitly set for legacy/debug PICO policy-control
+compatibility.
 
 ## Run The Teleop Bridge
 
@@ -501,7 +509,8 @@ export WEB_PORT=8080
 ```
 
 The onboard launcher automatically derives `UFO_ROOT` from its own path if `UFO_ROOT` is
-not set. It checks the Python executable, GMR, `xrobotoolkit_sdk`, XRoboToolkit service,
+not set. It checks the Python executable, `mink`, `mujoco`, `numpy`, `scipy`, `pyyaml`,
+`pyzmq`, `xrobotoolkit_sdk`, the vendored canonical retarget assets, XRoboToolkit service,
 and required local ZMQ ports before starting `xrobot_teleop_to_pose_zmq_server.py`.
 The web viewer is off by default; enable it only for debugging:
 
@@ -531,15 +540,16 @@ ${UFO_ROOT}/venv/bin/python
 
 The launcher probes these candidates in order with
 `check_teleop_env.py --skip-service --skip-ports`. It selects the first Python that can
-import `general_motion_retargeting`, `xrobotoolkit_sdk`, and `zmq`, has a compatible
-`xrobotoolkit_sdk` API, and includes the GMR `xrobot -> unitree_g1` assets. A Python
+import the canonical retarget dependencies, `xrobotoolkit_sdk`, and `zmq`, has a compatible
+`xrobotoolkit_sdk` API, and can load the vendored G1 XML/assets. A Python
 executable that exists but cannot run the teleop bridge is skipped so a later valid teleop
 environment can be used.
 
 If none of those candidates passes, set `TELEOP_PY` explicitly. The launcher refuses to
 fall back to system `python3` by default because the Jetson system Python usually does not
-contain GMR, `xrobotoolkit_sdk`, `torch`, and `numpy`. Set `TELEOP_ALLOW_SYSTEM_PY=1` only
-for manual debugging; even with this flag, system Python must pass the same import probe.
+contain `mink`, `mujoco`, `xrobotoolkit_sdk`, and `numpy`. Set `TELEOP_ALLOW_SYSTEM_PY=1`
+only for manual debugging; even with this flag, system Python must pass the same import
+probe.
 
 During the first few seconds after starting the bridge, stand in a stable neutral posture.
 The bridge uses startup foot height to align the z-axis offset; starting from a crouched or
@@ -571,7 +581,8 @@ Run these steps on the G1 Jetson:
    ```
 
    This converts PICO body/controller data into retargeted G1 poses on ZMQ ports
-   `28701`, `28702`, `28703`, and optionally `28704`.
+   `28701`, `28702`, and `28703`. The legacy/debug `28704` PICO policy-control PUB channel
+   is disabled by default.
 
 3. Start the realtime latent `z` server.
 
@@ -595,6 +606,34 @@ Run these steps on the G1 Jetson:
    ```
 
    This subscribes to realtime `z` and runs UFO policy inference.
+
+5. Use the G1 wireless remote to manage robot and policy state.
+
+   ```text
+   G1 A    interpolate to default standing pose
+   G1 R1   enable policy action
+   G1 B    start tracking
+   G1 X    reset tracking/reference
+   G1 R2   global stop latch
+   ```
+
+6. Use PICO only for the live motion reference stream.
+
+   ```text
+   PICO right_key_one / right-hand A   follow or resume live reference
+   PICO left_key_one / left-hand X     freeze current reference/z
+   ```
+
+   PICO buttons do not enable policy, clear R2, enter default pose, reset the real policy
+   state machine, or bypass the physical e-stop in the default flow.
+
+Legacy/debug PICO policy-control compatibility is available only when both launchers are
+explicitly opted in:
+
+```bash
+CTRL_PUB_BIND_ADDR=tcp://*:28704 scripts/teleop/teleop_pose_50hz_onboard.sh
+ENABLE_PICO_POLICY_CONTROL=1 ./run_g1_teleop_policy_onboard.sh
+```
 
 Keep the robot on support for first bring-up and test the physical e-stop, wireless R2
 stop latch, stale-teleop watchdog, and PICO disconnect behavior before free walking.

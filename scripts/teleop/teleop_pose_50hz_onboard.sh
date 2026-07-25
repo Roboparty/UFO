@@ -20,7 +20,7 @@ START_XROBOT_SERVICE="${START_XROBOT_SERVICE:-0}"
 WEB_VISUALIZE="${WEB_VISUALIZE:-0}"
 WEB_PORT="${WEB_PORT:-8080}"
 WEB_MUJOCO_XML="${WEB_MUJOCO_XML:-${UFO_ROOT}/data/robots/g1/scene_29dof_freebase.xml}"
-CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-tcp://*:28704}"
+CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-}"
 
 [[ -d "${UFO_ROOT}" ]] || fail "UFO_ROOT does not exist: ${UFO_ROOT}"
 [[ -f "${UFO_ROOT}/scripts/teleop/xrobot_teleop_to_pose_zmq_server.py" ]] || \
@@ -128,19 +128,16 @@ cd "${UFO_ROOT}/scripts/teleop"
 cmd=(
   "${TELEOP_PY}" xrobot_teleop_to_pose_zmq_server.py
   --robot unitree_g1
-  --actual_human_height "${ACTUAL_HUMAN_HEIGHT:-1.6}"
+  --actual_human_height "${ACTUAL_HUMAN_HEIGHT:-1.75}"
   --ctrl_fps 50
   --xr-poll-hz "${XR_POLL_HZ:-50}"
-  --lookback_ms "${LOOKBACK_MS:-25}"
+  --lookback_ms "${LOOKBACK_MS:-50}"
   --retarget_buffer_window_s 0.5
   --log_interval_s "${LOG_INTERVAL_S:-1}"
   --req_bind_addr tcp://*:28701
   --rep_bind_addr tcp://*:28702
   --ctrl_bind_addr tcp://*:28703
-  --min_link_height 0.0
-  --min_link_height_align_strategy startup_fixed
-  --min_link_height_bootstrap_frames 10
-  --vis_fps "${VIS_FPS:-10}"
+  --vis_fps "${VIS_FPS:-5}"
 )
 
 if [[ -n "${CTRL_PUB_BIND_ADDR}" ]]; then
@@ -151,5 +148,5 @@ if [[ "${WEB_VISUALIZE}" == "1" ]]; then
   cmd+=(--web-visualize --web-port "${WEB_PORT}" --web-mujoco-xml "${WEB_MUJOCO_XML}")
 fi
 
-log "starting PICO -> GMR -> ZMQ pose bridge"
+log "starting PICO -> canonical retarget -> ZMQ pose bridge"
 exec "${cmd[@]}" "$@"

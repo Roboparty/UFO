@@ -3,7 +3,8 @@
 Low-latency PICO/XRobot teleop bridge for sim2real.
 
 Shipped in UFO-Deploy as scripts/teleop/ (see SOURCE). Run from this directory or
-set PYTHONPATH; still requires GMR + xrobotoolkit_sdk in the active environment.
+set PYTHONPATH; requires the vendored motion_tracking_retarget dependencies and
+xrobotoolkit_sdk in the active environment.
 
 Architecture:
 1. XR callback thread stores the latest VR snapshot with a monotonic timestamp.
@@ -27,58 +28,28 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 import numpy as np
-from scipy.spatial.transform import Rotation as R
 
 from default_mimic_obs import DEFAULT_MIMIC_OBS
+from motion_tracking_retarget.helper import default_controller_buttons, parse_xrobot_motion_snapshot
+from motion_tracking_retarget.params import XR_BODY_JOINT_NAMES
 
-GMR = None
-RobotMotionViewer = None
-quat_mul_np = None
 xrt = None
-
-XR_BODY_JOINT_NAMES = [
-    "Pelvis",
-    "Left_Hip",
-    "Right_Hip",
-    "Spine1",
-    "Left_Knee",
-    "Right_Knee",
-    "Spine2",
-    "Left_Ankle",
-    "Right_Ankle",
-    "Spine3",
-    "Left_Foot",
-    "Right_Foot",
-    "Neck",
-    "Left_Collar",
-    "Right_Collar",
-    "Head",
-    "Left_Shoulder",
-    "Right_Shoulder",
-    "Left_Elbow",
-    "Right_Elbow",
-    "Left_Wrist",
-    "Right_Wrist",
-    "Left_Hand",
-    "Right_Hand",
-]
 
 
 def _load_runtime_dependencies() -> None:
-    global GMR, RobotMotionViewer, quat_mul_np, xrt
+    global xrt
 
     try:
-        # Import torch first on Jetson to avoid static TLS allocation failures from libtorch.
-        try:
-            import torch  # noqa: F401
-        except Exception:
-            pass
-        from general_motion_retargeting import GeneralMotionRetargeting as _GMR
-        from general_motion_retargeting import RobotMotionViewer as _RobotMotionViewer
-        from general_motion_retargeting.rot_utils import quat_mul_np as _quat_mul_np
+        import mink  # noqa: F401
+        import mujoco  # noqa: F401
+        import scipy  # noqa: F401
+        import yaml  # noqa: F401
+        import zmq  # noqa: F401
+        from motion_tracking_retarget.xrobot_retarget import XRobotRetargetWorkerRuntime as _Runtime  # noqa: F401
     except ImportError as exc:
         raise ImportError(
-            "Failed to import 'general_motion_retargeting'. Install GMR in the active Python environment."
+            "Failed to import vendored motion_tracking_retarget runtime dependencies. "
+            "Install mink, mujoco, scipy, pyyaml, numpy, and pyzmq in the active teleop environment."
         ) from exc
 
     try:
@@ -112,9 +83,6 @@ def _load_runtime_dependencies() -> None:
             "Installed xrobotoolkit_sdk exposes neither callback APIs nor the required polling APIs."
         )
 
-    GMR = _GMR
-    RobotMotionViewer = _RobotMotionViewer
-    quat_mul_np = _quat_mul_np
     xrt = _xrt
 
 
@@ -289,162 +257,15 @@ class RetargetedFrame:
     qpos: np.ndarray
 
 
-class _RetargetWorkerRuntime:
-    ROBOT_GROUND_REFERENCE_BODY_NAMES = {
-        "unitree_g1": ("left_toe_link", "right_toe_link"),
-        "unitree_g1_with_hands": ("left_toe_link", "right_toe_link"),
-    }
-
-    def __init__(self, worker_config: Dict[str, Any]):
-        try:
-            import torch  # noqa: F401
-        except Exception:
-            pass
-        from general_motion_retargeting import GeneralMotionRetargeting
-        from general_motion_retargeting.rot_utils import quat_mul_np as worker_quat_mul_np
-
-        self._quat_mul_np = worker_quat_mul_np
-        self.robot = str(worker_config["robot"])
-        self.ground_reference_body_names = self.ROBOT_GROUND_REFERENCE_BODY_NAMES.get(self.robot, ())
-        self.retarget = GeneralMotionRetargeting(
-            src_human="xrobot",
-            tgt_robot=self.robot,
-            actual_human_height=float(worker_config["actual_human_height"]),
-        )
-        self.retarget.max_iter = int(worker_config["gmr_max_iter"])
-        self.send_human_motion = bool(worker_config["send_human_motion"])
-        self.min_link_height = float(worker_config["min_link_height"])
-        self.min_link_height_align_strategy = str(worker_config["min_link_height_align_strategy"])
-        self.min_link_height_bootstrap_frames = max(1, int(worker_config["min_link_height_bootstrap_frames"]))
-        self.fixed_min_link_height_offset: Optional[float] = None
-        self.min_link_height_offset_samples: list[float] = []
-        self.rotation_matrix = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
-        self.rotation_quat = R.from_matrix(self.rotation_matrix).as_quat(scalar_first=True)
-
-    def _body_poses_to_pose_dict(self, poses: Any) -> Optional[Dict[str, Any]]:
-        if not isinstance(poses, (list, tuple)) or len(poses) < len(XR_BODY_JOINT_NAMES):
-            return None
-
-        body_pose_dict: Dict[str, Any] = {}
-        for i, joint_name in enumerate(XR_BODY_JOINT_NAMES):
-            pose = poses[i]
-            if not isinstance(pose, (list, tuple)) or len(pose) < 7:
-                return None
-            x, y, z, qx, qy, qz, qw = [float(v) for v in pose[:7]]
-            pos = np.array([x, y, z], dtype=np.float64) @ self.rotation_matrix.T
-            rot = self._quat_mul_np(
-                self.rotation_quat.reshape(1, 4),
-                np.array([[qw, qx, qy, qz]], dtype=np.float64),
-                scalar_first=True,
-            )[0]
-            body_pose_dict[joint_name] = [pos.tolist(), rot.tolist()]
-        return body_pose_dict
-
-    def _get_current_min_body_z(self) -> Optional[float]:
-        body_z = self.retarget.configuration.data.xpos[1:, 2]
-        if body_z.size == 0:
-            return None
-        min_body_z = float(np.min(body_z))
-        if not np.isfinite(min_body_z):
-            return None
-        return min_body_z
-
-    def _get_current_ground_reference_z(self) -> Optional[float]:
-        toe_z_values: list[float] = []
-        body_name_map = getattr(self.retarget, "robot_body_names", {})
-        data = self.retarget.configuration.data
-
-        for body_name in self.ground_reference_body_names:
-            body_id = body_name_map.get(body_name)
-            if body_id is None:
-                continue
-            if body_id < 0 or body_id >= data.xpos.shape[0]:
-                continue
-            z = float(data.xpos[body_id, 2])
-            if np.isfinite(z):
-                toe_z_values.append(z)
-
-        if toe_z_values:
-            return float(min(toe_z_values))
-        return self._get_current_min_body_z()
-
-    def _apply_min_link_height_offset(self, qpos: np.ndarray) -> np.ndarray:
-        qpos_adj = np.asarray(qpos, dtype=np.float32).copy()
-        ground_ref_z = self._get_current_ground_reference_z()
-        if ground_ref_z is None:
-            return qpos_adj
-
-        if self.min_link_height_align_strategy == "per_frame":
-            qpos_adj[2] += self.min_link_height - ground_ref_z
-            return qpos_adj
-
-        if self.fixed_min_link_height_offset is None:
-            offset = self.min_link_height - ground_ref_z
-            self.min_link_height_offset_samples.append(offset)
-            if len(self.min_link_height_offset_samples) >= self.min_link_height_bootstrap_frames:
-                self.fixed_min_link_height_offset = float(np.mean(self.min_link_height_offset_samples))
-                print(
-                    "[Info] worker startup_fixed ground calibration: "
-                    f"{self.fixed_min_link_height_offset:.6f} m from "
-                    f"{len(self.min_link_height_offset_samples)} frames"
-                )
-                self.min_link_height_offset_samples.clear()
-
-        applied_offset = (
-            self.fixed_min_link_height_offset
-            if self.fixed_min_link_height_offset is not None
-            else float(np.mean(self.min_link_height_offset_samples))
-            if self.min_link_height_offset_samples
-            else 0.0
-        )
-        qpos_adj[2] += applied_offset
-        return qpos_adj
-
-    @staticmethod
-    def _copy_human_motion_data(human_motion_data: Any) -> Optional[Dict[str, Any]]:
-        if not isinstance(human_motion_data, dict):
-            return None
-        copied: Dict[str, Any] = {}
-        for key, value in human_motion_data.items():
-            if not isinstance(value, (list, tuple)) or len(value) < 2:
-                continue
-            pos = np.asarray(value[0], dtype=np.float32).copy()
-            rot = np.asarray(value[1], dtype=np.float32).copy()
-            copied[key] = (pos, rot)
-        return copied
-
-    def process_packet(self, packet: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        body_pose_dict = self._body_poses_to_pose_dict(packet.get("poses"))
-        if body_pose_dict is None:
-            return None
-
-        qpos_curr = self.retarget.retarget(body_pose_dict, offset_to_ground=False)
-        if qpos_curr is None:
-            return None
-
-        qpos_curr = np.asarray(qpos_curr, dtype=np.float32).reshape(-1)
-        if qpos_curr.shape[0] < 36:
-            raise ValueError(f"retarget qpos too short: {qpos_curr.shape[0]}")
-        qpos_curr = self._apply_min_link_height_offset(qpos_curr[:36])
-
-        return {
-            "type": "retarget_result",
-            "seq": int(packet["seq"]),
-            "recv_ns": int(packet["recv_ns"]),
-            "qpos": qpos_curr.astype(np.float32, copy=True),
-            "human_motion_data": self._copy_human_motion_data(self.retarget.scaled_human_data)
-            if self.send_human_motion
-            else None,
-        }
-
-
 def _retarget_worker_main(
     raw_recv_conn: Any,
     result_send_conn: Any,
     worker_config: Dict[str, Any],
 ) -> None:
     try:
-        runtime = _RetargetWorkerRuntime(worker_config)
+        from motion_tracking_retarget.xrobot_retarget import XRobotRetargetWorkerRuntime
+
+        runtime = XRobotRetargetWorkerRuntime(worker_config)
     except Exception as exc:
         try:
             result_send_conn.send({"type": "worker_init_error", "error": str(exc)})
@@ -515,13 +336,42 @@ class LowLatencyTeleopPoseZMQServer:
     BODY_JOINT_NAMES = XR_BODY_JOINT_NAMES
 
     def __init__(self, args: argparse.Namespace):
+        from motion_tracking_retarget.joint_mapping import (
+            UFO_EXPECTED_G1_JOINT_NAMES,
+            build_joint_permutation,
+            canonical_joint_names,
+            qpos_size,
+        )
+        from motion_tracking_retarget.robot_config import load_teleop_robot_config
+
         self.args = args
         self.robot = args.robot
+        self.target_robot = "g1"
+        self.teleop_config = load_teleop_robot_config(self.target_robot)
         self.vis_fps = int(args.vis_fps)
         self.ctrl_fps = int(args.ctrl_fps)
         self.lookback_ns = int(float(args.lookback_ms) * 1e6)
         self.retarget_buffer_window_ns = int(float(args.retarget_buffer_window_s) * 1e9)
         self.log_interval_s = float(args.log_interval_s)
+        self.actual_human_height = float(args.actual_human_height)
+        self.retarget_max_iter = int(self.teleop_config.max_iter)
+        self.calibration_button = (
+            str(args.calibration_button).strip()
+            if args.calibration_button is not None and str(args.calibration_button).strip()
+            else self.teleop_config.calibration_button
+        )
+        self.canonical_joint_names = canonical_joint_names(self.target_robot)
+        self.ufo_output_joint_names = UFO_EXPECTED_G1_JOINT_NAMES
+        self.joint_permutation = build_joint_permutation(
+            self.canonical_joint_names,
+            self.ufo_output_joint_names,
+        )
+        self.canonical_qpos_size = qpos_size(self.target_robot)
+        self.canonical_dof_count = len(self.canonical_joint_names)
+        if self.canonical_dof_count != 29:
+            raise ValueError(f"canonical G1 dof_count must be 29, got {self.canonical_dof_count}")
+        if self.canonical_qpos_size != 36:
+            raise ValueError(f"canonical G1 qpos_size must be 36, got {self.canonical_qpos_size}")
 
         if self.vis_fps <= 0:
             raise ValueError("vis_fps must be > 0")
@@ -535,9 +385,6 @@ class LowLatencyTeleopPoseZMQServer:
             raise ValueError("log_interval_s must be >= 0")
 
         self.retarget = None
-        self.viewer = None
-        self.gmr_max_iter = 5
-
         self.zmq_context = None
         self.req_sock = None
         self.rep_sock = None
@@ -547,28 +394,20 @@ class LowLatencyTeleopPoseZMQServer:
         self.xrt_input_mode = "uninitialized"
 
         self.default_qpos = self._build_default_qpos()
-        self.last_controller_buttons: Dict[str, Any] = self._default_controller_buttons()
-
-        self.min_link_height = float(args.min_link_height)
-        self.min_link_height_align_strategy = str(args.min_link_height_align_strategy)
-        self.min_link_height_bootstrap_frames = max(1, int(args.min_link_height_bootstrap_frames))
-        self.fixed_min_link_height_offset: Optional[float] = None
-        self.min_link_height_offset_samples: list[float] = []
-
-        self.rotation_matrix = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
-        self.rotation_quat = R.from_matrix(self.rotation_matrix).as_quat(scalar_first=True)
+        self.last_controller_buttons: Dict[str, Any] = default_controller_buttons()
 
         self.latest_vr_lock = threading.Lock()
         self.latest_vr_poses: Optional[Any] = None
         self.latest_vr_recv_ns: int = 0
         self.latest_vr_seq: int = 0
         self.latest_vr_motion_timestamp_ns: Optional[int] = None
+        self.latest_vr_calibration_requested = False
+        self.prev_calibration_button_pressed = False
 
         self.retarget_buffer_lock = threading.Lock()
         self.retarget_buffer: deque[RetargetedFrame] = deque()
         self.vis_lock = threading.Lock()
         self.latest_vis_qpos: Optional[np.ndarray] = None
-        self.latest_vis_human_motion: Optional[Dict[str, Any]] = None
 
         self.vr_frame_event = threading.Event()
         self.stop_event = threading.Event()
@@ -626,23 +465,6 @@ class LowLatencyTeleopPoseZMQServer:
         return np.concatenate([root_pos, root_quat, dof_pos], axis=0).astype(np.float32)
 
     @staticmethod
-    def _default_controller_buttons() -> Dict[str, Any]:
-        return {
-            "left_key_one": False,
-            "left_key_two": False,
-            "left_axis_click": False,
-            "left_index_trig": False,
-            "left_grip": False,
-            "left_axis": [0.0, 0.0],
-            "right_key_one": False,
-            "right_key_two": False,
-            "right_axis_click": False,
-            "right_index_trig": False,
-            "right_grip": False,
-            "right_axis": [0.0, 0.0],
-        }
-
-    @staticmethod
     def _normalize_quat_wxyz(quat: np.ndarray) -> np.ndarray:
         q = np.asarray(quat, dtype=np.float32).reshape(4)
         norm = float(np.linalg.norm(q))
@@ -680,34 +502,6 @@ class LowLatencyTeleopPoseZMQServer:
         frame = prev_qpos * (1.0 - t) + next_qpos * t
         frame[3:7] = self._slerp_quat_wxyz(prev_qpos[3:7], next_qpos[3:7], t)
         return frame.astype(np.float32)
-
-    def _extract_controller_buttons_from_snapshot(self, snapshot: Optional[dict]) -> Dict[str, Any]:
-        if snapshot is None:
-            return self.last_controller_buttons
-
-        controllers = snapshot.get("controllers", {}) if isinstance(snapshot, dict) else {}
-        left = controllers.get("left", {}) if isinstance(controllers, dict) else {}
-        right = controllers.get("right", {}) if isinstance(controllers, dict) else {}
-
-        def _axis(values: Any) -> list[float]:
-            if isinstance(values, (list, tuple)) and len(values) >= 2:
-                return [float(values[0]), float(values[1])]
-            return [0.0, 0.0]
-
-        return {
-            "left_key_one": bool(left.get("primary_button", False)),
-            "left_key_two": bool(left.get("secondary_button", False)),
-            "left_axis_click": bool(left.get("axis_click", False)),
-            "left_index_trig": float(left.get("trigger", 0.0)) > 1e-4,
-            "left_grip": float(left.get("grip", 0.0)) > 1e-4,
-            "left_axis": _axis(left.get("axis", [0.0, 0.0])),
-            "right_key_one": bool(right.get("primary_button", False)),
-            "right_key_two": bool(right.get("secondary_button", False)),
-            "right_axis_click": bool(right.get("axis_click", False)),
-            "right_index_trig": float(right.get("trigger", 0.0)) > 1e-4,
-            "right_grip": float(right.get("grip", 0.0)) > 1e-4,
-            "right_axis": _axis(right.get("axis", [0.0, 0.0])),
-        }
 
     @staticmethod
     def _xrt_has_callback_api() -> bool:
@@ -792,43 +586,46 @@ class LowLatencyTeleopPoseZMQServer:
             self._on_vr_frame(snapshot)
             self.stop_event.wait(timeout=period_s)
 
-    @staticmethod
-    def _serialize_qpos_frame(qpos: np.ndarray) -> Dict[str, Any]:
+    def _serialize_qpos_frame(self, qpos: np.ndarray) -> Dict[str, Any]:
         q = np.asarray(qpos, dtype=np.float32).reshape(-1)
+        if q.shape[0] != self.canonical_qpos_size:
+            raise ValueError(f"canonical qpos shape must be ({self.canonical_qpos_size},), got {q.shape}")
+        if not np.all(np.isfinite(q)):
+            raise ValueError("canonical qpos contains non-finite values")
+        root_quat = q[3:7]
+        quat_norm = float(np.linalg.norm(root_quat))
+        if not np.isfinite(quat_norm) or quat_norm < 1e-6:
+            raise ValueError(f"canonical root quaternion norm invalid: {quat_norm}")
+        dof_pos = q[7 : 7 + self.canonical_dof_count][self.joint_permutation]
         return {
             "root_pos": q[0:3].tolist(),
-            "root_quat": q[3:7].tolist(),
-            "dof_pos": q[7:36].tolist(),
+            "root_quat": root_quat.tolist(),
+            "dof_pos": dof_pos.tolist(),
         }
 
     def _on_vr_frame(self, snapshot: dict) -> None:
         recv_ns = time.monotonic_ns()
-        controller_buttons = self._extract_controller_buttons_from_snapshot(snapshot)
-        top_timestamp_ns = None
-        try:
-            top_timestamp_ns = int(snapshot.get("timestamp_ns", 0)) if isinstance(snapshot, dict) else None
-        except Exception:
-            top_timestamp_ns = None
-        body = snapshot.get("body", {}) if isinstance(snapshot, dict) else {}
-        body_available = bool(body.get("available", False)) if isinstance(body, dict) else False
-        body_timestamp_ns = None
-        if body_available:
-            try:
-                body_timestamp_ns = int(body.get("timestamp_ns", 0))
-            except Exception:
-                body_timestamp_ns = None
-        motion_timestamp_ns = body_timestamp_ns if body_timestamp_ns not in (None, 0) else top_timestamp_ns
+        parsed = parse_xrobot_motion_snapshot(
+            snapshot,
+            joint_count=len(XR_BODY_JOINT_NAMES),
+        )
 
         should_wake_retarget = False
         with self.latest_vr_lock:
-            self.last_controller_buttons = controller_buttons
             self.callback_count += 1
-            if body_available and motion_timestamp_ns is not None:
-                if self.latest_vr_motion_timestamp_ns != motion_timestamp_ns:
-                    self.latest_vr_poses = body.get("poses", None)
+            if parsed is not None:
+                self.last_controller_buttons = parsed.controller_buttons
+                calibration_requested = False
+                if self.calibration_button is not None:
+                    pressed = bool(parsed.controller_buttons.get(self.calibration_button, False))
+                    calibration_requested = pressed and not self.prev_calibration_button_pressed
+                    self.prev_calibration_button_pressed = pressed
+                if self.latest_vr_motion_timestamp_ns != parsed.motion_timestamp_ns:
+                    self.latest_vr_poses = parsed.poses
                     self.latest_vr_recv_ns = recv_ns
                     self.latest_vr_seq += 1
-                    self.latest_vr_motion_timestamp_ns = motion_timestamp_ns
+                    self.latest_vr_motion_timestamp_ns = parsed.motion_timestamp_ns
+                    self.latest_vr_calibration_requested = calibration_requested
                     should_wake_retarget = True
         if should_wake_retarget:
             self.vr_frame_event.set()
@@ -839,20 +636,6 @@ class LowLatencyTeleopPoseZMQServer:
             self.retarget_buffer.append(RetargetedFrame(recv_ns=recv_ns, qpos=qpos.astype(np.float32, copy=True)))
             while self.retarget_buffer and self.retarget_buffer[0].recv_ns < cutoff_ns:
                 self.retarget_buffer.popleft()
-
-    @staticmethod
-    def _copy_human_motion_data(human_motion_data: Any) -> Optional[Dict[str, Any]]:
-        if not isinstance(human_motion_data, dict):
-            return None
-
-        copied: Dict[str, Any] = {}
-        for key, value in human_motion_data.items():
-            if not isinstance(value, (list, tuple)) or len(value) < 2:
-                continue
-            pos = np.asarray(value[0], dtype=np.float32).copy()
-            rot = np.asarray(value[1], dtype=np.float32).copy()
-            copied[key] = (pos, rot)
-        return copied
 
     def _get_retarget_frames_snapshot(self) -> list[RetargetedFrame]:
         with self.retarget_buffer_lock:
@@ -1024,6 +807,7 @@ class LowLatencyTeleopPoseZMQServer:
                     poses = self.latest_vr_poses
                     recv_ns = self.latest_vr_recv_ns
                     seq = self.latest_vr_seq
+                    calibration_requested = self.latest_vr_calibration_requested
 
                 if poses is None or seq == last_sent_seq:
                     with self.latest_vr_lock:
@@ -1047,6 +831,7 @@ class LowLatencyTeleopPoseZMQServer:
                             "seq": int(seq),
                             "recv_ns": int(recv_ns),
                             "poses": poses,
+                            "calibration_requested": bool(calibration_requested),
                         }
                     )
                 except (BrokenPipeError, EOFError, OSError) as exc:
@@ -1100,10 +885,9 @@ class LowLatencyTeleopPoseZMQServer:
             self._append_retarget_frame(recv_ns=recv_ns, qpos=qpos_curr)
             self.retarget_count += 1
 
-            if self.viewer is not None or self.web_viewer is not None:
+            if self.web_viewer is not None:
                 with self.vis_lock:
                     self.latest_vis_qpos = qpos_curr.astype(np.float32, copy=True)
-                    self.latest_vis_human_motion = payload.get("human_motion_data")
 
     def _drain_requests_blocking(self) -> tuple[Optional[Dict[str, Any]], Optional[int], int]:
         import zmq
@@ -1270,30 +1054,15 @@ class LowLatencyTeleopPoseZMQServer:
             self.stop_event.wait(timeout=period_s)
 
     def _visualization_loop(self) -> None:
-        if self.viewer is None and self.web_viewer is None:
+        if self.web_viewer is None:
             return
 
         period_s = 1.0 / float(self.vis_fps)
         while not self.stop_event.is_set():
             with self.vis_lock:
                 qpos = None if self.latest_vis_qpos is None else self.latest_vis_qpos.copy()
-                human_motion_data = self.latest_vis_human_motion
 
             if qpos is not None:
-                if self.viewer is not None:
-                    try:
-                        self.viewer.step(
-                            root_pos=qpos[:3],
-                            root_rot=qpos[3:7],
-                            dof_pos=qpos[7:36],
-                            human_motion_data=human_motion_data,
-                            rate_limit=False,
-                            follow_camera=True,
-                        )
-                    except Exception as exc:
-                        print(f"[Warning] visualization failed, disabling viewer: {exc}")
-                        self.viewer.close()
-                        self.viewer = None
                 if self.web_viewer is not None:
                     try:
                         self.web_viewer.step(qpos)
@@ -1311,11 +1080,7 @@ class LowLatencyTeleopPoseZMQServer:
             raise ImportError("pyzmq is required for the teleop ZMQ server.") from exc
 
         if self.args.visualize:
-            self.viewer = RobotMotionViewer(
-                robot_type=self.robot,
-                motion_fps=self.vis_fps,
-                transparent_robot=1,
-            )
+            print("[Warning] --visualize legacy native viewer is disabled; use --web-visualize for UFO teleop debug.")
 
         if self.args.web_visualize:
             web_xml = str(self.args.web_mujoco_xml or _default_web_mujoco_xml())
@@ -1328,13 +1093,18 @@ class LowLatencyTeleopPoseZMQServer:
         self.raw_recv_conn, self.raw_send_conn = self.mp_ctx.Pipe(duplex=False)
         self.result_recv_conn, self.result_send_conn = self.mp_ctx.Pipe(duplex=False)
         worker_config = {
-            "robot": self.robot,
-            "actual_human_height": float(self.args.actual_human_height),
-            "gmr_max_iter": int(self.gmr_max_iter),
+            "qpos_size": int(self.canonical_qpos_size),
+            "target_robot": self.target_robot,
+            "actual_human_height": self.actual_human_height,
+            "max_iter": int(self.retarget_max_iter),
             "send_human_motion": bool(self.args.visualize),
-            "min_link_height": self.min_link_height,
-            "min_link_height_align_strategy": self.min_link_height_align_strategy,
-            "min_link_height_bootstrap_frames": self.min_link_height_bootstrap_frames,
+            "enable_height_alignment": bool(self.teleop_config.height_alignment_enabled),
+            "height_alignment_xrobot_body_min_each_frame": bool(
+                self.teleop_config.height_alignment_xrobot_body_min_each_frame
+            ),
+            "height_alignment_target_z": float(self.teleop_config.height_alignment_target_z),
+            "height_bootstrap_frames": int(self.teleop_config.height_alignment_bootstrap_frames),
+            "height_alignment_foot_body_names": tuple(self.teleop_config.height_alignment_foot_body_names),
         }
         self.retarget_process = self.mp_ctx.Process(
             target=_retarget_worker_main,
@@ -1393,7 +1163,25 @@ class LowLatencyTeleopPoseZMQServer:
         if self.args.ctrl_pub_bind_addr:
             print(f"  ctrl_pub_bind_addr: {self.args.ctrl_pub_bind_addr}")
         print(f"  ctrl_fps: {self.ctrl_fps}")
-        print(f"  gmr_max_iter: {self.gmr_max_iter}")
+        print(f"  canonical_target_robot: {self.target_robot}")
+        print(f"  actual_human_height: {self.actual_human_height:.3f}")
+        print(f"  retarget_max_iter: {self.retarget_max_iter}")
+        print(f"  canonical_qpos_size: {self.canonical_qpos_size}")
+        print(f"  canonical_joint_order: {list(self.canonical_joint_names)}")
+        print(f"  ufo_output_joint_order: {list(self.ufo_output_joint_names)}")
+        if np.array_equal(self.joint_permutation, np.arange(len(self.joint_permutation))):
+            print("  joint_permutation: identity")
+        else:
+            print(f"  joint_permutation: {self.joint_permutation.tolist()}")
+        print(f"  calibration_button: {self.calibration_button}")
+        print(
+            "  height_alignment: "
+            f"enabled={self.teleop_config.height_alignment_enabled}, "
+            f"feet={list(self.teleop_config.height_alignment_foot_body_names)}, "
+            f"target_z={self.teleop_config.height_alignment_target_z}, "
+            f"bootstrap_frames={self.teleop_config.height_alignment_bootstrap_frames}"
+        )
+        print(f"  pico_policy_control: {'enabled legacy/debug compatibility mode' if self.args.ctrl_pub_bind_addr else 'disabled'}")
         print("  chunk_size: fixed to 1 frame per reply")
         print(f"  lookback_ms: {self.lookback_ns / 1e6:.3f}")
         print(f"  retarget_buffer_window_s: {self.retarget_buffer_window_ns / 1e9:.3f}")
@@ -1426,7 +1214,7 @@ class LowLatencyTeleopPoseZMQServer:
             name="teleop-control",
             daemon=True,
         )
-        if self.viewer is not None or self.web_viewer is not None:
+        if self.web_viewer is not None:
             self.visualization_thread = threading.Thread(
                 target=self._visualization_loop,
                 name="teleop-visualization",
@@ -1501,8 +1289,6 @@ class LowLatencyTeleopPoseZMQServer:
                     self.retarget_process.terminate()
                     self.retarget_process.join(timeout=1.0)
 
-            if self.viewer is not None:
-                self.viewer.close()
             if self.web_viewer is not None:
                 self.web_viewer.close()
             if self.req_sock is not None:
@@ -1528,14 +1314,14 @@ def parse_args() -> argparse.Namespace:
         default="unitree_g1",
         help="Robot key for defaults",
     )
-    parser.add_argument("--actual_human_height", type=float, default=1.6)
-    parser.add_argument("--vis_fps", type=int, default=10, help="Viewer update frequency")
+    parser.add_argument("--actual_human_height", type=float, default=1.75)
+    parser.add_argument("--vis_fps", type=int, default=5, help="Viewer update frequency")
     parser.add_argument("--ctrl_fps", type=int, default=50, help="Controller button publish frequency")
     parser.add_argument("--xr-poll-hz", type=float, default=50.0, help="XRobot SDK polling frequency when callback APIs are unavailable")
     parser.add_argument(
         "--lookback_ms",
         type=float,
-        default=15.0,
+        default=50.0,
         help="Sample reply frames at request_time - lookback_ms",
     )
     parser.add_argument(
@@ -1557,14 +1343,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--web-visualize", action="store_true")
     parser.add_argument("--web-port", type=int, default=8080)
     parser.add_argument("--web-mujoco-xml", type=str, default="")
-    parser.add_argument("--min_link_height", type=float, default=0.0)
+    parser.add_argument("--calibration-button", type=str, default=None)
+    parser.add_argument("--min_link_height", type=float, default=0.0, help=argparse.SUPPRESS)
     parser.add_argument(
         "--min_link_height_align_strategy",
         type=str,
         choices=["startup_fixed", "per_frame"],
         default="startup_fixed",
+        help=argparse.SUPPRESS,
     )
-    parser.add_argument("--min_link_height_bootstrap_frames", type=int, default=10)
+    parser.add_argument("--min_link_height_bootstrap_frames", type=int, default=10, help=argparse.SUPPRESS)
     parser.add_argument("--visualize", action="store_true")
     return parser.parse_args()
 

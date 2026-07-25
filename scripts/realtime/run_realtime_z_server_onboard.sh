@@ -79,6 +79,12 @@ print("realtime z deps ok")
 PY
   fail "selected Python failed realtime z dependency probe: ${Z_PY}"
 fi
+for arg in "$@"; do
+  if [[ "${arg}" == "-h" || "${arg}" == "--help" ]]; then
+    cd "${UFO_ROOT}"
+    exec "${Z_PY}" scripts/realtime/realtime_z_server.py "$@"
+  fi
+done
 if [[ ! -f "${BACKWARD_ONNX}" ]]; then
   fail "missing backward ONNX: ${BACKWARD_ONNX}"
 fi
@@ -106,7 +112,7 @@ cmd=(
   --fix-quat-continuity
   --angvel-delta-frame world
   --enable-pose-buffer
-  --pose-buffer-lookback-ms "${POSE_BUFFER_LOOKBACK_MS:-40}"
+  --pose-buffer-lookback-ms "${POSE_BUFFER_LOOKBACK_MS:-0}"
   --pose-buffer-window-ms "${POSE_BUFFER_WINDOW_MS:-500}"
   --max-retarget-age-ms "${MAX_RETARGET_AGE_MS:-200}"
   --max-z-delta "${MAX_Z_DELTA:-0.75}"
