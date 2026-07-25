@@ -1,123 +1,228 @@
 # Teleop Bridge Setup Guide
 
-This README is for a user who wants to run the live teleoperation bridge on their own Ubuntu machine.
+This guide covers the PICO/XRoboToolkit/GMR teleoperation bridge used by UFO-Deploy.
+It is written for two deployment modes:
 
-If you follow this file from top to bottom, you should end up with:
+- workstation teleop, where the PICO streams to an Ubuntu PC
+- G1 onboard teleop, where the PICO streams directly to the Unitree G1 onboard Jetson
 
-1. a working Python environment for the teleop bridge,
-2. GMR installed for online retargeting,
-3. XRoboToolkit PC service installed on the host machine,
-4. the XRoboToolkit Python binding installed with callback APIs or polling APIs,
-5. the PICO headset configured and connected,
-6. the teleop ZMQ bridge running and ready to feed UFO-Deploy's realtime `z` encoder.
+The PC-side teleop chain is already validated in UFO-Deploy. The onboard flow uses the
+same pose bridge, realtime `z` server, backward encoder, and UFO policy interfaces; only
+the teleop host moves from the workstation to the robot.
 
-## What this bridge does
+## What This Folder Owns
 
-The runtime in this folder does only three things:
+The scripts in this folder only do the PICO-to-G1-pose part of the stack:
 
-1. read live body and controller data from XRoboToolkit / PICO,
-2. retarget the incoming human motion to Unitree G1 with GMR,
-3. publish retargeted G1 pose frames over ZMQ so that `scripts/realtime/realtime_z_server.py` can request them and encode realtime latent `z`.
+1. read live body, headset, and controller data from XRoboToolkit,
+2. retarget the human motion to Unitree G1 with `general_motion_retargeting` (GMR),
+3. publish retargeted G1 pose frames over ZMQ for `scripts/realtime/realtime_z_server.py`.
 
-The included files are:
+They do not start the realtime latent `z` encoder and they do not start the UFO policy.
+The runtime split is:
+
+```text
+scripts/teleop/teleop_pose_50hz_onboard.sh:
+  PICO -> XRoboToolkit -> xrobotoolkit_sdk -> GMR -> ZMQ pose server
+
+scripts/realtime/realtime_z_server.py:
+  ZMQ pose -> backward_encoder.onnx -> latent z
+
+run_g1_teleop_policy_onboard.sh:
+  latent z -> UFO policy inference -> G1 command
+```
+
+Included files:
 
 - `xrobot_teleop_to_pose_zmq_server.py`
 - `default_mimic_obs.py`
 - `teleop_pose_50hz.sh`
 - `teleop_pose_50hz_onboard.sh`
+- `check_teleop_env.py`
 
-## Before you start
+## Runtime Modes
 
-Use Ubuntu 22.04 / 24.04 if possible.
+### Workstation Teleop
 
-You need:
+Use this mode for local teleop sim2sim and split workstation/robot debugging. The PICO
+connects to the PC, so the teleop host is the workstation.
 
-- this repository already checked out on your machine,
-- Conda installed,
-- a PICO headset with leg trackers,
-- XRoboToolkit client installed on the PICO,
-- XRoboToolkit PC service installed on the Ubuntu host,
-- motion trackers/controllers paired and calibrated on the PICO side.
+```text
+PICO
+ |
+ XRoboToolkit
+ |
+ PC
+ |
+ GMR
+ |
+ xrobot_teleop_to_pose_zmq_server.py
+ |
+ realtime_z_server.py
+ |
+ UFO policy
+```
 
-In the commands below, define one working directory for all external dependencies:
+Run the bridge with:
 
 ```bash
-export TELEOP_WORKSPACE=$HOME/teleop_ws
+cd "$UFO_ROOT"
+conda activate ufo-deploy
+scripts/teleop/teleop_pose_50hz.sh
+```
+
+### G1 Onboard Teleop
+
+Use this mode for direct PICO-to-robot teleop. The PICO connects to the G1 Jetson IP, so
+the teleop host moves from the PC to the G1 onboard computer.
+
+```text
+PICO
+ |
+ XRoboToolkit
+ |
+ G1 Jetson
+ |
+ XRoboToolkit headless service
+ |
+ xrobotoolkit_sdk
+ |
+ GMR
+ |
+ xrobot_teleop_to_pose_zmq_server.py
+ |
+ realtime_z_server.py
+ |
+ UFO policy
+```
+
+Run the pose bridge on the robot with:
+
+```bash
+cd /home/unitree/UFO-Deploy
+scripts/teleop/teleop_pose_50hz_onboard.sh
+```
+
+## Required Components
+
+Install these components on the machine that receives the PICO stream. For workstation
+teleop this is the Ubuntu PC. For onboard teleop this is the G1 Jetson.
+
+- XRoboToolkit PICO app, installed on the headset
+- XRoboToolkit PC Service on x86 Ubuntu, or XRoboToolkit headless service on G1 Jetson
+- `xrobotoolkit_sdk` Python binding
+- `general_motion_retargeting` (GMR)
+- `pyzmq`
+
+Important: `xrobotoolkit_sdk` is only the Python binding. It depends on the XRoboToolkit
+system service already running on the host. Installing the Python package alone does not
+start or replace the XRoboToolkit service.
+
+## Python Environment
+
+Create a Python 3.10 environment on the teleop host:
+
+```bash
+conda create -n ufo-teleop python=3.10 -y
+conda activate ufo-teleop
+pip install pyzmq
+```
+
+On the G1 Jetson you can also use a venv, for example:
+
+```bash
+python3 -m venv /home/unitree/ufo_teleop_venv
+source /home/unitree/ufo_teleop_venv/bin/activate
+pip install --upgrade pip
+pip install pyzmq
+```
+
+If the XRoboToolkit binding ships a native `.so`, make sure its directory is in
+`LD_LIBRARY_PATH` before importing `xrobotoolkit_sdk`.
+
+## Install GMR
+
+Install GMR into the same Python environment used by the teleop bridge:
+
+```bash
+export TELEOP_WORKSPACE=${TELEOP_WORKSPACE:-$HOME/teleop_ws}
 mkdir -p "$TELEOP_WORKSPACE"
-```
-
-## Step 1. Create the teleop Python environment
-
-Create a dedicated Python 3.10 environment for the teleop bridge.
-
-```bash
-conda create -n gmr python=3.10 -y
-conda activate gmr
-```
-
-This matches TWIST2 setup, where online teleoperation and GMR run in a Python 3.10 environment separate from the low-level deployment stack.
-
-## Step 2. Install host system dependencies
-
-Install the build tools and runtime packages needed by GMR and the XRoboToolkit binding.
-
-```bash
-sudo apt-get update
-sudo apt-get install -y \
-    build-essential \
-    cmake \
-    git \
-    python3-dev \
-    python3-pip \
-    libgl1 \
-    libegl1 \
-    libxrender1 \
-    libxext6
-```
-
-Then install Conda-side helper packages used by the original setup:
-
-```bash
-conda activate gmr
-conda install -c conda-forge libstdcxx-ng pybind11 -y
-```
-
-## Step 3. Install GMR
-
-Clone and install GMR into the same `gmr` environment.
-
-```bash
 cd "$TELEOP_WORKSPACE"
+
 git clone https://github.com/YanjieZe/GMR.git
 cd GMR
 pip install -e .
 ```
 
-The bridge in this folder also needs `pyzmq`, so install it explicitly:
+Verify:
 
 ```bash
-pip install pyzmq
+python -c "import general_motion_retargeting; print('GMR OK')"
 ```
 
-## Step 4. Install XRoboToolkit PC service on Ubuntu
+## Install XRoboToolkit Service
 
-According to the original TWIST2 instructions, you can either:
+### x86 Ubuntu Workstation
 
-- install the Ubuntu `.deb` package from the XRoboToolkit PC service release page
-    ```bash
-    cd "$TELEOP_WORKSPACE"
-    wget https://github.com/XR-Robotics/XRoboToolkit-PC-Service/releases/download/v1.0.0/XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb
-    sudo dpkg -i XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb
-    ```
-- build the PC service from [source](https://github.com/XR-Robotics/XRoboToolkit-PC-Service/releases).
+Install the XRoboToolkit PC Service on the workstation that the PICO connects to. A common
+path is the Ubuntu `.deb` package from the XRoboToolkit PC Service release page:
 
-After installation, start the PC service application from the Ubuntu application launcher before you start teleoperation.
+```bash
+cd "$TELEOP_WORKSPACE"
+wget https://github.com/XR-Robotics/XRoboToolkit-PC-Service/releases/download/v1.0.0/XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb
+sudo dpkg -i XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb
+```
 
-## Step 5. Build and install the XRoboToolkit Python binding
+Start the PC service from the Ubuntu application launcher, or with the service start
+command provided by your XRoboToolkit installation.
 
-The teleop bridge depends on the Python module `xrobotoolkit_sdk`. It uses callback APIs when they are available and falls back to polling APIs when running with a polling-only SDK.
+### G1 Jetson Arm64 Headless
 
-### 5.1 Clone the binding repository
+For onboard teleop, install the arm64/headless XRoboToolkit service on the G1 Jetson. The
+exact package path depends on the XRoboToolkit release you use; after installation the G1
+should have a headless service launcher such as:
+
+```text
+/opt/apps/roboticsservice/runService.sh
+```
+
+Start the service before launching the UFO teleop bridge:
+
+```bash
+bash /opt/apps/roboticsservice/runService.sh
+```
+
+Confirm that an XRoboToolkit/RoboticsService process is running:
+
+```bash
+pgrep -af 'RoboticsServiceProcess|roboticsservice|XRoboToolkit'
+```
+
+## Install And Prepare The PICO App
+
+Install the XRoboToolkit PICO-side app from:
+
+- `https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/releases/`
+
+Prepare the headset and trackers:
+
+1. Put on the motion trackers.
+2. Put the controllers on the wrists.
+3. Start VR on the headset.
+4. Calibrate the whole-body motion tracking.
+5. Open the XRoboToolkit / XRobot app on the headset.
+6. Connect the app to the teleop host IP.
+7. Start body data streaming.
+8. Start headset/controller pose streaming.
+
+Use the workstation IP for workstation teleop. Use the G1 Jetson IP for onboard teleop.
+The PICO and teleop host must be on a reachable network. If data does not arrive, check
+firewalls, VPN/TUN interfaces, proxy settings, and whether the PICO can route to the host
+IP entered in the app.
+
+## Install xrobotoolkit_sdk
+
+Build and install the Python binding in the same environment used by the bridge.
 
 ```bash
 cd "$TELEOP_WORKSPACE"
@@ -125,7 +230,7 @@ git clone https://github.com/Axellwppr/XRoboToolkit-PC-Service-Pybind
 cd XRoboToolkit-PC-Service-Pybind
 ```
 
-### 5.2 Build the underlying XRoboToolkit native SDK
+Build the native SDK used by the binding:
 
 ```bash
 mkdir -p tmp
@@ -136,34 +241,71 @@ bash build.sh
 cd ../../../..
 ```
 
-### 5.3 Copy the built headers and shared library into the pybind repo
-
-Run the following from inside `XRoboToolkit-PC-Service-Pybind`:
+Copy the headers and shared library into the pybind repository:
 
 ```bash
-mkdir -p lib
-mkdir -p include
+mkdir -p lib include
 cp tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/PXREARobotSDK.h include/
 cp -r tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/nlohmann include/nlohmann/
 cp tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/build/libPXREARobotSDK.so lib/
 ```
 
-### 5.4 Install the Python module
-
-Still inside `XRoboToolkit-PC-Service-Pybind`:
+Install:
 
 ```bash
-conda activate gmr
 pip uninstall -y xrobotoolkit_sdk
 python setup.py install
 ```
 
-## Step 6. Verify the Python environment
-
-Before touching the headset, verify that the required Python modules import correctly.
+For Jetson/headless installs, use the arm64 native library from the XRoboToolkit service
+release. If the library is placed outside the Python package, export its path, for example:
 
 ```bash
-conda activate gmr
+export LD_LIBRARY_PATH=/home/unitree/sim2real/external/XRoboToolkit-PC-Service-Pybind/lib/aarch64:$LD_LIBRARY_PATH
+```
+
+Remember that this step installs the Python binding only. The XRoboToolkit service must be
+installed and running separately.
+
+## Verify The Environment
+
+Run the automated preflight checker from the UFO-Deploy checkout:
+
+```bash
+cd "$UFO_ROOT"
+python scripts/teleop/check_teleop_env.py
+```
+
+Expected healthy preflight output includes lines like:
+
+```text
+[OK] GMR installed
+[OK] xrobotoolkit_sdk installed
+[OK] pyzmq installed
+[OK] XRoboToolkit service running
+[OK] port 28701 available
+[OK] port 28702 available
+[OK] port 28703 available
+[OK] port 28711 available
+```
+
+Before starting teleop, ports `28701`, `28702`, `28703`, and `28711` should normally be
+available. If a previous teleop or realtime `z` process is still running, the checker will
+report the occupied port so you can stop the stale process.
+
+After the teleop bridge and realtime `z` server are already running, use:
+
+```bash
+python scripts/teleop/check_teleop_env.py --mode running
+```
+
+That mode expects the ZMQ ports to be occupied by the running services.
+
+## Verify Python Imports
+
+The minimum import check is:
+
+```bash
 python - <<'PY'
 import general_motion_retargeting
 import xrobotoolkit_sdk
@@ -174,42 +316,27 @@ print("pyzmq: OK")
 PY
 ```
 
-If this fails, do not continue. Fix the environment first.
+If this fails, fix the Python environment before starting the PICO stream.
 
-## Step 7. Install and prepare the PICO side
+## Verify XR Data
 
-Install the PICO-side app from:
-
-- `https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/releases/`
-
-Then prepare the headset as follows:
-
-1. Put on the motion trackers.
-2. Put the controllers on the wrists.
-3. Start VR on the headset.
-4. Calibrate the whole-body motion tracking.
-5. Open the XRoboToolkit / XRobot app on the headset.
-6. Connect the app to the IP address of your Ubuntu host.
-7. Start streaming whole-body data.
-8. Start streaming controller data.
-
-The PC and the PICO headset must be able to reach each other over the network.
-
-In practice, that means:
-
-- they are on the same LAN, and
-- the PICO can route to the Ubuntu host IP you entered in the app.
-- Note: ensure the communication link from the PC to the PICO is stable and has minimal packet loss; otherwise motion jitter may occur.
-- Note: if you are using `iptables/nftables/ufw` on the Ubuntu host, make sure to allow incoming connections.
-- Note: if you are using `VPN/TUN` interface, stop the `VPN/TUN` while teleop, or make sure it is configured to allow the PICO to reach the host IP.
-- Note: if `http_proxy` and `https_proxy` environment variables are set on the Ubuntu host, make sure have `127.0.0.1` in the `no_proxy` variable, or unset the proxy variables while teleop.
-
-## Step 8. Verify that XR data is arriving
-
-Once the PC service is running and the PICO is connected, verify that the Python binding can see the stream.
+Start the XRoboToolkit service, connect the PICO app to the host IP, calibrate trackers,
+and start body/controller streaming. Then run:
 
 ```bash
-conda activate gmr
+python scripts/teleop/check_teleop_env.py --xr-data
+```
+
+The checker attempts to verify:
+
+- body data
+- headset pose
+- left controller pose
+- right controller pose
+
+You can also run the direct SDK check:
+
+```bash
 python - <<'PY'
 import xrobotoolkit_sdk as xrt
 
@@ -218,58 +345,112 @@ print("Body data available:", xrt.is_body_data_available())
 print("Headset pose:", xrt.get_headset_pose())
 print("Left controller pose:", xrt.get_left_controller_pose())
 print("Right controller pose:", xrt.get_right_controller_pose())
-xrt.close()
+if hasattr(xrt, "close"):
+    xrt.close()
 PY
 ```
 
-If body data is not available, the XRoboToolkit binding README suggests checking:
+If body data is not available, check that:
 
-1. the PICO headset is connected,
-2. the trackers are connected and calibrated,
-3. full body tracking is enabled on the PICO side client.
+- the PICO is connected to the correct host IP,
+- trackers/controllers are paired and calibrated,
+- full-body streaming is enabled in the PICO XRoboToolkit app,
+- firewalls, VPN/TUN interfaces, or proxy settings are not blocking the local connection.
 
-## Step 9. Run the teleop bridge
+## ZMQ Ports
 
-Once the environment and XR data stream are ready, start the ZMQ teleop bridge from this repository.
+UFO-Deploy uses these local ZMQ ports:
+
+| Port | Owner | Purpose |
+| --- | --- | --- |
+| 28701 | teleop bridge | pose request socket from `realtime_z_server.py` |
+| 28702 | teleop bridge | pose reply socket to `realtime_z_server.py` |
+| 28703 | teleop bridge | PICO button/control channel to `realtime_z_server.py` |
+| 28704 | teleop bridge | optional PICO button PUB channel to onboard policy |
+| 28711 | realtime `z` server | latent `z` PUB channel to policy |
+
+The preflight checker includes `28701`, `28702`, `28703`, and `28711` by default because
+they are required for the normal teleop-to-policy pipeline. The onboard teleop launcher
+also checks `28704` when the PICO policy-control PUB channel is enabled.
+
+## Run The Teleop Bridge
+
+### Workstation
 
 ```bash
-conda activate gmr
-cd <path-to-UFO-Deploy>/scripts/teleop
-./teleop_pose_50hz.sh
+cd "$UFO_ROOT"
+conda activate ufo-deploy
+scripts/teleop/teleop_pose_50hz.sh
 ```
 
-This starts the retargeting server used by UFO-Deploy:
+### G1 Onboard
 
-- request socket: `tcp://*:28701`
-- reply socket: `tcp://*:28702`
-- controller socket: `tcp://*:28703`
-- optional controller PUB socket: `tcp://*:28704`
-- control publish rate: `50 Hz`
+```bash
+cd /home/unitree/UFO-Deploy
+source /home/unitree/ufo_teleop_venv/bin/activate
+scripts/teleop/teleop_pose_50hz_onboard.sh
+```
 
-For the browser retarget viewer, pass `--web-visualize --web-port 8080` to `xrobot_teleop_to_pose_zmq_server.py` or use `WEB_VISUALIZE=1 scripts/teleop/teleop_pose_50hz_onboard.sh` on the robot.
+Useful onboard environment variables:
 
-Important: During the first few seconds after starting the script, remain in a stable standing posture. The script adjusts the z-axis offset based on foot height; if you are in another pose, the estimated z-offset may affect gait quality.
+```bash
+export UFO_ROOT=/home/unitree/UFO-Deploy
+export TELEOP_PY=/home/unitree/ufo_teleop_venv/bin/python
+export SIM2REAL_ROOT=/home/unitree/sim2real
+export WEB_VISUALIZE=1
+export WEB_PORT=8080
+```
 
-## Runtime workflow
+The onboard launcher automatically derives `UFO_ROOT` from its own path if `UFO_ROOT` is
+not set. It checks the Python executable, GMR, `xrobotoolkit_sdk`, XRoboToolkit service,
+and required local ZMQ ports before starting `xrobot_teleop_to_pose_zmq_server.py`.
 
-At runtime, the teleop bridge acts as a low-latency G1 pose supplier for `scripts/realtime/realtime_z_server.py`.
+During the first few seconds after starting the bridge, stand in a stable neutral posture.
+The bridge uses startup foot height to align the z-axis offset; starting from a crouched or
+moving pose can affect gait quality.
 
-The high-level flow is:
+## Complete Onboard Startup Order
 
-1. `realtime_z_server.py` requests the latest retargeted G1 pose at 50 Hz.
-2. This teleop bridge samples the latest XRoboToolkit body stream, retargets it to `unitree_g1` with GMR, and returns one retargeted pose frame.
-3. `realtime_z_server.py` runs MuJoCo FK and the exported `backward_encoder.onnx`.
-4. `realtime_z_server.py` publishes the resulting 256-D latent `z` on `tcp://*:28711`.
-5. The local sim policy or robot policy subscribes to that `z` stream through its tracking task config.
+Run these steps on the G1 Jetson:
 
-More concretely:
+1. Start XRoboToolkit headless service.
 
-- `realtime_z_server.py` is the active side for pose fetching. It requests the latest retargeted pose each control step.
-- The bridge exposes three ZMQ channels:
-  - request channel: receives pose requests from `realtime_z_server.py`
-  - reply channel: sends retargeted pose frames back
-  - control channel: publishes XR controller button state
-- The optional controller PUB channel is for direct Pico-to-policy control without consuming the realtime `z` server's controller channel.
-- The reply payload contains `root_pos`, `root_quat`, and `dof_pos` for each returned frame.
-- The realtime `z` server uses the controller channel to switch between follow and freeze modes.
-- The bridge keeps a short retarget history and samples with a small lookback window to reduce jitter.
+   ```bash
+   bash /opt/apps/roboticsservice/runService.sh
+   ```
+
+   This receives the PICO stream on the robot.
+
+2. Start the teleop pose bridge.
+
+   ```bash
+   cd /home/unitree/UFO-Deploy
+   scripts/teleop/teleop_pose_50hz_onboard.sh
+   ```
+
+   This converts PICO body/controller data into retargeted G1 poses on ZMQ ports
+   `28701`, `28702`, `28703`, and optionally `28704`.
+
+3. Start the realtime latent `z` server.
+
+   ```bash
+   cd /home/unitree/UFO-Deploy
+   scripts/realtime/run_realtime_z_server_onboard.sh
+   ```
+
+   This requests poses from the teleop bridge, runs `backward_encoder.onnx`, and publishes
+   latent `z` on port `28711`.
+
+4. Start the G1 teleop policy.
+
+   ```bash
+   cd /home/unitree/UFO-Deploy
+   source /home/unitree/ufo_deploy_venv/bin/activate
+   UFO_REAL_ROBOT_OK=1 VENV_PATH=/home/unitree/ufo_deploy_venv/bin/activate \
+     ./run_g1_teleop_policy_onboard.sh
+   ```
+
+   This subscribes to realtime `z` and runs UFO policy inference.
+
+Keep the robot on support for first bring-up and test the physical e-stop, wireless R2
+stop latch, stale-teleop watchdog, and PICO disconnect behavior before free walking.

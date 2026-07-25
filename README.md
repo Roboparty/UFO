@@ -51,6 +51,9 @@ Robot:
 - Unitree SDK2 Python binding, including `g1_interface`
 - CycloneDDS runtime
 - low-level network interface configured in `config/robot/g1_real.yaml`
+- XRoboToolkit headless service for onboard PICO teleop
+- GMR and `xrobotoolkit_sdk` in the onboard teleop Python environment
+- PICO headset with trackers/controllers for onboard teleop
 
 ## Clone And Install
 
@@ -213,6 +216,7 @@ rl_policy/ufo_policy.py
 sim_env/base_sim.py
 scripts/realtime/realtime_z_server.py
 scripts/realtime/run_realtime_z_server_onboard.sh
+scripts/teleop/check_teleop_env.py
 scripts/teleop/teleop_pose_50hz.sh
 scripts/teleop/teleop_pose_50hz_onboard.sh
 scripts/teleop/xrobot_teleop_to_pose_zmq_server.py
@@ -457,6 +461,92 @@ In the split workstation/robot flow, the robot-side `ctx_zmq_addr` should be:
 tcp://<WORKSTATION_IP>:28711
 ```
 
+## Onboard PICO Teleoperation
+
+Onboard PICO teleop is the direct PICO-to-G1 flow. The teleop host is the Unitree G1
+onboard Jetson, not the workstation. The PICO app connects to the robot IP, and the robot
+runs the XRoboToolkit headless service, GMR retargeting bridge, realtime `z` server, and
+UFO policy locally.
+
+Hardware:
+
+- Unitree G1 onboard Jetson
+- PICO headset
+- trackers/controllers paired and calibrated in the PICO app
+
+Software on the G1 Jetson:
+
+- XRoboToolkit headless service
+- `general_motion_retargeting` (GMR)
+- `xrobotoolkit_sdk` Python binding
+- UFO-Deploy runtime and released `model/g1_policy` artifact
+
+Flow:
+
+```text
+PICO
+ |
+ XRoboToolkit
+ |
+ GMR
+ |
+ xrobot_teleop_to_pose_zmq_server.py
+ |
+ realtime_z_server.py
+ |
+ backward_encoder.onnx
+ |
+ UFO policy
+```
+
+Before startup, follow [scripts/teleop/README.md](scripts/teleop/README.md) to install
+the XRoboToolkit headless service, GMR, and `xrobotoolkit_sdk`. `xrobotoolkit_sdk` is only
+the Python binding; the XRoboToolkit service must be installed and running separately.
+
+Step 1, start XRoboToolkit service:
+
+```bash
+bash /opt/apps/roboticsservice/runService.sh
+```
+
+This receives the PICO body, headset, and controller stream on the G1 Jetson.
+
+Step 2, start the teleop pose bridge:
+
+```bash
+cd /home/unitree/UFO-Deploy
+scripts/teleop/teleop_pose_50hz_onboard.sh
+```
+
+This runs `xrobot_teleop_to_pose_zmq_server.py`: PICO/XRoboToolkit data is retargeted
+with GMR and published as G1 poses on ZMQ ports `28701`, `28702`, `28703`, and optionally
+PICO policy-control PUB port `28704`. It does not start policy inference and it does not
+encode latent `z`.
+
+Step 3, start `scripts/realtime/realtime_z_server.py`:
+
+```bash
+cd /home/unitree/UFO-Deploy
+scripts/realtime/run_realtime_z_server_onboard.sh
+```
+
+The onboard wrapper launches `scripts/realtime/realtime_z_server.py` with onboard defaults.
+It requests poses from the teleop bridge, runs `backward_encoder.onnx`, and publishes
+realtime latent `z` on port `28711`.
+
+Step 4, start policy inference:
+
+```bash
+cd /home/unitree/UFO-Deploy
+source /home/unitree/ufo_deploy_venv/bin/activate
+UFO_REAL_ROBOT_OK=1 VENV_PATH=/home/unitree/ufo_deploy_venv/bin/activate \
+  ./run_g1_teleop_policy_onboard.sh
+```
+
+This subscribes to realtime latent `z` and runs UFO policy inference on the G1. Keep the
+robot on support for first bring-up, and test the physical e-stop, wireless R2 stop latch,
+and stale-teleop watchdog before free walking.
+
 ## 5. Teleop Sim2Real
 
 The recommended release path is 5A direct PICO-to-robot onboard teleop. PICO connects to the robot IP, and the robot runs the retarget server, realtime `z` server, and policy locally. Because the realtime `z` server and policy are both onboard, `config/exp/tracking/teleop.yaml` can keep `ctx_zmq_addr: tcp://127.0.0.1:28711`.
@@ -618,6 +708,7 @@ python -m py_compile \
   rl_policy/ufo_policy.py \
   rl_policy/observations/ufo_policy.py \
   scripts/realtime/realtime_z_server.py \
+  scripts/teleop/check_teleop_env.py \
   scripts/teleop/xrobot_teleop_to_pose_zmq_server.py \
   sim_env/base_sim.py \
   sim_env/utils/simulation_bridge.py \
@@ -629,6 +720,7 @@ python -m py_compile \
   tests/test_ufo_policy_safety.py \
   tests/test_realtime_z_server_safety.py
 
+bash -n scripts/teleop/teleop_pose_50hz_onboard.sh
 python tests/test_ufo_policy_safety.py
 python tests/test_realtime_z_server_safety.py
 
