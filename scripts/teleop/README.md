@@ -118,6 +118,11 @@ Important: `xrobotoolkit_sdk` is only the Python binding. It depends on the XRob
 system service already running on the host. Installing the Python package alone does not
 start or replace the XRoboToolkit service.
 
+The upstream teleop dependencies are pinned in
+[requirements-lock.md](requirements-lock.md). Use those commits for release deployments so
+GMR robot assets, XRoboToolkit SDK ABI, and `xrobotoolkit_sdk` APIs do not silently drift
+with upstream `main` or `master`.
+
 ## Python Environment
 
 Create a Python 3.10 environment on the teleop host:
@@ -155,6 +160,7 @@ cd "$TELEOP_WORKSPACE"
 
 git clone https://github.com/YanjieZe/GMR.git
 cd GMR
+git checkout bb1bbe40774794fceb2a7c579a3464a28e68c844
 pip install -e .
 ```
 
@@ -226,7 +232,11 @@ sudo apt-get update
 sudo apt-get install -y build-essential cmake git pkg-config
 git clone --branch main --single-branch https://github.com/XR-Robotics/XRoboToolkit-PC-Service.git
 cd XRoboToolkit-PC-Service
-# Edit RoboticsService/qt-gcc_aarch64.sh so QT_GCC_ARM64 and QT6_TOOLS match the G1.
+git checkout 85bac4dbc1fd5cef42c74a160d9c30aa3491f122
+# Edit RoboticsService/qt-gcc_aarch64.sh so QT_GCC_ARM64, QT6_TOOLS, and every
+# hard-coded /media/bytedance/... PATH entry point to the G1 Qt/toolchain install.
+# The upstream script checks for Qt 6.6.2; confirm the Qt version and toolchain are
+# compatible with the target Unitree Ubuntu image before building.
 bash RoboticsService/qt-gcc_aarch64.sh
 ```
 
@@ -295,14 +305,22 @@ sudo apt-get install -y \
 
 cd "$TELEOP_WORKSPACE"
 git clone https://github.com/Axellwppr/XRoboToolkit-PC-Service-Pybind
+cd XRoboToolkit-PC-Service-Pybind
+git checkout a7ae949849ef335f0fa7bbef1e741c5b35e2124e
 ```
+
+On Ubuntu 20.04, `python3-dev` follows the system Python version. If your target teleop
+Python is a non-Conda Python 3.10, install the matching headers as well, for example
+`python3.10-dev`. Conda Python environments normally include matching headers.
 
 Build the native SDK used by the binding:
 
 ```bash
 cd "$TELEOP_WORKSPACE"
 git clone --branch main --single-branch https://github.com/XR-Robotics/XRoboToolkit-PC-Service.git
-cd XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK
+cd XRoboToolkit-PC-Service
+git checkout 85bac4dbc1fd5cef42c74a160d9c30aa3491f122
+cd RoboticsService/PXREARobotSDK
 bash build.sh
 ```
 
@@ -559,11 +577,13 @@ Run these steps on the G1 Jetson:
 
    ```bash
    cd /home/unitree/UFO-Deploy
-   scripts/realtime/run_realtime_z_server_onboard.sh
+   Z_PY=/home/unitree/ufo_deploy_venv/bin/python \
+     scripts/realtime/run_realtime_z_server_onboard.sh
    ```
 
    This requests poses from the teleop bridge, runs `backward_encoder.onnx`, and publishes
-   latent `z` on port `28711`.
+   latent `z` on port `28711`. The wrapper verifies that the selected deployment Python
+   can import `numpy`, `mujoco`, `onnxruntime`, and `zmq` before starting.
 
 4. Start the G1 teleop policy.
 

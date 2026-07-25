@@ -544,11 +544,13 @@ Step 3, start `scripts/realtime/realtime_z_server.py`:
 
 ```bash
 cd /home/unitree/UFO-Deploy
-scripts/realtime/run_realtime_z_server_onboard.sh
+Z_PY=/home/unitree/ufo_deploy_venv/bin/python \
+  scripts/realtime/run_realtime_z_server_onboard.sh
 ```
 
 The onboard wrapper launches `scripts/realtime/realtime_z_server.py` with onboard defaults.
-It requests poses from the teleop bridge, runs `backward_encoder.onnx`, and publishes
+It verifies that the selected Python can import `numpy`, `mujoco`, `onnxruntime`, and
+`zmq`, requests poses from the teleop bridge, runs `backward_encoder.onnx`, and publishes
 realtime latent `z` on port `28711`.
 
 Step 4, start policy inference:
@@ -611,7 +613,8 @@ Robot terminal B, realtime `z` publisher:
 
 ```bash
 cd /home/unitree/UFO-Deploy
-scripts/realtime/run_realtime_z_server_onboard.sh
+Z_PY=/home/unitree/ufo_deploy_venv/bin/python \
+  scripts/realtime/run_realtime_z_server_onboard.sh
 ```
 
 Robot terminal C, real policy controlled by Pico buttons:

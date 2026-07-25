@@ -1,28 +1,95 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-UFO_ROOT="${UFO_ROOT:-/home/unitree/UFO-Deploy}"
-Z_PY="${Z_PY:-python}"
+log() {
+  echo "[run_realtime_z_server_onboard] $*"
+}
+
+fail() {
+  echo "[run_realtime_z_server_onboard] ERROR: $*" >&2
+  exit 1
+}
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_UFO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+
+UFO_ROOT="${UFO_ROOT:-${DEFAULT_UFO_ROOT}}"
+Z_PY="${Z_PY:-}"
 MODEL_DIR="${MODEL_DIR:-${UFO_ROOT}/model/g1_policy}"
 BACKWARD_ONNX="${BACKWARD_ONNX:-${MODEL_DIR}/exported/backward_encoder.onnx}"
 MUJOCO_XML="${MUJOCO_XML:-${UFO_ROOT}/data/robots/g1/scene_29dof_freebase.xml}"
 DEVICE="${DEVICE:-cpu}"
 ENABLE_PICO_Z_CONTROL="${ENABLE_PICO_Z_CONTROL:-1}"
 
+[[ -d "${UFO_ROOT}" ]] || fail "UFO_ROOT does not exist: ${UFO_ROOT}"
+[[ -f "${UFO_ROOT}/scripts/realtime/realtime_z_server.py" ]] || \
+  fail "missing realtime z server under UFO_ROOT: ${UFO_ROOT}"
+
+if [[ -n "${PYTHONPATH:-}" ]]; then
+  export PYTHONPATH="${UFO_ROOT}:${PYTHONPATH}"
+else
+  export PYTHONPATH="${UFO_ROOT}"
+fi
+
+python_has_realtime_deps() {
+  local python_bin="$1"
+
+  if [[ ! -x "${python_bin}" ]] && ! command -v "${python_bin}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  "${python_bin}" - <<'PY' >/dev/null 2>&1
+import mujoco
+import numpy
+import onnxruntime
+import zmq
+PY
+}
+
+if [[ -z "${Z_PY}" ]]; then
+  for candidate in \
+    "/home/unitree/ufo_deploy_venv/bin/python" \
+    "${UFO_ROOT}/.venv/bin/python" \
+    "${UFO_ROOT}/venv/bin/python" \
+    "/home/unitree/miniconda3/envs/ufo-deploy/bin/python"; do
+    if [[ ! -x "${candidate}" ]]; then
+      continue
+    fi
+    if python_has_realtime_deps "${candidate}"; then
+      Z_PY="${candidate}"
+      break
+    fi
+    log "skipping Python without realtime z deps: ${candidate}"
+  done
+fi
+
+if [[ -z "${Z_PY}" ]]; then
+  fail "no valid deployment Python found. Create /home/unitree/ufo_deploy_venv, ${UFO_ROOT}/.venv, or set Z_PY=/path/to/python."
+fi
 if ! command -v "${Z_PY}" >/dev/null 2>&1 && [[ ! -x "${Z_PY}" ]]; then
-  echo "[run_realtime_z_server_onboard] python not found: ${Z_PY}" >&2
-  exit 1
+  fail "python not found or not executable: ${Z_PY}"
+fi
+if ! python_has_realtime_deps "${Z_PY}"; then
+  "${Z_PY}" - <<'PY' || true
+import mujoco
+import numpy
+import onnxruntime
+import zmq
+print("realtime z deps ok")
+PY
+  fail "selected Python failed realtime z dependency probe: ${Z_PY}"
 fi
 if [[ ! -f "${BACKWARD_ONNX}" ]]; then
-  echo "[run_realtime_z_server_onboard] missing backward ONNX: ${BACKWARD_ONNX}" >&2
-  exit 1
+  fail "missing backward ONNX: ${BACKWARD_ONNX}"
 fi
 if [[ ! -f "${MUJOCO_XML}" ]]; then
-  echo "[run_realtime_z_server_onboard] missing MuJoCo XML: ${MUJOCO_XML}" >&2
-  exit 1
+  fail "missing MuJoCo XML: ${MUJOCO_XML}"
 fi
 
 cd "${UFO_ROOT}"
+
+log "repo: ${UFO_ROOT}"
+log "python: ${Z_PY}"
 
 cmd=(
   "${Z_PY}" scripts/realtime/realtime_z_server.py
