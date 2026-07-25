@@ -306,6 +306,11 @@ Expected healthy preflight output includes lines like:
 
 ```text
 [OK] GMR installed
+[OK] GMR robot registered: unitree_g1
+[OK] GMR robot XML exists: ...
+[OK] GMR robot XML loads: unitree_g1
+[OK] GMR IK config exists: xrobot -> unitree_g1: ...
+[OK] GMR IK config valid: xrobot -> unitree_g1
 [OK] xrobotoolkit_sdk installed
 [OK] pyzmq installed
 [OK] XRoboToolkit service running
@@ -317,6 +322,12 @@ Expected healthy preflight output includes lines like:
 Before starting the teleop bridge, ports `28701`, `28702`, and `28703` should normally be
 available. If a previous teleop process is still running, the checker will report the
 occupied port so you can stop the stale process.
+
+The GMR check is more than an import check. By default it verifies that the installed GMR
+package has the `unitree_g1` robot XML, that the XML can be loaded by MuJoCo, and that the
+`xrobot -> unitree_g1` IK config JSON exists and contains the required retargeting keys.
+This catches incomplete GMR installs before `xrobot_teleop_to_pose_zmq_server.py` starts
+its retarget worker.
 
 To check the realtime `z` server port separately, use the realtime profile:
 

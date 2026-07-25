@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import errno
 import importlib
+import json
 import os
 import socket
 import sys
@@ -21,6 +22,8 @@ PORT_PROFILES = {
     "realtime": REALTIME_PORTS,
     "all": TELEOP_PORTS + REALTIME_PORTS,
 }
+DEFAULT_GMR_SRC_HUMAN = "xrobot"
+DEFAULT_GMR_ROBOT = "unitree_g1"
 DEFAULT_SERVICE_PATTERNS = (
     "RoboticsServiceProcess",
     "roboticsservice",
@@ -105,6 +108,80 @@ def _check_xrobotoolkit_api(xrt: ModuleType, reporter: Reporter) -> None:
             "xrobotoolkit_sdk has neither callback nor polling API "
             f"(callback missing: {missing_callback}; polling missing: {missing_polling})"
         )
+
+
+def _check_gmr_robot_support(
+    src_human: str,
+    robot: str,
+    reporter: Reporter,
+) -> None:
+    try:
+        params = importlib.import_module("general_motion_retargeting.params")
+    except Exception as exc:
+        reporter.fail(f"GMR params unavailable: {exc.__class__.__name__}: {exc}")
+        return
+
+    robot_xml_dict = getattr(params, "ROBOT_XML_DICT", {})
+    ik_config_dict = getattr(params, "IK_CONFIG_DICT", {})
+
+    if robot not in robot_xml_dict:
+        reporter.fail(f"GMR robot not registered: {robot}")
+        return
+
+    robot_xml = Path(robot_xml_dict[robot])
+    reporter.ok(f"GMR robot registered: {robot}")
+    if robot_xml.is_file():
+        reporter.ok(f"GMR robot XML exists: {robot_xml}")
+    else:
+        reporter.fail(f"GMR robot XML missing: {robot_xml}")
+        return
+
+    try:
+        mujoco = importlib.import_module("mujoco")
+        mujoco.MjModel.from_xml_path(str(robot_xml))
+    except Exception as exc:
+        reporter.fail(f"GMR robot XML failed to load: {exc.__class__.__name__}: {exc}")
+    else:
+        reporter.ok(f"GMR robot XML loads: {robot}")
+
+    src_configs = ik_config_dict.get(src_human)
+    if not isinstance(src_configs, dict):
+        reporter.fail(f"GMR source human not registered: {src_human}")
+        return
+
+    ik_config_path = src_configs.get(robot)
+    if ik_config_path is None:
+        reporter.fail(f"GMR IK config missing for {src_human} -> {robot}")
+        return
+
+    ik_config_path = Path(ik_config_path)
+    if ik_config_path.is_file():
+        reporter.ok(f"GMR IK config exists: {src_human} -> {robot}: {ik_config_path}")
+    else:
+        reporter.fail(f"GMR IK config file missing: {ik_config_path}")
+        return
+
+    try:
+        with ik_config_path.open("r", encoding="utf-8") as f:
+            ik_config = json.load(f)
+    except Exception as exc:
+        reporter.fail(f"GMR IK config invalid JSON: {exc.__class__.__name__}: {exc}")
+        return
+
+    required_keys = (
+        "human_height_assumption",
+        "human_scale_table",
+        "ik_match_table1",
+        "ik_match_table2",
+        "human_root_name",
+        "robot_root_name",
+        "ground_height",
+    )
+    missing_keys = [key for key in required_keys if key not in ik_config]
+    if missing_keys:
+        reporter.fail(f"GMR IK config missing keys: {', '.join(missing_keys)}")
+    else:
+        reporter.ok(f"GMR IK config valid: {src_human} -> {robot}")
 
 
 def _read_cmdline(pid_dir: Path) -> str:
@@ -296,6 +373,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="0.0.0.0", help="bind host used for port checks")
     parser.add_argument("--skip-service", action="store_true", help="skip XRoboToolkit process check")
     parser.add_argument("--skip-ports", action="store_true", help="skip ZMQ port checks")
+    parser.add_argument("--skip-gmr-robot", action="store_true", help="skip GMR unitree_g1 asset/config checks")
+    parser.add_argument("--gmr-src-human", default=DEFAULT_GMR_SRC_HUMAN, help="GMR source human key to check")
+    parser.add_argument("--gmr-robot", default=DEFAULT_GMR_ROBOT, help="GMR target robot key to check")
     parser.add_argument("--xr-data", action="store_true", help="also query live XR body/headset/controller data")
     parser.add_argument(
         "--service-pattern",
@@ -318,6 +398,9 @@ def main() -> int:
 
     if xrt is not None:
         _check_xrobotoolkit_api(xrt, reporter)
+
+    if not args.skip_gmr_robot:
+        _check_gmr_robot_support(args.gmr_src_human, args.gmr_robot, reporter)
 
     if not args.skip_service:
         _check_service(_parse_patterns(args.service_pattern), reporter)
