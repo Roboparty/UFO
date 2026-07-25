@@ -17,7 +17,7 @@ UFO_ROOT="${UFO_ROOT:-${DEFAULT_UFO_ROOT}}"
 TELEOP_PY="${TELEOP_PY:-}"
 TELEOP_ALLOW_SYSTEM_PY="${TELEOP_ALLOW_SYSTEM_PY:-0}"
 START_XROBOT_SERVICE="${START_XROBOT_SERVICE:-0}"
-WEB_VISUALIZE="${WEB_VISUALIZE:-1}"
+WEB_VISUALIZE="${WEB_VISUALIZE:-0}"
 WEB_PORT="${WEB_PORT:-8080}"
 WEB_MUJOCO_XML="${WEB_MUJOCO_XML:-${UFO_ROOT}/data/robots/g1/scene_29dof_freebase.xml}"
 CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-tcp://*:28704}"
@@ -25,6 +25,31 @@ CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-tcp://*:28704}"
 [[ -d "${UFO_ROOT}" ]] || fail "UFO_ROOT does not exist: ${UFO_ROOT}"
 [[ -f "${UFO_ROOT}/scripts/teleop/xrobot_teleop_to_pose_zmq_server.py" ]] || \
   fail "missing teleop server under UFO_ROOT: ${UFO_ROOT}"
+
+ld_parts=()
+for candidate in \
+  "${UFO_ROOT}/external/XRoboToolkit-PC-Service-Pybind/lib/aarch64" \
+  "${UFO_ROOT}/external/XRoboToolkit-PC-Service-Pybind/lib"; do
+  [[ -d "${candidate}" ]] && ld_parts+=("${candidate}")
+done
+
+if (( ${#ld_parts[@]} > 0 )); then
+  export LD_LIBRARY_PATH="$(IFS=:; echo "${ld_parts[*]}"):${LD_LIBRARY_PATH:-}"
+fi
+export PYTHONPATH="${UFO_ROOT}/scripts/teleop:${PYTHONPATH:-}"
+
+python_has_teleop_deps() {
+  local python_bin="$1"
+
+  if [[ ! -x "${python_bin}" ]] && ! command -v "${python_bin}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  "${python_bin}" "${UFO_ROOT}/scripts/teleop/check_teleop_env.py" \
+    --skip-service \
+    --skip-ports \
+    >/dev/null 2>&1
+}
 
 if [[ -z "${TELEOP_PY}" ]]; then
   for candidate in \
@@ -34,18 +59,22 @@ if [[ -z "${TELEOP_PY}" ]]; then
     "/home/unitree/ufo_deploy_venv/bin/python" \
     "/home/unitree/miniconda3/envs/ufo-teleop/bin/python" \
     "/home/unitree/miniconda3/envs/ufo-deploy/bin/python"; do
-    if [[ -x "${candidate}" ]]; then
+    if [[ ! -x "${candidate}" ]]; then
+      continue
+    fi
+    if python_has_teleop_deps "${candidate}"; then
       TELEOP_PY="${candidate}"
       break
     fi
+    log "skipping Python without onboard teleop deps: ${candidate}"
   done
 fi
 
 if [[ -z "${TELEOP_PY}" ]]; then
   if [[ "${TELEOP_ALLOW_SYSTEM_PY}" == "1" ]]; then
-    if command -v python3 >/dev/null 2>&1; then
+    if command -v python3 >/dev/null 2>&1 && python_has_teleop_deps python3; then
       TELEOP_PY="python3"
-    elif command -v python >/dev/null 2>&1; then
+    elif command -v python >/dev/null 2>&1 && python_has_teleop_deps python; then
       TELEOP_PY="python"
     fi
   fi
@@ -59,17 +88,13 @@ if [[ ! -x "${TELEOP_PY}" ]] && ! command -v "${TELEOP_PY}" >/dev/null 2>&1; the
   fail "python not found or not executable: ${TELEOP_PY}"
 fi
 
-ld_parts=()
-for candidate in \
-  "${UFO_ROOT}/external/XRoboToolkit-PC-Service-Pybind/lib/aarch64" \
-  "${UFO_ROOT}/external/XRoboToolkit-PC-Service-Pybind/lib"; do
-  [[ -d "${candidate}" ]] && ld_parts+=("${candidate}")
-done
-
-if (( ${#ld_parts[@]} > 0 )); then
-  export LD_LIBRARY_PATH="$(IFS=:; echo "${ld_parts[*]}"):${LD_LIBRARY_PATH:-}"
+if ! python_has_teleop_deps "${TELEOP_PY}"; then
+  "${TELEOP_PY}" "${UFO_ROOT}/scripts/teleop/check_teleop_env.py" \
+    --skip-service \
+    --skip-ports \
+    || true
+  fail "selected Python failed onboard teleop dependency probe: ${TELEOP_PY}"
 fi
-export PYTHONPATH="${UFO_ROOT}/scripts/teleop:${PYTHONPATH:-}"
 
 service_pattern='RoboticsServiceProcess|roboticsservice|XRoboToolkit'
 if ! pgrep -f "${service_pattern}" >/dev/null 2>&1; then

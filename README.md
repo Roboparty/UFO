@@ -79,7 +79,9 @@ Check the base Python dependencies:
 python -c "import mujoco, onnxruntime, zmq, yaml, numpy; print('base deps ok')"
 ```
 
-For the teleop environment, PICO/XRobot setup, and online GMR retargeting checks, follow [scripts/teleop/README.md](scripts/teleop/README.md).
+Use this `ufo-deploy` environment for MuJoCo, realtime `z`, and policy inference. Use a
+separate `ufo-teleop` environment for the PICO/GMR bridge; for that environment, PICO/XRobot
+setup, and online GMR retargeting checks, follow [scripts/teleop/README.md](scripts/teleop/README.md).
 
 ## Model Files
 
@@ -291,7 +293,7 @@ Terminal B, PICO/GMR retargeting server:
 
 ```bash
 cd "$UFO_ROOT"
-conda activate ufo-deploy
+conda activate ufo-teleop
 scripts/teleop/teleop_pose_50hz.sh
 ```
 
@@ -531,6 +533,13 @@ It also does not auto-start the XRoboToolkit service by default; use
 `START_XROBOT_SERVICE=1 scripts/teleop/teleop_pose_50hz_onboard.sh` only after the
 installed headless service has been verified.
 
+The onboard web viewer is optional and is off by default so port `8080` cannot block the
+core PICO -> GMR -> ZMQ path. Enable it only for debugging:
+
+```bash
+WEB_VISUALIZE=1 scripts/teleop/teleop_pose_50hz_onboard.sh
+```
+
 Step 3, start `scripts/realtime/realtime_z_server.py`:
 
 ```bash
@@ -575,14 +584,21 @@ ctx_norm_ref: 16.0
 ctx_zmq_timeout_ms: 200
 ```
 
-Robot terminal A, PICO/GMR retargeting with browser viewer and Pico button PUB:
+Robot terminal A, PICO/GMR retargeting with Pico button PUB:
 
 ```bash
 cd /home/unitree/UFO-Deploy
 scripts/teleop/teleop_pose_50hz_onboard.sh
 ```
 
-Open the viewer from another machine on the same network:
+Optional viewer debug session:
+
+```bash
+cd /home/unitree/UFO-Deploy
+WEB_VISUALIZE=1 scripts/teleop/teleop_pose_50hz_onboard.sh
+```
+
+When viewer debug is enabled, open it from another machine on the same network:
 
 ```text
 http://<ROBOT_IP>:8080
@@ -646,7 +662,7 @@ Workstation terminal A, PICO/GMR retargeting:
 
 ```bash
 cd "$UFO_ROOT"
-conda activate ufo-deploy
+conda activate ufo-teleop
 scripts/teleop/teleop_pose_50hz.sh
 ```
 

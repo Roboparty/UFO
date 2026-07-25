@@ -67,7 +67,7 @@ Run the bridge with:
 
 ```bash
 cd "$UFO_ROOT"
-conda activate ufo-deploy
+conda activate ufo-teleop
 scripts/teleop/teleop_pose_50hz.sh
 ```
 
@@ -128,6 +128,10 @@ conda activate ufo-teleop
 pip install pyzmq
 ```
 
+Use this `ufo-teleop` environment for `scripts/teleop/teleop_pose_50hz.sh` and the onboard
+teleop bridge. Keep the main `ufo-deploy` environment for MuJoCo, realtime `z`, and policy
+inference.
+
 On the G1 Jetson you can also use a venv, for example:
 
 ```bash
@@ -179,8 +183,17 @@ command provided by your XRoboToolkit installation.
 ### G1 Jetson Arm64 Headless
 
 For onboard teleop, install the arm64/headless XRoboToolkit service on the G1 Jetson. The
-exact package path depends on the XRoboToolkit release you use; after installation the G1
-should have a headless service launcher such as:
+commands below use the official XR-Robotics v1.0.0 release asset:
+
+```bash
+cd "$TELEOP_WORKSPACE"
+wget -O XRoboToolkit-PC-Service-headless_1.0.0.0_arm64.deb \
+  https://github.com/XR-Robotics/XRoboToolkit-PC-Service/releases/download/v1.0.0/XRoboToolkit-PC-Service-headless_1.0.0.0_arm64.deb
+echo "532c605dfa1a02b05b7c285b856c91771c78623cded30ef5b16ea371de49ed5f  XRoboToolkit-PC-Service-headless_1.0.0.0_arm64.deb" | sha256sum -c -
+sudo dpkg -i XRoboToolkit-PC-Service-headless_1.0.0.0_arm64.deb
+```
+
+After installation the G1 should have this headless service launcher:
 
 ```text
 /opt/apps/roboticsservice/runService.sh
@@ -197,6 +210,28 @@ Confirm that an XRoboToolkit/RoboticsService process is running:
 ```bash
 pgrep -af 'RoboticsServiceProcess|roboticsservice|XRoboToolkit'
 ```
+
+Compatibility note: this package is an upstream prebuilt binary. UFO-Deploy cannot
+guarantee that it is compatible with every Unitree Jetson Ubuntu image. If installation or
+startup fails with `GLIBC`, `GLIBCXX`, Qt, or QML library errors, do not upgrade the
+robot's system libc/libstdc++ to force compatibility. Use a service release built for the
+robot OS, or build XRoboToolkit-PC-Service on the target system or in a container matching
+the target Ubuntu image.
+
+Upstream source-build entry point for arm64 is `RoboticsService/qt-gcc_aarch64.sh`, which
+requires a matching Qt installation path before running:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake git pkg-config
+git clone --branch main --single-branch https://github.com/XR-Robotics/XRoboToolkit-PC-Service.git
+cd XRoboToolkit-PC-Service
+# Edit RoboticsService/qt-gcc_aarch64.sh so QT_GCC_ARM64 and QT6_TOOLS match the G1.
+bash RoboticsService/qt-gcc_aarch64.sh
+```
+
+Package the resulting arm64 build with the upstream `RoboticsService/Package/debPackAArch64`
+scripts if you need an installable `.deb`.
 
 ## Install And Prepare The PICO App
 
@@ -246,48 +281,49 @@ in the XRoboToolkit PICO app before starting body/controller streaming.
 
 ## Install xrobotoolkit_sdk
 
-Build and install the Python binding in the same environment used by the bridge.
+Build and install the Python binding in the same environment used by the bridge. Install
+the system build dependencies first:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential \
+  cmake \
+  git \
+  python3-dev \
+  pkg-config
+
 cd "$TELEOP_WORKSPACE"
 git clone https://github.com/Axellwppr/XRoboToolkit-PC-Service-Pybind
-cd XRoboToolkit-PC-Service-Pybind
 ```
 
 Build the native SDK used by the binding:
 
 ```bash
-mkdir -p tmp
-cd tmp
-git clone https://github.com/XR-Robotics/XRoboToolkit-PC-Service.git
+cd "$TELEOP_WORKSPACE"
+git clone --branch main --single-branch https://github.com/XR-Robotics/XRoboToolkit-PC-Service.git
 cd XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK
 bash build.sh
-cd ../../../..
 ```
 
-Copy the headers and shared library into the pybind repository:
+Install the Python binding:
 
 ```bash
-mkdir -p lib include
-cp tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/PXREARobotSDK.h include/
-cp -r tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/nlohmann include/nlohmann/
-cp tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/build/libPXREARobotSDK.so lib/
+cd "$TELEOP_WORKSPACE/XRoboToolkit-PC-Service-Pybind"
+python -m pip uninstall -y xrobotoolkit_sdk
+python -m pip install .
 ```
 
-Install:
+`XRoboToolkit-PC-Service-Pybind` declares `pybind11` in `pyproject.toml`, so modern pip
+installs the build dependency automatically. Do not invoke `setup.py` directly for new
+environments.
+
+If the XRoboToolkit-PC-Service source checkout is not next to the pybind repository, set
+`PXREA_SDK_ROOT` explicitly:
 
 ```bash
-pip uninstall -y xrobotoolkit_sdk
-python setup.py install
-```
-
-For Jetson/headless installs, use the arm64 native library from the XRoboToolkit service
-release. Prefer keeping it under the UFO checkout, for example:
-
-```bash
-mkdir -p /home/unitree/UFO-Deploy/external/XRoboToolkit-PC-Service-Pybind/lib/aarch64
-# copy libPXREARobotSDK.so into that directory
-export LD_LIBRARY_PATH=/home/unitree/UFO-Deploy/external/XRoboToolkit-PC-Service-Pybind/lib/aarch64:$LD_LIBRARY_PATH
+export PXREA_SDK_ROOT=/abs/path/to/XRoboToolkit-PC-Service
+python -m pip install .
 ```
 
 Remember that this step installs the Python binding only. The XRoboToolkit service must be
@@ -425,7 +461,7 @@ when the PICO policy-control PUB channel is enabled.
 
 ```bash
 cd "$UFO_ROOT"
-conda activate ufo-deploy
+conda activate ufo-teleop
 scripts/teleop/teleop_pose_50hz.sh
 ```
 
@@ -442,13 +478,19 @@ Useful onboard environment variables:
 ```bash
 export UFO_ROOT=/home/unitree/UFO-Deploy
 export TELEOP_PY=/home/unitree/ufo_teleop_venv/bin/python
-export WEB_VISUALIZE=1
+export WEB_VISUALIZE=0
 export WEB_PORT=8080
 ```
 
 The onboard launcher automatically derives `UFO_ROOT` from its own path if `UFO_ROOT` is
 not set. It checks the Python executable, GMR, `xrobotoolkit_sdk`, XRoboToolkit service,
 and required local ZMQ ports before starting `xrobot_teleop_to_pose_zmq_server.py`.
+The web viewer is off by default; enable it only for debugging:
+
+```bash
+WEB_VISUALIZE=1 scripts/teleop/teleop_pose_50hz_onboard.sh
+```
+
 It does not auto-start the XRoboToolkit service by default. Start the service manually
 first so version, library, and runtime failures are visible before real-robot bring-up.
 If you have already verified the installed service and want the launcher to start it for a
@@ -458,7 +500,7 @@ debug session, run:
 START_XROBOT_SERVICE=1 scripts/teleop/teleop_pose_50hz_onboard.sh
 ```
 
-It searches UFO-specific environments first:
+It probes UFO-specific environments in this order:
 
 ```text
 ${UFO_ROOT}/.venv/bin/python
@@ -469,10 +511,17 @@ ${UFO_ROOT}/venv/bin/python
 /home/unitree/miniconda3/envs/ufo-deploy/bin/python
 ```
 
-If none of those exists, set `TELEOP_PY` explicitly. The launcher refuses to fall back to
-system `python3` by default because the Jetson system Python usually does not contain GMR,
-`xrobotoolkit_sdk`, `torch`, and `numpy`. Set `TELEOP_ALLOW_SYSTEM_PY=1` only for manual
-debugging.
+The launcher probes these candidates in order with
+`check_teleop_env.py --skip-service --skip-ports`. It selects the first Python that can
+import `general_motion_retargeting`, `xrobotoolkit_sdk`, and `zmq`, has a compatible
+`xrobotoolkit_sdk` API, and includes the GMR `xrobot -> unitree_g1` assets. A Python
+executable that exists but cannot run the teleop bridge is skipped so a later valid teleop
+environment can be used.
+
+If none of those candidates passes, set `TELEOP_PY` explicitly. The launcher refuses to
+fall back to system `python3` by default because the Jetson system Python usually does not
+contain GMR, `xrobotoolkit_sdk`, `torch`, and `numpy`. Set `TELEOP_ALLOW_SYSTEM_PY=1` only
+for manual debugging; even with this flag, system Python must pass the same import probe.
 
 During the first few seconds after starting the bridge, stand in a stable neutral posture.
 The bridge uses startup foot height to align the z-axis offset; starting from a crouched or
