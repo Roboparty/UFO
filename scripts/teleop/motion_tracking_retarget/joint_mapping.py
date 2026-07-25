@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections import Counter
+from pathlib import Path
 from typing import Sequence
 
 import mujoco as mj
 import numpy as np
+import yaml
 
 from .params import resolve_robot_xml_path
 
@@ -40,6 +42,9 @@ UFO_EXPECTED_G1_JOINT_NAMES: tuple[str, ...] = (
     "right_wrist_pitch_joint",
     "right_wrist_yaw_joint",
 )
+
+UFO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_POLICY_CONFIG = UFO_ROOT / "config" / "policy" / "g1_policy.yaml"
 
 
 def _duplicates(names: Sequence[str]) -> list[str]:
@@ -77,6 +82,16 @@ def build_joint_permutation(
     validate_joint_name_set(canonical, output)
     canonical_index = {name: idx for idx, name in enumerate(canonical)}
     return np.asarray([canonical_index[name] for name in output], dtype=np.int64)
+
+
+def policy_joint_names(policy_config_path: str | Path = DEFAULT_POLICY_CONFIG) -> tuple[str, ...]:
+    cfg_path = Path(policy_config_path)
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    names = data.get("policy_joint_names")
+    if not isinstance(names, list) or not names:
+        raise ValueError(f"policy_joint_names missing or invalid in {cfg_path}")
+    return tuple(str(name) for name in names)
 
 
 def canonical_joint_names(target_robot: str = "g1") -> tuple[str, ...]:

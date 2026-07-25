@@ -20,8 +20,14 @@ ROBOT_CONFIG="${ROBOT_CONFIG:-${UFO_ROOT}/config/robot/g1_real.yaml}"
 MODEL_PATH="${MODEL_PATH:-${MODEL_DIR}/exported/FBcprAuxModel.onnx}"
 PICO_CONTROL_ADDR="${PICO_CONTROL_ADDR:-tcp://127.0.0.1:28704}"
 ENABLE_PICO_POLICY_CONTROL="${ENABLE_PICO_POLICY_CONTROL:-0}"
+CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-}"
 
 cd "${UFO_ROOT}"
+
+if [[ "${ENABLE_PICO_POLICY_CONTROL}" == "1" && -z "${CTRL_PUB_BIND_ADDR}" ]]; then
+  echo "[run_g1_teleop_policy_onboard] ENABLE_PICO_POLICY_CONTROL=1 requires CTRL_PUB_BIND_ADDR=tcp://*:28704 in this shell as an explicit legacy/debug acknowledgement." >&2
+  exit 1
+fi
 
 if [[ -n "${VENV_PATH}" ]]; then
   if [[ ! -f "${VENV_PATH}" ]]; then
@@ -61,6 +67,7 @@ fi
 echo "[run_g1_teleop_policy_onboard] pico_policy_control: ${pico_policy_control_state}"
 if [[ "${ENABLE_PICO_POLICY_CONTROL}" == "1" ]]; then
   echo "[run_g1_teleop_policy_onboard] WARNING: legacy/debug compatibility mode; PICO policy buttons can control policy state via ${PICO_CONTROL_ADDR}"
+  echo "[run_g1_teleop_policy_onboard] expected teleop CTRL_PUB_BIND_ADDR: ${CTRL_PUB_BIND_ADDR}"
 fi
 
 cmd=(

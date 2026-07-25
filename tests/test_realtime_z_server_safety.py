@@ -6,9 +6,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.realtime.realtime_z_server import (  # noqa: E402
+    ModeState,
     OnlineZInferer,
+    _blend_z,
     _extract_latest_frame,
     _is_pose_stale,
+    parse_args,
 )
 
 
@@ -63,9 +66,61 @@ def test_online_inferer_rejects_invalid_z_without_touching_last_z():
     np.testing.assert_array_equal(inferer.last_z, np.ones(256, dtype=np.float32))
 
 
+def test_realtime_z_starts_frozen_and_supports_explicit_follow():
+    old_argv = sys.argv
+    try:
+        sys.argv = ["realtime_z_server.py"]
+        args = parse_args()
+    finally:
+        sys.argv = old_argv
+
+    assert args.initial_mode == "freeze"
+    mode_state = ModeState(args.initial_mode)
+    assert mode_state.get() == "freeze"
+    assert mode_state.set("follow")
+    assert mode_state.get() == "follow"
+
+
+def test_resume_reset_clears_velocity_history_and_seeds_last_z():
+    inferer = OnlineZInferer.__new__(OnlineZInferer)
+    inferer.prev_root_pos = np.ones(3, dtype=np.float32)
+    inferer.prev_root_quat_xyzw = np.ones(4, dtype=np.float32)
+    inferer.prev_dof_pos = np.ones(29, dtype=np.float32)
+    inferer.prev_all_body_pos = np.ones((31, 3), dtype=np.float32)
+    inferer.prev_all_body_rot_xyzw = np.ones((31, 4), dtype=np.float32)
+    inferer._step_count = 10
+    inferer._wall_step_t0 = 123.0
+    inferer._prev_z_dbg = np.ones(256, dtype=np.float32)
+    inferer.last_z = np.zeros(256, dtype=np.float32)
+
+    seed_z = np.full(256, 2.0, dtype=np.float32)
+    inferer.reset_history(seed_z=seed_z)
+
+    assert inferer.prev_root_pos is None
+    assert inferer.prev_root_quat_xyzw is None
+    assert inferer.prev_dof_pos is None
+    assert inferer.prev_all_body_pos is None
+    assert inferer.prev_all_body_rot_xyzw is None
+    assert inferer._step_count == 0
+    assert inferer._wall_step_t0 is None
+    assert inferer._prev_z_dbg is None
+    np.testing.assert_array_equal(inferer.last_z, seed_z)
+
+
+def test_resume_ramp_blends_old_z_to_live_z():
+    start_z = np.zeros(256, dtype=np.float32)
+    live_z = np.ones(256, dtype=np.float32)
+    np.testing.assert_allclose(_blend_z(start_z, live_z, 0.0), start_z)
+    np.testing.assert_allclose(_blend_z(start_z, live_z, 0.5), np.full(256, 0.5, dtype=np.float32))
+    np.testing.assert_allclose(_blend_z(start_z, live_z, 1.0), live_z)
+
+
 if __name__ == "__main__":
     test_pose_stale_check_blocks_publish_path()
     test_extract_latest_frame_rejects_nonfinite_pose_values()
     test_extract_latest_frame_accepts_and_normalizes_valid_pose()
     test_online_inferer_rejects_invalid_z_without_touching_last_z()
+    test_realtime_z_starts_frozen_and_supports_explicit_follow()
+    test_resume_reset_clears_velocity_history_and_seeds_last_z()
+    test_resume_ramp_blends_old_z_to_live_z()
     print("realtime_z_server safety tests ok")

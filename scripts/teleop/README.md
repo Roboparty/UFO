@@ -478,8 +478,9 @@ UFO-Deploy uses these local ZMQ ports:
 The preflight checker uses the `teleop` port profile by default, so it checks only
 `28701`, `28702`, and `28703`. Use `--port-profile realtime` to check `28711`, or
 `--port-profile all` to check both groups. Port `28704` is off by default. It is checked
-only when `CTRL_PUB_BIND_ADDR` is explicitly set for legacy/debug PICO policy-control
-compatibility.
+only when `CTRL_PUB_BIND_ADDR` is explicitly set. The onboard launchers require
+`ENABLE_PICO_POLICY_CONTROL=1` alongside that address before enabling legacy/debug PICO
+policy-control compatibility.
 
 ## Run The Teleop Bridge
 
@@ -526,6 +527,11 @@ debug session, run:
 ```bash
 START_XROBOT_SERVICE=1 scripts/teleop/teleop_pose_50hz_onboard.sh
 ```
+
+The teleop bridge defaults come from `config/teleop/g1.yaml`. The shell launchers only
+override values such as `ACTUAL_HUMAN_HEIGHT`, `LOOKBACK_MS`, `CTRL_FPS`,
+`RETARGET_BUFFER_WINDOW_S`, `LOG_INTERVAL_S`, and `VIS_FPS` when the corresponding
+environment variable is explicitly set.
 
 It probes UFO-specific environments in this order:
 
@@ -594,7 +600,9 @@ Run these steps on the G1 Jetson:
 
    This requests poses from the teleop bridge, runs `backward_encoder.onnx`, and publishes
    latent `z` on port `28711`. The wrapper verifies that the selected deployment Python
-   can import `numpy`, `mujoco`, `onnxruntime`, and `zmq` before starting.
+   can import `numpy`, `mujoco`, `onnxruntime`, and `zmq` before starting. The onboard
+   default is `INITIAL_MODE=freeze`, so no live PICO reference is followed until PICO
+   right-hand A switches realtime `z` to follow mode.
 
 4. Start the G1 teleop policy.
 
@@ -624,6 +632,10 @@ Run these steps on the G1 Jetson:
    PICO left_key_one / left-hand X     freeze current reference/z
    ```
 
+   On freeze -> follow resume, realtime `z` resets its previous-pose velocity history.
+   The first live frame initializes history while holding the frozen `z`, then the server
+   blends from the old `z` to the new live `z` over `RESUME_RAMP_MS` milliseconds.
+
    PICO buttons do not enable policy, clear R2, enter default pose, reset the real policy
    state machine, or bypass the physical e-stop in the default flow.
 
@@ -631,8 +643,10 @@ Legacy/debug PICO policy-control compatibility is available only when both launc
 explicitly opted in:
 
 ```bash
-CTRL_PUB_BIND_ADDR=tcp://*:28704 scripts/teleop/teleop_pose_50hz_onboard.sh
-ENABLE_PICO_POLICY_CONTROL=1 ./run_g1_teleop_policy_onboard.sh
+ENABLE_PICO_POLICY_CONTROL=1 CTRL_PUB_BIND_ADDR=tcp://*:28704 \
+  scripts/teleop/teleop_pose_50hz_onboard.sh
+ENABLE_PICO_POLICY_CONTROL=1 CTRL_PUB_BIND_ADDR=tcp://*:28704 \
+  ./run_g1_teleop_policy_onboard.sh
 ```
 
 Keep the robot on support for first bring-up and test the physical e-stop, wireless R2

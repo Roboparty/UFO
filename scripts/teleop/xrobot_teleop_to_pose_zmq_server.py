@@ -337,9 +337,9 @@ class LowLatencyTeleopPoseZMQServer:
 
     def __init__(self, args: argparse.Namespace):
         from motion_tracking_retarget.joint_mapping import (
-            UFO_EXPECTED_G1_JOINT_NAMES,
             build_joint_permutation,
             canonical_joint_names,
+            policy_joint_names,
             qpos_size,
         )
         from motion_tracking_retarget.robot_config import load_teleop_robot_config
@@ -348,12 +348,32 @@ class LowLatencyTeleopPoseZMQServer:
         self.robot = args.robot
         self.target_robot = "g1"
         self.teleop_config = load_teleop_robot_config(self.target_robot)
-        self.vis_fps = int(args.vis_fps)
-        self.ctrl_fps = int(args.ctrl_fps)
-        self.lookback_ns = int(float(args.lookback_ms) * 1e6)
-        self.retarget_buffer_window_ns = int(float(args.retarget_buffer_window_s) * 1e9)
-        self.log_interval_s = float(args.log_interval_s)
-        self.actual_human_height = float(args.actual_human_height)
+        self.vis_fps = int(args.vis_fps if args.vis_fps is not None else self.teleop_config.vis_fps)
+        self.ctrl_fps = int(args.ctrl_fps if args.ctrl_fps is not None else self.teleop_config.ctrl_fps)
+        lookback_ms = (
+            float(args.lookback_ms)
+            if args.lookback_ms is not None
+            else float(self.teleop_config.lookback_ms)
+        )
+        self.lookback_ns = int(lookback_ms * 1e6)
+        retarget_buffer_window_s = (
+            float(args.retarget_buffer_window_s)
+            if args.retarget_buffer_window_s is not None
+            else float(self.teleop_config.retarget_buffer_window_s)
+        )
+        self.retarget_buffer_window_ns = int(retarget_buffer_window_s * 1e9)
+        self.log_interval_s = float(
+            args.log_interval_s if args.log_interval_s is not None else self.teleop_config.log_interval_s
+        )
+        self.actual_human_height = float(
+            args.actual_human_height
+            if args.actual_human_height is not None
+            else self.teleop_config.actual_human_height
+        )
+        self.req_bind_addr = str(args.req_bind_addr or self.teleop_config.req_bind_addr)
+        self.rep_bind_addr = str(args.rep_bind_addr or self.teleop_config.rep_bind_addr)
+        self.ctrl_bind_addr = str(args.ctrl_bind_addr or self.teleop_config.ctrl_bind_addr)
+        self.ctrl_pub_bind_addr = str(args.ctrl_pub_bind_addr or "")
         self.retarget_max_iter = int(self.teleop_config.max_iter)
         self.calibration_button = (
             str(args.calibration_button).strip()
@@ -361,7 +381,7 @@ class LowLatencyTeleopPoseZMQServer:
             else self.teleop_config.calibration_button
         )
         self.canonical_joint_names = canonical_joint_names(self.target_robot)
-        self.ufo_output_joint_names = UFO_EXPECTED_G1_JOINT_NAMES
+        self.ufo_output_joint_names = policy_joint_names()
         self.joint_permutation = build_joint_permutation(
             self.canonical_joint_names,
             self.ufo_output_joint_names,
@@ -401,7 +421,7 @@ class LowLatencyTeleopPoseZMQServer:
         self.latest_vr_recv_ns: int = 0
         self.latest_vr_seq: int = 0
         self.latest_vr_motion_timestamp_ns: Optional[int] = None
-        self.latest_vr_calibration_requested = False
+        self.latest_vr_calibration_request_id = 0
         self.prev_calibration_button_pressed = False
 
         self.retarget_buffer_lock = threading.Lock()
@@ -620,12 +640,14 @@ class LowLatencyTeleopPoseZMQServer:
                     pressed = bool(parsed.controller_buttons.get(self.calibration_button, False))
                     calibration_requested = pressed and not self.prev_calibration_button_pressed
                     self.prev_calibration_button_pressed = pressed
-                if self.latest_vr_motion_timestamp_ns != parsed.motion_timestamp_ns:
+                timestamp_changed = self.latest_vr_motion_timestamp_ns != parsed.motion_timestamp_ns
+                if timestamp_changed or calibration_requested:
                     self.latest_vr_poses = parsed.poses
                     self.latest_vr_recv_ns = recv_ns
                     self.latest_vr_seq += 1
                     self.latest_vr_motion_timestamp_ns = parsed.motion_timestamp_ns
-                    self.latest_vr_calibration_requested = calibration_requested
+                    if calibration_requested:
+                        self.latest_vr_calibration_request_id += 1
                     should_wake_retarget = True
         if should_wake_retarget:
             self.vr_frame_event.set()
@@ -797,6 +819,7 @@ class LowLatencyTeleopPoseZMQServer:
 
     def _raw_sender_loop(self) -> None:
         last_sent_seq = 0
+        last_sent_calibration_request_id = 0
 
         while not self.stop_event.is_set():
             if not self.vr_frame_event.wait(timeout=0.1):
@@ -807,7 +830,7 @@ class LowLatencyTeleopPoseZMQServer:
                     poses = self.latest_vr_poses
                     recv_ns = self.latest_vr_recv_ns
                     seq = self.latest_vr_seq
-                    calibration_requested = self.latest_vr_calibration_requested
+                    calibration_request_id = self.latest_vr_calibration_request_id
 
                 if poses is None or seq == last_sent_seq:
                     with self.latest_vr_lock:
@@ -831,7 +854,9 @@ class LowLatencyTeleopPoseZMQServer:
                             "seq": int(seq),
                             "recv_ns": int(recv_ns),
                             "poses": poses,
-                            "calibration_requested": bool(calibration_requested),
+                            "calibration_requested": bool(
+                                calibration_request_id != last_sent_calibration_request_id
+                            ),
                         }
                     )
                 except (BrokenPipeError, EOFError, OSError) as exc:
@@ -841,6 +866,7 @@ class LowLatencyTeleopPoseZMQServer:
                     break
 
                 last_sent_seq = seq
+                last_sent_calibration_request_id = calibration_request_id
 
     def _worker_result_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -1138,30 +1164,30 @@ class LowLatencyTeleopPoseZMQServer:
         self.req_sock = self.zmq_context.socket(zmq.PULL)
         self.req_sock.setsockopt(zmq.LINGER, 0)
         self.req_sock.setsockopt(zmq.RCVHWM, 500)
-        self.req_sock.bind(self.args.req_bind_addr)
+        self.req_sock.bind(self.req_bind_addr)
 
         self.rep_sock = self.zmq_context.socket(zmq.PUSH)
         self.rep_sock.setsockopt(zmq.LINGER, 0)
         self.rep_sock.setsockopt(zmq.SNDHWM, 500)
-        self.rep_sock.bind(self.args.rep_bind_addr)
+        self.rep_sock.bind(self.rep_bind_addr)
 
         self.ctrl_sock = self.zmq_context.socket(zmq.PUSH)
         self.ctrl_sock.setsockopt(zmq.LINGER, 0)
         self.ctrl_sock.setsockopt(zmq.SNDHWM, 500)
-        self.ctrl_sock.bind(self.args.ctrl_bind_addr)
+        self.ctrl_sock.bind(self.ctrl_bind_addr)
 
-        if self.args.ctrl_pub_bind_addr:
+        if self.ctrl_pub_bind_addr:
             self.ctrl_pub_sock = self.zmq_context.socket(zmq.PUB)
             self.ctrl_pub_sock.setsockopt(zmq.LINGER, 0)
             self.ctrl_pub_sock.setsockopt(zmq.SNDHWM, 10)
-            self.ctrl_pub_sock.bind(self.args.ctrl_pub_bind_addr)
+            self.ctrl_pub_sock.bind(self.ctrl_pub_bind_addr)
 
         print("Low-latency teleop ZMQ pose server initialized")
-        print(f"  req_bind_addr: {self.args.req_bind_addr}")
-        print(f"  rep_bind_addr: {self.args.rep_bind_addr}")
-        print(f"  ctrl_bind_addr: {self.args.ctrl_bind_addr}")
-        if self.args.ctrl_pub_bind_addr:
-            print(f"  ctrl_pub_bind_addr: {self.args.ctrl_pub_bind_addr}")
+        print(f"  req_bind_addr: {self.req_bind_addr}")
+        print(f"  rep_bind_addr: {self.rep_bind_addr}")
+        print(f"  ctrl_bind_addr: {self.ctrl_bind_addr}")
+        if self.ctrl_pub_bind_addr:
+            print(f"  ctrl_pub_bind_addr: {self.ctrl_pub_bind_addr}")
         print(f"  ctrl_fps: {self.ctrl_fps}")
         print(f"  canonical_target_robot: {self.target_robot}")
         print(f"  actual_human_height: {self.actual_human_height:.3f}")
@@ -1181,7 +1207,7 @@ class LowLatencyTeleopPoseZMQServer:
             f"target_z={self.teleop_config.height_alignment_target_z}, "
             f"bootstrap_frames={self.teleop_config.height_alignment_bootstrap_frames}"
         )
-        print(f"  pico_policy_control: {'enabled legacy/debug compatibility mode' if self.args.ctrl_pub_bind_addr else 'disabled'}")
+        print(f"  pico_policy_control: {'enabled legacy/debug compatibility mode' if self.ctrl_pub_bind_addr else 'disabled'}")
         print("  chunk_size: fixed to 1 frame per reply")
         print(f"  lookback_ms: {self.lookback_ns / 1e6:.3f}")
         print(f"  retarget_buffer_window_s: {self.retarget_buffer_window_ns / 1e9:.3f}")
@@ -1310,35 +1336,35 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Low-latency ZMQ teleop pose server")
     parser.add_argument(
         "--robot",
-        choices=["unitree_g1", "unitree_g1_with_hands"],
+        choices=["unitree_g1", "g1"],
         default="unitree_g1",
         help="Robot key for defaults",
     )
-    parser.add_argument("--actual_human_height", type=float, default=1.75)
-    parser.add_argument("--vis_fps", type=int, default=5, help="Viewer update frequency")
-    parser.add_argument("--ctrl_fps", type=int, default=50, help="Controller button publish frequency")
+    parser.add_argument("--actual_human_height", type=float, default=None)
+    parser.add_argument("--vis_fps", type=int, default=None, help="Viewer update frequency")
+    parser.add_argument("--ctrl_fps", type=int, default=None, help="Controller button publish frequency")
     parser.add_argument("--xr-poll-hz", type=float, default=50.0, help="XRobot SDK polling frequency when callback APIs are unavailable")
     parser.add_argument(
         "--lookback_ms",
         type=float,
-        default=50.0,
+        default=None,
         help="Sample reply frames at request_time - lookback_ms",
     )
     parser.add_argument(
         "--retarget_buffer_window_s",
         type=float,
-        default=0.5,
+        default=None,
         help="How much retarget history to keep for timestamp interpolation",
     )
     parser.add_argument(
         "--log_interval_s",
         type=float,
-        default=1.0,
+        default=None,
         help="Periodic debug log interval. Set to 0 to disable.",
     )
-    parser.add_argument("--req_bind_addr", type=str, default="tcp://*:28701")
-    parser.add_argument("--rep_bind_addr", type=str, default="tcp://*:28702")
-    parser.add_argument("--ctrl_bind_addr", type=str, default="tcp://*:28703")
+    parser.add_argument("--req_bind_addr", type=str, default=None)
+    parser.add_argument("--rep_bind_addr", type=str, default=None)
+    parser.add_argument("--ctrl_bind_addr", type=str, default=None)
     parser.add_argument("--ctrl_pub_bind_addr", type=str, default="")
     parser.add_argument("--web-visualize", action="store_true")
     parser.add_argument("--web-port", type=int, default=8080)

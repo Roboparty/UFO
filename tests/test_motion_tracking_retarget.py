@@ -1,4 +1,5 @@
 from pathlib import Path
+import argparse
 import sys
 import threading
 
@@ -14,6 +15,7 @@ from motion_tracking_retarget.joint_mapping import (  # noqa: E402
     UFO_EXPECTED_G1_JOINT_NAMES,
     build_joint_permutation,
     canonical_joint_names,
+    policy_joint_names,
     qpos_size,
 )
 from motion_tracking_retarget.params import XR_BODY_JOINT_NAMES, resolve_robot_xml_path  # noqa: E402
@@ -145,7 +147,7 @@ def test_timestamp_dedup_happens_before_worker_wakeup():
     server.latest_vr_recv_ns = 0
     server.latest_vr_seq = 0
     server.latest_vr_motion_timestamp_ns = None
-    server.latest_vr_calibration_requested = False
+    server.latest_vr_calibration_request_id = 0
     server.prev_calibration_button_pressed = False
     server.calibration_button = None
     server.vr_frame_event = threading.Event()
@@ -184,7 +186,8 @@ def test_synthetic_neutral_retarget_outputs_finite_qpos():
 
 
 def test_joint_permutation_validation_and_serialization():
-    canonical = tuple(UFO_EXPECTED_G1_JOINT_NAMES)
+    canonical = tuple(policy_joint_names())
+    assert canonical == tuple(UFO_EXPECTED_G1_JOINT_NAMES)
     identity = build_joint_permutation(canonical, UFO_EXPECTED_G1_JOINT_NAMES)
     np.testing.assert_array_equal(identity, np.arange(29))
 
@@ -224,9 +227,15 @@ def test_pico_policy_control_default_disabled_and_realtime_lookback_zero():
     teleop_cfg = yaml.safe_load((ROOT / "config/teleop/g1.yaml").read_text())
 
     assert 'ENABLE_PICO_POLICY_CONTROL="${ENABLE_PICO_POLICY_CONTROL:-0}"' in policy_launcher
+    assert 'ENABLE_PICO_POLICY_CONTROL=1 requires CTRL_PUB_BIND_ADDR=tcp://*:28704' in policy_launcher
     assert 'cmd+=(--pico-control --pico-control-addr "${PICO_CONTROL_ADDR}")' in policy_launcher
     assert '"${ENABLE_PICO_POLICY_CONTROL}" == "1"' in policy_launcher
     assert 'CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-}"' in teleop_launcher
+    assert 'CTRL_PUB_BIND_ADDR was set but ENABLE_PICO_POLICY_CONTROL is not 1' in teleop_launcher
+    assert '--actual_human_height "${ACTUAL_HUMAN_HEIGHT:-1.75}"' not in teleop_launcher
+    assert '--lookback_ms "${LOOKBACK_MS:-50}"' not in teleop_launcher
+    assert '[[ -n "${ACTUAL_HUMAN_HEIGHT:-}" ]]' in teleop_launcher
+    assert '[[ -n "${LOOKBACK_MS:-}" ]]' in teleop_launcher
     assert "pico_policy_control:" in teleop_server
     assert '--pico-follow-button", type=str, default="right_key_one"' in realtime_server
     assert '--pico-freeze-button", type=str, default="left_key_one"' in realtime_server
@@ -235,6 +244,59 @@ def test_pico_policy_control_default_disabled_and_realtime_lookback_zero():
     assert '--pose-buffer-lookback-ms "${POSE_BUFFER_LOOKBACK_MS:-0}"' in realtime_launcher
     assert "--enable-pose-buffer" in realtime_launcher
     assert teleop_cfg["retarget"]["calibration"]["button"] is None
+
+
+def test_server_uses_teleop_yaml_defaults_when_cli_omits_values():
+    args = argparse.Namespace(
+        robot="unitree_g1",
+        actual_human_height=None,
+        vis_fps=None,
+        ctrl_fps=None,
+        lookback_ms=None,
+        retarget_buffer_window_s=None,
+        log_interval_s=None,
+        req_bind_addr=None,
+        rep_bind_addr=None,
+        ctrl_bind_addr=None,
+        ctrl_pub_bind_addr="",
+        calibration_button=None,
+    )
+    server = LowLatencyTeleopPoseZMQServer(args)
+    cfg = server.teleop_config
+
+    assert server.actual_human_height == cfg.actual_human_height == 1.75
+    assert server.ctrl_fps == cfg.ctrl_fps == 50
+    assert server.vis_fps == cfg.vis_fps == 5
+    assert server.lookback_ns == int(cfg.lookback_ms * 1e6)
+    assert server.retarget_buffer_window_ns == int(cfg.retarget_buffer_window_s * 1e9)
+    assert server.log_interval_s == cfg.log_interval_s
+    assert server.req_bind_addr == cfg.req_bind_addr
+    assert server.rep_bind_addr == cfg.rep_bind_addr
+    assert server.ctrl_bind_addr == cfg.ctrl_bind_addr
+    assert server.ufo_output_joint_names == policy_joint_names()
+
+
+def test_calibration_edge_advances_seq_even_when_timestamp_repeats():
+    server = LowLatencyTeleopPoseZMQServer.__new__(LowLatencyTeleopPoseZMQServer)
+    server.latest_vr_lock = threading.Lock()
+    server.last_controller_buttons = default_controller_buttons()
+    server.callback_count = 0
+    server.latest_vr_poses = None
+    server.latest_vr_recv_ns = 0
+    server.latest_vr_seq = 0
+    server.latest_vr_motion_timestamp_ns = None
+    server.latest_vr_calibration_request_id = 0
+    server.prev_calibration_button_pressed = False
+    server.calibration_button = "right_key_one"
+    server.vr_frame_event = threading.Event()
+
+    server._on_vr_frame(_snapshot(timestamp_ns=42, right_a=False))
+    server._on_vr_frame(_snapshot(timestamp_ns=42, right_a=True))
+
+    assert server.callback_count == 2
+    assert server.latest_vr_seq == 2
+    assert server.latest_vr_motion_timestamp_ns == 42
+    assert server.latest_vr_calibration_request_id == 1
 
 
 if __name__ == "__main__":
@@ -246,4 +308,6 @@ if __name__ == "__main__":
     test_synthetic_neutral_retarget_outputs_finite_qpos()
     test_joint_permutation_validation_and_serialization()
     test_pico_policy_control_default_disabled_and_realtime_lookback_zero()
+    test_server_uses_teleop_yaml_defaults_when_cli_omits_values()
+    test_calibration_edge_advances_seq_even_when_timestamp_repeats()
     print("motion_tracking_retarget tests ok")

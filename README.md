@@ -343,6 +343,9 @@ right_key_one  follow mode
 left_key_one   freeze current z
 ```
 
+Realtime `z` starts in `freeze` mode by default; press PICO right-hand A after the policy
+is ready to begin following the live reference.
+
 ## 3. Prepare The Robot
 
 Copy the same repository and model to the robot:
@@ -557,7 +560,9 @@ Z_PY=/home/unitree/ufo_deploy_venv/bin/python \
 The onboard wrapper launches `scripts/realtime/realtime_z_server.py` with onboard defaults.
 It verifies that the selected Python can import `numpy`, `mujoco`, `onnxruntime`, and
 `zmq`, requests poses from the teleop bridge, runs `backward_encoder.onnx`, and publishes
-realtime latent `z` on port `28711`.
+realtime latent `z` on port `28711`. It starts in `freeze` mode by default, so it keeps
+publishing standing or last valid `z` until PICO right-hand A explicitly switches the live
+reference to follow mode.
 
 Step 4, start policy inference:
 
@@ -649,10 +654,15 @@ PICO right_key_one / right-hand A   follow or resume live reference
 PICO left_key_one / left-hand X     freeze current reference/z
 ```
 
+The realtime `z` server starts frozen in the onboard flow. After using the G1 remote to
+enter default stand, enable policy action, and start tracking, press PICO right-hand A to
+begin following the live reference. On freeze -> follow resume, realtime `z` resets its
+previous-pose velocity history and blends from the frozen `z` to the new live `z`.
+
 PICO buttons do not enable policy, clear R2, enter default pose, reset the real policy
 state machine, or bypass the physical e-stop in the default flow. The legacy/debug 28704
 PICO policy-control path is off unless both `CTRL_PUB_BIND_ADDR=tcp://*:28704` and
-`ENABLE_PICO_POLICY_CONTROL=1` are set explicitly.
+`ENABLE_PICO_POLICY_CONTROL=1` are set explicitly in both launcher shells.
 
 Wireless R2 is a global stop latch: policy action and tracking motion are disabled while
 R2 is held, and enable/start inputs cannot directly clear the latch. After R2 is released,

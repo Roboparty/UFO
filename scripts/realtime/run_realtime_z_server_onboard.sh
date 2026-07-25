@@ -20,6 +20,8 @@ BACKWARD_ONNX="${BACKWARD_ONNX:-${MODEL_DIR}/exported/backward_encoder.onnx}"
 MUJOCO_XML="${MUJOCO_XML:-${UFO_ROOT}/data/robots/g1/scene_29dof_freebase.xml}"
 DEVICE="${DEVICE:-cpu}"
 ENABLE_PICO_Z_CONTROL="${ENABLE_PICO_Z_CONTROL:-1}"
+INITIAL_MODE="${INITIAL_MODE:-freeze}"
+RESUME_RAMP_MS="${RESUME_RAMP_MS:-500}"
 
 [[ -d "${UFO_ROOT}" ]] || fail "UFO_ROOT does not exist: ${UFO_ROOT}"
 [[ -f "${UFO_ROOT}/scripts/realtime/realtime_z_server.py" ]] || \
@@ -116,6 +118,8 @@ cmd=(
   --pose-buffer-window-ms "${POSE_BUFFER_WINDOW_MS:-500}"
   --max-retarget-age-ms "${MAX_RETARGET_AGE_MS:-200}"
   --max-z-delta "${MAX_Z_DELTA:-0.75}"
+  --initial-mode "${INITIAL_MODE}"
+  --resume-ramp-ms "${RESUME_RAMP_MS}"
 )
 
 if [[ "${ENABLE_PICO_Z_CONTROL}" == "1" ]]; then

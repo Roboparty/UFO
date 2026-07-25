@@ -21,10 +21,14 @@ WEB_VISUALIZE="${WEB_VISUALIZE:-0}"
 WEB_PORT="${WEB_PORT:-8080}"
 WEB_MUJOCO_XML="${WEB_MUJOCO_XML:-${UFO_ROOT}/data/robots/g1/scene_29dof_freebase.xml}"
 CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-}"
+ENABLE_PICO_POLICY_CONTROL="${ENABLE_PICO_POLICY_CONTROL:-0}"
 
 [[ -d "${UFO_ROOT}" ]] || fail "UFO_ROOT does not exist: ${UFO_ROOT}"
 [[ -f "${UFO_ROOT}/scripts/teleop/xrobot_teleop_to_pose_zmq_server.py" ]] || \
   fail "missing teleop server under UFO_ROOT: ${UFO_ROOT}"
+if [[ -n "${CTRL_PUB_BIND_ADDR}" && "${ENABLE_PICO_POLICY_CONTROL}" != "1" ]]; then
+  fail "CTRL_PUB_BIND_ADDR was set but ENABLE_PICO_POLICY_CONTROL is not 1. Legacy/debug 28704 policy control requires both variables."
+fi
 
 ld_parts=()
 for candidate in \
@@ -128,17 +132,18 @@ cd "${UFO_ROOT}/scripts/teleop"
 cmd=(
   "${TELEOP_PY}" xrobot_teleop_to_pose_zmq_server.py
   --robot unitree_g1
-  --actual_human_height "${ACTUAL_HUMAN_HEIGHT:-1.75}"
-  --ctrl_fps 50
   --xr-poll-hz "${XR_POLL_HZ:-50}"
-  --lookback_ms "${LOOKBACK_MS:-50}"
-  --retarget_buffer_window_s 0.5
-  --log_interval_s "${LOG_INTERVAL_S:-1}"
   --req_bind_addr tcp://*:28701
   --rep_bind_addr tcp://*:28702
   --ctrl_bind_addr tcp://*:28703
-  --vis_fps "${VIS_FPS:-5}"
 )
+
+[[ -n "${ACTUAL_HUMAN_HEIGHT:-}" ]] && cmd+=(--actual_human_height "${ACTUAL_HUMAN_HEIGHT}")
+[[ -n "${CTRL_FPS:-}" ]] && cmd+=(--ctrl_fps "${CTRL_FPS}")
+[[ -n "${LOOKBACK_MS:-}" ]] && cmd+=(--lookback_ms "${LOOKBACK_MS}")
+[[ -n "${RETARGET_BUFFER_WINDOW_S:-}" ]] && cmd+=(--retarget_buffer_window_s "${RETARGET_BUFFER_WINDOW_S}")
+[[ -n "${LOG_INTERVAL_S:-}" ]] && cmd+=(--log_interval_s "${LOG_INTERVAL_S}")
+[[ -n "${VIS_FPS:-}" ]] && cmd+=(--vis_fps "${VIS_FPS}")
 
 if [[ -n "${CTRL_PUB_BIND_ADDR}" ]]; then
   cmd+=(--ctrl_pub_bind_addr "${CTRL_PUB_BIND_ADDR}")

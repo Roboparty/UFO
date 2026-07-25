@@ -474,7 +474,9 @@ class PoseFrameBuffer:
 # -----------------------------------------------------------------------------
 
 class ModeState:
-    def __init__(self, initial_mode: str = "follow") -> None:
+    def __init__(self, initial_mode: str = "freeze") -> None:
+        if initial_mode not in ("follow", "freeze"):
+            raise ValueError(f"Unsupported initial mode: {initial_mode}")
         self._mode = initial_mode
         self._lock = threading.Lock()
 
@@ -494,6 +496,14 @@ class ModeState:
 def _set_mode_from_input(mode_state: ModeState, mode: str, source: str) -> None:
     if mode_state.set(mode):
         print(f"[realtime_z_server] mode={mode} source={source}", flush=True)
+
+
+def _blend_z(start_z: np.ndarray, live_z: np.ndarray, alpha: float) -> np.ndarray:
+    a = float(np.clip(alpha, 0.0, 1.0))
+    return (
+        np.asarray(start_z, dtype=np.float32) * (1.0 - a)
+        + np.asarray(live_z, dtype=np.float32) * a
+    ).astype(np.float32)
 
 
 def _start_keyboard_control(mode_state: ModeState) -> None:
@@ -597,6 +607,10 @@ def parse_args() -> argparse.Namespace:
                    help="Per-step clamp on abs(z_t - z_{t-1}). Set <=0 to disable.")
     p.add_argument("--enable-keyboard-control", action="store_true",
                    help="Enable PC keyboard mode switching: f=follow, s=freeze.")
+    p.add_argument("--initial-mode", choices=("freeze", "follow"), default="freeze",
+                   help="Initial teleop reference mode. freeze waits for explicit follow input.")
+    p.add_argument("--resume-ramp-ms", type=float, default=500.0,
+                   help="Blend old z to live z for this many ms after freeze -> follow. Set <=0 to disable.")
     p.add_argument("--enable-pico-control", action="store_true",
                    help="Enable PICO controller mode switching via teleop_ctrl: A/right_key_one=follow, X/left_key_one=freeze.")
     p.add_argument("--pico-follow-button", type=str, default="right_key_one",
@@ -700,6 +714,20 @@ class OnlineZInferer:
         if self.last_z.shape == (256,):
             return self.last_z.copy()
         return _standing_z()
+
+    def reset_history(self, seed_z: Optional[np.ndarray] = None) -> None:
+        self.prev_root_pos = None
+        self.prev_root_quat_xyzw = None
+        self.prev_dof_pos = None
+        self.prev_all_body_pos = None
+        self.prev_all_body_rot_xyzw = None
+        self._step_count = 0
+        self._wall_step_t0 = None
+        self._prev_z_dbg = None
+        if seed_z is not None:
+            z = np.asarray(seed_z, dtype=np.float32).reshape(-1)
+            if z.shape == (256,) and np.all(np.isfinite(z)):
+                self.last_z = z.copy()
 
     def _fk_all_bodies(
         self,
@@ -898,7 +926,7 @@ def main() -> None:
     args = parse_args()
     dt = 1.0 / float(args.hz)
 
-    mode_state = ModeState("follow")
+    mode_state = ModeState(str(args.initial_mode))
     if args.enable_keyboard_control:
         _start_keyboard_control(mode_state)
 
@@ -979,7 +1007,9 @@ def main() -> None:
     print("[realtime_z_server] teleop_ctrl:", args.teleop_ctrl)
     print("[realtime_z_server] z_bind:", args.z_bind if not args.dry_run else "(dry_run: not bound)")
     print("[realtime_z_server] hz:", float(args.hz))
-    print("[realtime_z_server] mode=follow")
+    print(f"[realtime_z_server] mode={mode_state.get()}")
+    print("[realtime_z_server] initial_mode:", str(args.initial_mode))
+    print("[realtime_z_server] resume_ramp_ms:", float(args.resume_ramp_ms))
     print("[realtime_z_server] keyboard_control:", bool(args.enable_keyboard_control))
     print("[realtime_z_server] pico_control:", bool(args.enable_pico_control))
     if args.enable_pico_control:
@@ -1009,6 +1039,10 @@ def main() -> None:
     have_last_z = False
     prev_pico_follow_pressed = False
     prev_pico_freeze_pressed = False
+    prev_mode = mode_state.get()
+    resume_ramp_start_z: Optional[np.ndarray] = None
+    resume_ramp_start_t: float = 0.0
+    resume_ramp_duration_s = max(0.0, float(args.resume_ramp_ms) / 1000.0)
     n = 0
     next_t = time.perf_counter()
     while True:
@@ -1076,6 +1110,19 @@ def main() -> None:
                     pass
 
         mode = mode_state.get()
+        if mode != prev_mode:
+            if prev_mode == "freeze" and mode == "follow":
+                seed_z = last_z.copy() if have_last_z else _standing_z()
+                if inferer is not None:
+                    inferer.reset_history(seed_z=seed_z)
+                resume_ramp_start_z = seed_z.copy()
+                resume_ramp_start_t = time.perf_counter()
+                print(
+                    "[realtime_z_server] resume: reset z history and started z ramp",
+                    flush=True,
+                )
+            prev_mode = mode
+
         current_pose = latest_pose
         if mode == "follow" and pose_buffer is not None:
             sampled_pose, pose_buffer_info = pose_buffer.sample(time.monotonic_ns())
@@ -1099,6 +1146,14 @@ def main() -> None:
         elif inferer is not None:
             assert current_pose is not None
             z = inferer.step(current_pose, mode=mode)
+            if z is not None and resume_ramp_start_z is not None:
+                if resume_ramp_duration_s <= 0.0:
+                    resume_ramp_start_z = None
+                else:
+                    alpha = (time.perf_counter() - resume_ramp_start_t) / resume_ramp_duration_s
+                    z = _blend_z(resume_ramp_start_z, z, alpha)
+                    if alpha >= 1.0:
+                        resume_ramp_start_z = None
         else:
             z = _standing_z()
         if z is None:

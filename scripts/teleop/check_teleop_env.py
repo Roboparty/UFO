@@ -105,9 +105,9 @@ def _check_canonical_retarget(reporter: Reporter) -> None:
     try:
         import mujoco as mj
         from motion_tracking_retarget.joint_mapping import (
-            UFO_EXPECTED_G1_JOINT_NAMES,
             build_joint_permutation,
             canonical_joint_names,
+            policy_joint_names,
             qpos_size,
         )
         from motion_tracking_retarget.params import XR_BODY_JOINT_NAMES, load_xrobot_ik_config, resolve_robot_xml_path
@@ -189,7 +189,8 @@ def _check_canonical_retarget(reporter: Reporter) -> None:
 
     try:
         canonical_names = canonical_joint_names("g1")
-        permutation = build_joint_permutation(canonical_names, UFO_EXPECTED_G1_JOINT_NAMES)
+        output_names = policy_joint_names()
+        permutation = build_joint_permutation(canonical_names, output_names)
     except Exception as exc:
         reporter.fail(f"joint permutation invalid: {exc.__class__.__name__}: {exc}")
         return
@@ -198,10 +199,10 @@ def _check_canonical_retarget(reporter: Reporter) -> None:
         reporter.ok("canonical G1 joint names: 29")
     else:
         reporter.fail(f"canonical G1 joint names must be 29, got {len(canonical_names)}")
-    if len(UFO_EXPECTED_G1_JOINT_NAMES) == 29:
-        reporter.ok("UFO expected G1 joint names: 29")
+    if len(output_names) == 29:
+        reporter.ok("policy G1 joint names: 29")
     else:
-        reporter.fail(f"UFO expected G1 joint names must be 29, got {len(UFO_EXPECTED_G1_JOINT_NAMES)}")
+        reporter.fail(f"policy G1 joint names must be 29, got {len(output_names)}")
     if int(qpos_size("g1")) == 36:
         reporter.ok("joint mapping qpos_size: 36")
     else:
