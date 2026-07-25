@@ -77,11 +77,11 @@ Use this mode for direct PICO-to-robot teleop. The PICO connects to the G1 Jetso
 the teleop host moves from the PC to the G1 onboard computer.
 
 ```text
-PICO
+PICO XRoboToolkit client
  |
- XRoboToolkit
+ WiFi / LAN target IP = <G1_JETSON_IP>
  |
- G1 Jetson
+ G1 Jetson / onboard computer
  |
  XRoboToolkit headless service
  |
@@ -219,6 +219,30 @@ Use the workstation IP for workstation teleop. Use the G1 Jetson IP for onboard 
 The PICO and teleop host must be on a reachable network. If data does not arrive, check
 firewalls, VPN/TUN interfaces, proxy settings, and whether the PICO can route to the host
 IP entered in the app.
+
+## Onboard Network Target
+
+For G1 onboard mode, set the XRoboToolkit PICO client target IP to the G1 onboard computer
+IP. Do not use the workstation IP in this mode.
+
+```text
+PICO XRoboToolkit client
+ |
+ WiFi / LAN
+ |
+ target IP = <G1_JETSON_IP>
+ |
+ G1 Jetson XRoboToolkit headless service
+```
+
+Find the robot-side IP on the G1 Jetson:
+
+```bash
+ip -br addr
+```
+
+Choose the IP on the WiFi/LAN interface reachable from the PICO headset, then enter that IP
+in the XRoboToolkit PICO app before starting body/controller streaming.
 
 ## Install xrobotoolkit_sdk
 
@@ -457,6 +481,9 @@ Run these steps on the G1 Jetson:
    The teleop launcher expects this service to already be running. Automatic service start
    is opt-in with `START_XROBOT_SERVICE=1` and should be used only after the installed
    headless service has been verified.
+
+   In the PICO XRoboToolkit app, set the target IP to the G1 onboard computer IP reported
+   by `ip -br addr`. In onboard mode the PICO connects to the robot, not to the PC.
 
 2. Start the teleop pose bridge.
 

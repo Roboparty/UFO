@@ -484,9 +484,11 @@ Software on the G1 Jetson:
 Flow:
 
 ```text
-PICO
+PICO XRoboToolkit client
  |
- XRoboToolkit
+ WiFi / LAN target IP = <G1_JETSON_IP>
+ |
+ G1 Jetson XRoboToolkit headless service
  |
  GMR
  |
@@ -507,9 +509,12 @@ Step 1, start XRoboToolkit service:
 
 ```bash
 bash /opt/apps/roboticsservice/runService.sh
+ip -br addr
 ```
 
 This receives the PICO body, headset, and controller stream on the G1 Jetson.
+In the XRoboToolkit PICO app, set the target IP to the G1 onboard computer IP reported by
+`ip -br addr`. For onboard mode the PICO connects to the robot, not to the PC.
 
 Step 2, start the teleop pose bridge:
 
