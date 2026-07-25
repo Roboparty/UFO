@@ -522,6 +522,9 @@ This runs `xrobot_teleop_to_pose_zmq_server.py`: PICO/XRoboToolkit data is retar
 with GMR and published as G1 poses on ZMQ ports `28701`, `28702`, `28703`, and optionally
 PICO policy-control PUB port `28704`. It does not start policy inference and it does not
 encode latent `z`.
+It also does not auto-start the XRoboToolkit service by default; use
+`START_XROBOT_SERVICE=1 scripts/teleop/teleop_pose_50hz_onboard.sh` only after the
+installed headless service has been verified.
 
 Step 3, start `scripts/realtime/realtime_z_server.py`:
 

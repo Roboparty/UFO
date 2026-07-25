@@ -414,6 +414,15 @@ export WEB_PORT=8080
 The onboard launcher automatically derives `UFO_ROOT` from its own path if `UFO_ROOT` is
 not set. It checks the Python executable, GMR, `xrobotoolkit_sdk`, XRoboToolkit service,
 and required local ZMQ ports before starting `xrobot_teleop_to_pose_zmq_server.py`.
+It does not auto-start the XRoboToolkit service by default. Start the service manually
+first so version, library, and runtime failures are visible before real-robot bring-up.
+If you have already verified the installed service and want the launcher to start it for a
+debug session, run:
+
+```bash
+START_XROBOT_SERVICE=1 scripts/teleop/teleop_pose_50hz_onboard.sh
+```
+
 It searches UFO-specific environments first:
 
 ```text
@@ -445,6 +454,9 @@ Run these steps on the G1 Jetson:
    ```
 
    This receives the PICO stream on the robot.
+   The teleop launcher expects this service to already be running. Automatic service start
+   is opt-in with `START_XROBOT_SERVICE=1` and should be used only after the installed
+   headless service has been verified.
 
 2. Start the teleop pose bridge.
 

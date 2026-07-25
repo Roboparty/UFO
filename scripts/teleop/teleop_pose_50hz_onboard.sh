@@ -16,7 +16,7 @@ DEFAULT_UFO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 UFO_ROOT="${UFO_ROOT:-${DEFAULT_UFO_ROOT}}"
 TELEOP_PY="${TELEOP_PY:-}"
 TELEOP_ALLOW_SYSTEM_PY="${TELEOP_ALLOW_SYSTEM_PY:-0}"
-START_XROBOT_SERVICE="${START_XROBOT_SERVICE:-1}"
+START_XROBOT_SERVICE="${START_XROBOT_SERVICE:-0}"
 WEB_VISUALIZE="${WEB_VISUALIZE:-1}"
 WEB_PORT="${WEB_PORT:-8080}"
 WEB_MUJOCO_XML="${WEB_MUJOCO_XML:-${UFO_ROOT}/data/robots/g1/scene_29dof_freebase.xml}"
@@ -78,6 +78,8 @@ if ! pgrep -f "${service_pattern}" >/dev/null 2>&1; then
     bash /opt/apps/roboticsservice/runService.sh >/tmp/ufo-roboticsservice-start.log 2>&1 || \
       fail "failed to start XRoboToolkit service; see /tmp/ufo-roboticsservice-start.log"
     sleep 2
+  else
+    fail "XRoboToolkit service is not running. Start it first with 'bash /opt/apps/roboticsservice/runService.sh', or explicitly run START_XROBOT_SERVICE=1 $0 after verifying the installed service version."
   fi
 fi
 
