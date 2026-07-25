@@ -14,7 +14,13 @@ from types import ModuleType
 from typing import Iterable
 
 
-DEFAULT_PORTS = (28701, 28702, 28703, 28711)
+TELEOP_PORTS = (28701, 28702, 28703)
+REALTIME_PORTS = (28711,)
+PORT_PROFILES = {
+    "teleop": TELEOP_PORTS,
+    "realtime": REALTIME_PORTS,
+    "all": TELEOP_PORTS + REALTIME_PORTS,
+}
 DEFAULT_SERVICE_PATTERNS = (
     "RoboticsServiceProcess",
     "roboticsservice",
@@ -278,8 +284,14 @@ def parse_args() -> argparse.Namespace:
         "--ports",
         nargs="+",
         type=int,
-        default=list(DEFAULT_PORTS),
-        help="ZMQ ports to check",
+        default=None,
+        help="ZMQ ports to check; overrides --port-profile",
+    )
+    parser.add_argument(
+        "--port-profile",
+        choices=tuple(PORT_PROFILES),
+        default="teleop",
+        help="named ZMQ port set to check when --ports is not provided",
     )
     parser.add_argument("--host", default="0.0.0.0", help="bind host used for port checks")
     parser.add_argument("--skip-service", action="store_true", help="skip XRoboToolkit process check")
@@ -297,6 +309,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     reporter = Reporter()
+    ports = args.ports if args.ports is not None else list(PORT_PROFILES[args.port_profile])
 
     reporter.info(f"python: {sys.executable}")
     _import_module("general_motion_retargeting", "GMR", reporter)
@@ -310,7 +323,8 @@ def main() -> int:
         _check_service(_parse_patterns(args.service_pattern), reporter)
 
     if not args.skip_ports:
-        _check_ports(args.host, args.ports, args.mode, reporter)
+        reporter.info(f"port_profile: {args.port_profile}")
+        _check_ports(args.host, ports, args.mode, reporter)
 
     if args.xr_data:
         _check_xr_data(xrt, reporter)

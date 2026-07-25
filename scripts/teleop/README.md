@@ -288,20 +288,28 @@ Expected healthy preflight output includes lines like:
 [OK] port 28701 available
 [OK] port 28702 available
 [OK] port 28703 available
-[OK] port 28711 available
 ```
 
-Before starting teleop, ports `28701`, `28702`, `28703`, and `28711` should normally be
-available. If a previous teleop or realtime `z` process is still running, the checker will
-report the occupied port so you can stop the stale process.
+Before starting the teleop bridge, ports `28701`, `28702`, and `28703` should normally be
+available. If a previous teleop process is still running, the checker will report the
+occupied port so you can stop the stale process.
+
+To check the realtime `z` server port separately, use the realtime profile:
+
+```bash
+python scripts/teleop/check_teleop_env.py --port-profile realtime
+```
+
+This checks port `28711`, which belongs to `scripts/realtime/realtime_z_server.py`, not to
+the teleop bridge.
 
 After the teleop bridge and realtime `z` server are already running, use:
 
 ```bash
-python scripts/teleop/check_teleop_env.py --mode running
+python scripts/teleop/check_teleop_env.py --mode running --port-profile all
 ```
 
-That mode expects the ZMQ ports to be occupied by the running services.
+That mode expects the teleop and realtime ZMQ ports to be occupied by the running services.
 
 ## Verify Python Imports
 
@@ -371,9 +379,10 @@ UFO-Deploy uses these local ZMQ ports:
 | 28704 | teleop bridge | optional PICO button PUB channel to onboard policy |
 | 28711 | realtime `z` server | latent `z` PUB channel to policy |
 
-The preflight checker includes `28701`, `28702`, `28703`, and `28711` by default because
-they are required for the normal teleop-to-policy pipeline. The onboard teleop launcher
-also checks `28704` when the PICO policy-control PUB channel is enabled.
+The preflight checker uses the `teleop` port profile by default, so it checks only
+`28701`, `28702`, and `28703`. Use `--port-profile realtime` to check `28711`, or
+`--port-profile all` to check both groups. The onboard teleop launcher also checks `28704`
+when the PICO policy-control PUB channel is enabled.
 
 ## Run The Teleop Bridge
 
