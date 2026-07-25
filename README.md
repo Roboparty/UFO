@@ -515,6 +515,9 @@ Users only need to clone UFO-Deploy; the canonical retarget code, config, G1 XML
 assets are vendored under `scripts/teleop/motion_tracking_retarget/`.
 `xrobotoolkit_sdk` is only the Python binding; the XRoboToolkit service must be installed
 and running separately.
+If you override `POLICY_CONFIG`, set the same value as `TELEOP_POLICY_CONFIG` for the
+teleop bridge so its joint-order permutation is checked against the policy's
+`policy_joint_names`.
 
 Step 1, start XRoboToolkit service:
 

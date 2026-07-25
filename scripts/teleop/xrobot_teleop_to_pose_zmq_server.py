@@ -339,6 +339,7 @@ class LowLatencyTeleopPoseZMQServer:
         from motion_tracking_retarget.joint_mapping import (
             build_joint_permutation,
             canonical_joint_names,
+            default_policy_config_path,
             policy_joint_names,
             qpos_size,
         )
@@ -374,6 +375,10 @@ class LowLatencyTeleopPoseZMQServer:
         self.rep_bind_addr = str(args.rep_bind_addr or self.teleop_config.rep_bind_addr)
         self.ctrl_bind_addr = str(args.ctrl_bind_addr or self.teleop_config.ctrl_bind_addr)
         self.ctrl_pub_bind_addr = str(args.ctrl_pub_bind_addr or "")
+        self.policy_config_path = str(
+            Path(args.policy_config) if args.policy_config else default_policy_config_path()
+        )
+        self.web_visualize = bool(args.web_visualize or self.teleop_config.visualize)
         self.retarget_max_iter = int(self.teleop_config.max_iter)
         self.calibration_button = (
             str(args.calibration_button).strip()
@@ -381,7 +386,7 @@ class LowLatencyTeleopPoseZMQServer:
             else self.teleop_config.calibration_button
         )
         self.canonical_joint_names = canonical_joint_names(self.target_robot)
-        self.ufo_output_joint_names = policy_joint_names()
+        self.ufo_output_joint_names = policy_joint_names(self.policy_config_path)
         self.joint_permutation = build_joint_permutation(
             self.canonical_joint_names,
             self.ufo_output_joint_names,
@@ -819,7 +824,6 @@ class LowLatencyTeleopPoseZMQServer:
 
     def _raw_sender_loop(self) -> None:
         last_sent_seq = 0
-        last_sent_calibration_request_id = 0
 
         while not self.stop_event.is_set():
             if not self.vr_frame_event.wait(timeout=0.1):
@@ -854,9 +858,7 @@ class LowLatencyTeleopPoseZMQServer:
                             "seq": int(seq),
                             "recv_ns": int(recv_ns),
                             "poses": poses,
-                            "calibration_requested": bool(
-                                calibration_request_id != last_sent_calibration_request_id
-                            ),
+                            "calibration_request_id": int(calibration_request_id),
                         }
                     )
                 except (BrokenPipeError, EOFError, OSError) as exc:
@@ -866,7 +868,6 @@ class LowLatencyTeleopPoseZMQServer:
                     break
 
                 last_sent_seq = seq
-                last_sent_calibration_request_id = calibration_request_id
 
     def _worker_result_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -1108,7 +1109,7 @@ class LowLatencyTeleopPoseZMQServer:
         if self.args.visualize:
             print("[Warning] --visualize legacy native viewer is disabled; use --web-visualize for UFO teleop debug.")
 
-        if self.args.web_visualize:
+        if self.web_visualize:
             web_xml = str(self.args.web_mujoco_xml or _default_web_mujoco_xml())
             try:
                 self.web_viewer = WebRetargetViewer(web_xml, int(self.args.web_port))
@@ -1189,6 +1190,7 @@ class LowLatencyTeleopPoseZMQServer:
         if self.ctrl_pub_bind_addr:
             print(f"  ctrl_pub_bind_addr: {self.ctrl_pub_bind_addr}")
         print(f"  ctrl_fps: {self.ctrl_fps}")
+        print(f"  policy_config: {self.policy_config_path}")
         print(f"  canonical_target_robot: {self.target_robot}")
         print(f"  actual_human_height: {self.actual_human_height:.3f}")
         print(f"  retarget_max_iter: {self.retarget_max_iter}")
@@ -1213,7 +1215,7 @@ class LowLatencyTeleopPoseZMQServer:
         print(f"  retarget_buffer_window_s: {self.retarget_buffer_window_ns / 1e9:.3f}")
         print(f"  log_interval_s: {self.log_interval_s:.3f}")
         print(f"  visualize: {self.args.visualize}")
-        print(f"  web_visualize: {self.args.web_visualize}")
+        print(f"  web_visualize: {self.web_visualize}")
         print(f"  xrt_input_mode: {self.xrt_input_mode}")
         print(f"  retarget_worker_pid: {self.retarget_process.pid if self.retarget_process else None}")
 
@@ -1366,6 +1368,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rep_bind_addr", type=str, default=None)
     parser.add_argument("--ctrl_bind_addr", type=str, default=None)
     parser.add_argument("--ctrl_pub_bind_addr", type=str, default="")
+    parser.add_argument("--policy-config", type=str, default=None)
     parser.add_argument("--web-visualize", action="store_true")
     parser.add_argument("--web-port", type=int, default=8080)
     parser.add_argument("--web-mujoco-xml", type=str, default="")

@@ -506,6 +506,51 @@ def _blend_z(start_z: np.ndarray, live_z: np.ndarray, alpha: float) -> np.ndarra
     ).astype(np.float32)
 
 
+@dataclass
+class ResumeRampState:
+    duration_s: float
+    pending: bool = False
+    seed_z: Optional[np.ndarray] = None
+    ramp_start_z: Optional[np.ndarray] = None
+    ramp_start_t: float = 0.0
+
+    def start_pending(self, seed_z: np.ndarray) -> None:
+        self.pending = True
+        self.seed_z = np.asarray(seed_z, dtype=np.float32).copy()
+        self.ramp_start_z = None
+        self.ramp_start_t = 0.0
+
+    def cancel(self) -> None:
+        self.pending = False
+        self.seed_z = None
+        self.ramp_start_z = None
+        self.ramp_start_t = 0.0
+
+    def apply(self, z: np.ndarray, *, produced_live_z: bool, now: float) -> np.ndarray:
+        z_arr = np.asarray(z, dtype=np.float32)
+        if self.pending:
+            seed = self.seed_z if self.seed_z is not None else z_arr
+            if not produced_live_z:
+                return seed.copy()
+            self.pending = False
+            if self.duration_s <= 0.0:
+                self.seed_z = None
+                return z_arr.copy()
+            self.ramp_start_z = seed.copy()
+            self.ramp_start_t = float(now)
+            return _blend_z(self.ramp_start_z, z_arr, 0.0)
+
+        if self.ramp_start_z is not None:
+            alpha = (float(now) - self.ramp_start_t) / max(1e-9, self.duration_s)
+            out = _blend_z(self.ramp_start_z, z_arr, alpha)
+            if alpha >= 1.0:
+                self.ramp_start_z = None
+                self.seed_z = None
+            return out
+
+        return z_arr.copy()
+
+
 def _start_keyboard_control(mode_state: ModeState) -> None:
     if not sys.stdin.isatty():
         print(
@@ -709,6 +754,7 @@ class OnlineZInferer:
 
         # Fallback z (used until enough history is collected)
         self.last_z = _standing_z()
+        self.last_step_produced_live_z = False
 
     def get_last_z(self) -> np.ndarray:
         if self.last_z.shape == (256,):
@@ -724,6 +770,7 @@ class OnlineZInferer:
         self._step_count = 0
         self._wall_step_t0 = None
         self._prev_z_dbg = None
+        self.last_step_produced_live_z = False
         if seed_z is not None:
             z = np.asarray(seed_z, dtype=np.float32).reshape(-1)
             if z.shape == (256,) and np.all(np.isfinite(z)):
@@ -784,6 +831,7 @@ class OnlineZInferer:
         return z_np
 
     def step(self, pose: PoseFrame, mode: str = "follow") -> Optional[np.ndarray]:
+        self.last_step_produced_live_z = False
         now_wall = time.perf_counter()
 
         root_pos = pose.root_pos.astype(np.float32)
@@ -899,6 +947,7 @@ class OnlineZInferer:
             z_np = (self.last_z + dz_clip).astype(np.float32)
 
         self.last_z = z_np
+        self.last_step_produced_live_z = True
 
         if self.debug_z and self._prev_z_dbg is not None:
             if now_wall - self._dbg_last_print >= 1.0:
@@ -1040,9 +1089,9 @@ def main() -> None:
     prev_pico_follow_pressed = False
     prev_pico_freeze_pressed = False
     prev_mode = mode_state.get()
-    resume_ramp_start_z: Optional[np.ndarray] = None
-    resume_ramp_start_t: float = 0.0
-    resume_ramp_duration_s = max(0.0, float(args.resume_ramp_ms) / 1000.0)
+    resume_ramp = ResumeRampState(
+        duration_s=max(0.0, float(args.resume_ramp_ms) / 1000.0),
+    )
     n = 0
     next_t = time.perf_counter()
     while True:
@@ -1115,12 +1164,13 @@ def main() -> None:
                 seed_z = last_z.copy() if have_last_z else _standing_z()
                 if inferer is not None:
                     inferer.reset_history(seed_z=seed_z)
-                resume_ramp_start_z = seed_z.copy()
-                resume_ramp_start_t = time.perf_counter()
+                resume_ramp.start_pending(seed_z)
                 print(
-                    "[realtime_z_server] resume: reset z history and started z ramp",
+                    "[realtime_z_server] resume: reset z history; waiting for live z before ramp",
                     flush=True,
                 )
+            elif mode == "freeze":
+                resume_ramp.cancel()
             prev_mode = mode
 
         current_pose = latest_pose
@@ -1146,14 +1196,12 @@ def main() -> None:
         elif inferer is not None:
             assert current_pose is not None
             z = inferer.step(current_pose, mode=mode)
-            if z is not None and resume_ramp_start_z is not None:
-                if resume_ramp_duration_s <= 0.0:
-                    resume_ramp_start_z = None
-                else:
-                    alpha = (time.perf_counter() - resume_ramp_start_t) / resume_ramp_duration_s
-                    z = _blend_z(resume_ramp_start_z, z, alpha)
-                    if alpha >= 1.0:
-                        resume_ramp_start_z = None
+            if z is not None:
+                z = resume_ramp.apply(
+                    z,
+                    produced_live_z=bool(getattr(inferer, "last_step_produced_live_z", False)),
+                    now=time.perf_counter(),
+                )
         else:
             z = _standing_z()
         if z is None:

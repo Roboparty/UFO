@@ -817,6 +817,7 @@ class XRobotRetargetWorkerRuntime:
             self.rotation_quat.reshape(1, 4),
             (len(XR_BODY_JOINT_NAMES), 4),
         )
+        self.last_processed_calibration_request_id = 0
 
     @property
     def human_body_names(self) -> tuple[str, ...]:
@@ -844,6 +845,15 @@ class XRobotRetargetWorkerRuntime:
         return body_pos, body_rot
 
     def _packet_requests_calibration(self, packet: dict[str, Any]) -> bool:
+        if "calibration_request_id" in packet:
+            try:
+                request_id = int(packet.get("calibration_request_id", 0))
+            except Exception:
+                return False
+            if request_id > self.last_processed_calibration_request_id:
+                self.last_processed_calibration_request_id = request_id
+                return True
+            return False
         return bool(packet.get("calibration_requested", False))
 
     def _reset_height_alignment(self) -> None:

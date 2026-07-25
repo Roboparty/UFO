@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.realtime.realtime_z_server import (  # noqa: E402
     ModeState,
     OnlineZInferer,
+    ResumeRampState,
     _blend_z,
     _extract_latest_frame,
     _is_pose_stale,
@@ -115,6 +116,33 @@ def test_resume_ramp_blends_old_z_to_live_z():
     np.testing.assert_allclose(_blend_z(start_z, live_z, 1.0), live_z)
 
 
+def test_resume_ramp_waits_for_first_live_z_before_timing():
+    seed_z = np.zeros(256, dtype=np.float32)
+    live_z = np.ones(256, dtype=np.float32)
+    ramp = ResumeRampState(duration_s=0.5)
+    ramp.start_pending(seed_z)
+
+    np.testing.assert_allclose(
+        ramp.apply(live_z, produced_live_z=False, now=100.0),
+        seed_z,
+    )
+    assert ramp.pending
+    assert ramp.ramp_start_z is None
+
+    np.testing.assert_allclose(
+        ramp.apply(live_z, produced_live_z=True, now=100.0),
+        seed_z,
+    )
+    assert not ramp.pending
+    assert ramp.ramp_start_z is not None
+    assert ramp.ramp_start_t == 100.0
+
+    np.testing.assert_allclose(
+        ramp.apply(live_z, produced_live_z=True, now=100.25),
+        np.full(256, 0.5, dtype=np.float32),
+    )
+
+
 if __name__ == "__main__":
     test_pose_stale_check_blocks_publish_path()
     test_extract_latest_frame_rejects_nonfinite_pose_values()
@@ -123,4 +151,5 @@ if __name__ == "__main__":
     test_realtime_z_starts_frozen_and_supports_explicit_follow()
     test_resume_reset_clears_velocity_history_and_seeds_last_z()
     test_resume_ramp_blends_old_z_to_live_z()
+    test_resume_ramp_waits_for_first_live_z_before_timing()
     print("realtime_z_server safety tests ok")

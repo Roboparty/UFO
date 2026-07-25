@@ -22,6 +22,8 @@ WEB_PORT="${WEB_PORT:-8080}"
 WEB_MUJOCO_XML="${WEB_MUJOCO_XML:-${UFO_ROOT}/data/robots/g1/scene_29dof_freebase.xml}"
 CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-}"
 ENABLE_PICO_POLICY_CONTROL="${ENABLE_PICO_POLICY_CONTROL:-0}"
+TELEOP_POLICY_CONFIG="${TELEOP_POLICY_CONFIG:-${POLICY_CONFIG:-${UFO_ROOT}/config/policy/g1_policy.yaml}}"
+export TELEOP_POLICY_CONFIG
 
 [[ -d "${UFO_ROOT}" ]] || fail "UFO_ROOT does not exist: ${UFO_ROOT}"
 [[ -f "${UFO_ROOT}/scripts/teleop/xrobot_teleop_to_pose_zmq_server.py" ]] || \
@@ -136,6 +138,7 @@ cmd=(
   --req_bind_addr tcp://*:28701
   --rep_bind_addr tcp://*:28702
   --ctrl_bind_addr tcp://*:28703
+  --policy-config "${TELEOP_POLICY_CONFIG}"
 )
 
 [[ -n "${ACTUAL_HUMAN_HEIGHT:-}" ]] && cmd+=(--actual_human_height "${ACTUAL_HUMAN_HEIGHT}")

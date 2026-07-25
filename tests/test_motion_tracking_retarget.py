@@ -1,6 +1,7 @@
 from pathlib import Path
 import argparse
 import sys
+import tempfile
 import threading
 
 import numpy as np
@@ -11,7 +12,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts" / "teleop"))
 
 from motion_tracking_retarget.helper import default_controller_buttons, parse_xrobot_motion_snapshot  # noqa: E402
+from motion_tracking_retarget import robot_config as robot_config_module  # noqa: E402
 from motion_tracking_retarget.joint_mapping import (  # noqa: E402
+    DEFAULT_POLICY_CONFIG,
     UFO_EXPECTED_G1_JOINT_NAMES,
     build_joint_permutation,
     canonical_joint_names,
@@ -22,6 +25,28 @@ from motion_tracking_retarget.params import XR_BODY_JOINT_NAMES, resolve_robot_x
 from motion_tracking_retarget.robot_config import load_teleop_robot_config  # noqa: E402
 from motion_tracking_retarget.xrobot_retarget import XRobotRetargetWorkerRuntime  # noqa: E402
 from scripts.teleop.xrobot_teleop_to_pose_zmq_server import LowLatencyTeleopPoseZMQServer  # noqa: E402
+
+
+def _server_args(**overrides):
+    args = argparse.Namespace(
+        robot="unitree_g1",
+        actual_human_height=None,
+        vis_fps=None,
+        ctrl_fps=None,
+        lookback_ms=None,
+        retarget_buffer_window_s=None,
+        log_interval_s=None,
+        req_bind_addr=None,
+        rep_bind_addr=None,
+        ctrl_bind_addr=None,
+        ctrl_pub_bind_addr="",
+        policy_config=None,
+        web_visualize=False,
+        calibration_button=None,
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
 
 
 def _neutral_xr_poses():
@@ -186,7 +211,7 @@ def test_synthetic_neutral_retarget_outputs_finite_qpos():
 
 
 def test_joint_permutation_validation_and_serialization():
-    canonical = tuple(policy_joint_names())
+    canonical = tuple(policy_joint_names(DEFAULT_POLICY_CONFIG))
     assert canonical == tuple(UFO_EXPECTED_G1_JOINT_NAMES)
     identity = build_joint_permutation(canonical, UFO_EXPECTED_G1_JOINT_NAMES)
     np.testing.assert_array_equal(identity, np.arange(29))
@@ -234,6 +259,7 @@ def test_pico_policy_control_default_disabled_and_realtime_lookback_zero():
     assert 'CTRL_PUB_BIND_ADDR was set but ENABLE_PICO_POLICY_CONTROL is not 1' in teleop_launcher
     assert '--actual_human_height "${ACTUAL_HUMAN_HEIGHT:-1.75}"' not in teleop_launcher
     assert '--lookback_ms "${LOOKBACK_MS:-50}"' not in teleop_launcher
+    assert '--policy-config "${TELEOP_POLICY_CONFIG}"' in teleop_launcher
     assert '[[ -n "${ACTUAL_HUMAN_HEIGHT:-}" ]]' in teleop_launcher
     assert '[[ -n "${LOOKBACK_MS:-}" ]]' in teleop_launcher
     assert "pico_policy_control:" in teleop_server
@@ -247,20 +273,7 @@ def test_pico_policy_control_default_disabled_and_realtime_lookback_zero():
 
 
 def test_server_uses_teleop_yaml_defaults_when_cli_omits_values():
-    args = argparse.Namespace(
-        robot="unitree_g1",
-        actual_human_height=None,
-        vis_fps=None,
-        ctrl_fps=None,
-        lookback_ms=None,
-        retarget_buffer_window_s=None,
-        log_interval_s=None,
-        req_bind_addr=None,
-        rep_bind_addr=None,
-        ctrl_bind_addr=None,
-        ctrl_pub_bind_addr="",
-        calibration_button=None,
-    )
+    args = _server_args()
     server = LowLatencyTeleopPoseZMQServer(args)
     cfg = server.teleop_config
 
@@ -273,7 +286,44 @@ def test_server_uses_teleop_yaml_defaults_when_cli_omits_values():
     assert server.req_bind_addr == cfg.req_bind_addr
     assert server.rep_bind_addr == cfg.rep_bind_addr
     assert server.ctrl_bind_addr == cfg.ctrl_bind_addr
-    assert server.ufo_output_joint_names == policy_joint_names()
+    assert server.ufo_output_joint_names == policy_joint_names(DEFAULT_POLICY_CONFIG)
+    assert not server.web_visualize
+
+
+def test_server_reads_explicit_policy_config_for_joint_order():
+    default_names = tuple(policy_joint_names(DEFAULT_POLICY_CONFIG))
+    reversed_names = tuple(reversed(default_names))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_path = Path(tmpdir) / "policy.yaml"
+        cfg_path.write_text(
+            yaml.safe_dump({"policy_joint_names": list(reversed_names)}),
+            encoding="utf-8",
+        )
+        server = LowLatencyTeleopPoseZMQServer(_server_args(policy_config=str(cfg_path)))
+
+    assert server.policy_config_path == str(cfg_path)
+    assert server.ufo_output_joint_names == reversed_names
+    np.testing.assert_array_equal(
+        server.joint_permutation,
+        build_joint_permutation(server.canonical_joint_names, reversed_names),
+    )
+
+
+def test_server_visualize_yaml_sets_web_viewer_default():
+    original_config_root = robot_config_module.CONFIG_ROOT
+    raw = yaml.safe_load((original_config_root / "g1.yaml").read_text(encoding="utf-8"))
+    raw["server"]["visualize"] = True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        temp_config_root = Path(tmpdir)
+        (temp_config_root / "g1.yaml").write_text(yaml.safe_dump(raw), encoding="utf-8")
+        robot_config_module.CONFIG_ROOT = temp_config_root
+        try:
+            server = LowLatencyTeleopPoseZMQServer(_server_args(web_visualize=False))
+        finally:
+            robot_config_module.CONFIG_ROOT = original_config_root
+
+    assert server.web_visualize
 
 
 def test_calibration_edge_advances_seq_even_when_timestamp_repeats():
@@ -299,6 +349,16 @@ def test_calibration_edge_advances_seq_even_when_timestamp_repeats():
     assert server.latest_vr_calibration_request_id == 1
 
 
+def test_worker_calibration_request_id_is_monotonic():
+    runtime = XRobotRetargetWorkerRuntime.__new__(XRobotRetargetWorkerRuntime)
+    runtime.last_processed_calibration_request_id = 0
+
+    assert runtime._packet_requests_calibration({"calibration_request_id": 1})
+    assert not runtime._packet_requests_calibration({"calibration_request_id": 1})
+    assert runtime._packet_requests_calibration({"calibration_request_id": 2})
+    assert not runtime._packet_requests_calibration({"calibration_request_id": 0})
+
+
 if __name__ == "__main__":
     test_teleop_config_loads()
     test_retarget_xml_loads_without_external_motion_tracking()
@@ -309,5 +369,8 @@ if __name__ == "__main__":
     test_joint_permutation_validation_and_serialization()
     test_pico_policy_control_default_disabled_and_realtime_lookback_zero()
     test_server_uses_teleop_yaml_defaults_when_cli_omits_values()
+    test_server_reads_explicit_policy_config_for_joint_order()
+    test_server_visualize_yaml_sets_web_viewer_default()
     test_calibration_edge_advances_seq_even_when_timestamp_repeats()
+    test_worker_calibration_request_id_is_monotonic()
     print("motion_tracking_retarget tests ok")

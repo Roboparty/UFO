@@ -1,7 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+UFO_ROOT="${UFO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}"
+TELEOP_POLICY_CONFIG="${TELEOP_POLICY_CONFIG:-${POLICY_CONFIG:-${UFO_ROOT}/config/policy/g1_policy.yaml}}"
+export TELEOP_POLICY_CONFIG
+
+cd "${SCRIPT_DIR}"
 
 cmd=(
     python xrobot_teleop_to_pose_zmq_server.py
@@ -9,6 +14,7 @@ cmd=(
     --req_bind_addr tcp://*:28701
     --rep_bind_addr tcp://*:28702
     --ctrl_bind_addr tcp://*:28703
+    --policy-config "${TELEOP_POLICY_CONFIG}"
 )
 
 [[ -n "${ACTUAL_HUMAN_HEIGHT:-}" ]] && cmd+=(--actual_human_height "${ACTUAL_HUMAN_HEIGHT}")

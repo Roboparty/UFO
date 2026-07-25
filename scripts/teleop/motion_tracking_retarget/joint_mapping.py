@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import os
 from pathlib import Path
 from typing import Sequence
 
@@ -47,6 +48,11 @@ UFO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_POLICY_CONFIG = UFO_ROOT / "config" / "policy" / "g1_policy.yaml"
 
 
+def default_policy_config_path() -> Path:
+    configured = os.environ.get("TELEOP_POLICY_CONFIG") or os.environ.get("POLICY_CONFIG")
+    return Path(configured) if configured else DEFAULT_POLICY_CONFIG
+
+
 def _duplicates(names: Sequence[str]) -> list[str]:
     counts = Counter(str(name) for name in names)
     return sorted(name for name, count in counts.items() if count > 1)
@@ -84,8 +90,8 @@ def build_joint_permutation(
     return np.asarray([canonical_index[name] for name in output], dtype=np.int64)
 
 
-def policy_joint_names(policy_config_path: str | Path = DEFAULT_POLICY_CONFIG) -> tuple[str, ...]:
-    cfg_path = Path(policy_config_path)
+def policy_joint_names(policy_config_path: str | Path | None = None) -> tuple[str, ...]:
+    cfg_path = Path(policy_config_path) if policy_config_path is not None else default_policy_config_path()
     with open(cfg_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     names = data.get("policy_joint_names")

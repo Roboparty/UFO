@@ -531,7 +531,11 @@ START_XROBOT_SERVICE=1 scripts/teleop/teleop_pose_50hz_onboard.sh
 The teleop bridge defaults come from `config/teleop/g1.yaml`. The shell launchers only
 override values such as `ACTUAL_HUMAN_HEIGHT`, `LOOKBACK_MS`, `CTRL_FPS`,
 `RETARGET_BUFFER_WINDOW_S`, `LOG_INTERVAL_S`, and `VIS_FPS` when the corresponding
-environment variable is explicitly set.
+environment variable is explicitly set. `TELEOP_POLICY_CONFIG` defaults to
+`POLICY_CONFIG` and then to `config/policy/g1_policy.yaml`; it is passed to the teleop
+server so the qpos joint permutation is checked against the same `policy_joint_names`
+used by policy inference. `server.visualize` in `config/teleop/g1.yaml` is the web viewer
+default, and `WEB_VISUALIZE=1` still enables it from the launcher.
 
 It probes UFO-specific environments in this order:
 
