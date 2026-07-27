@@ -22,8 +22,9 @@ d92bd38e914f888e90da3a303d6ec2a73ad6e60d
 Set up the onboard runtime in this order:
 
 1. Create a Python 3.10 venv.
-2. Install ARM64 Python dependencies from the project requirements or an
-   onboard wheelhouse.
+2. Install ARM64 runtime dependencies from `requirements/runtime.txt` or an
+   onboard wheelhouse. Ordinary Sim2Real does not need human pose,
+   XRoboToolkit, retargeting, GMR, or torch.
 3. Restore/download model artifacts under `model/g1_policy/`.
 4. Verify artifacts:
 
@@ -31,9 +32,13 @@ Set up the onboard runtime in this order:
    python scripts/onboard/check_deploy_artifacts.py
    ```
 
-5. Install the ARM64 XRoboToolkit SDK:
+5. For onboard PICO teleop only, install the ARM64 XRoboToolkit SDK and teleop
+   dependencies. `requirements/teleop.txt` inherits `requirements/runtime.txt`
+   because onboard teleop also runs realtime `z`, ONNX inference, policy code,
+   and G1 runtime:
 
    ```bash
+   python -m pip install -r requirements/teleop.txt
    scripts/onboard/install_xrobot_sdk.sh \
      --sdk-root /path/to/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64 \
      --venv /path/to/ufo_deploy_venv
@@ -61,9 +66,14 @@ Set up the onboard runtime in this order:
 9. Run ordinary onboard Sim2Real or onboard PICO teleop Sim2Real only after the
    physical robot safety setup is ready.
 
-## No-GMR Teleop
+## Deployment Dependencies
 
-This deploy commit does not use the old external GMR stack:
+Current deploy does not require the external `general_motion_retargeting`/GMR
+package. Ordinary onboard Sim2Real has no retargeting dependency. Onboard PICO
+teleop Sim2Real uses XRoboToolkit body joints, the vendored
+`scripts/teleop/motion_tracking_retarget/` package, and Mink IK.
+
+The legacy GMR architecture is no longer used by the deploy runtime:
 
 ```text
 general_motion_retargeting installed: no
@@ -71,15 +81,15 @@ GMR required: no
 torch required for teleop retargeting: no
 ```
 
-Do not sync `/home/xue/GMR`, do not sync `/home/xue/teleop_ws/GMR`, and do not
-install `general_motion_retargeting` for this deploy path. Online retargeting is
-provided by:
+Old GMR workspaces and `general_motion_retargeting` are not part of this deploy
+path. Online teleop retargeting is provided by:
 
 ```text
 scripts/teleop/motion_tracking_retarget/
 ```
 
-`qpsolvers` and `daqp` are Mink solver dependencies, not old-GMR dependencies.
+`qpsolvers` and `daqp` are Mink solver dependencies, not legacy GMR
+dependencies. See `docs/deployment_dependencies.md` for the dependency matrix.
 
 ## Diagnostics
 

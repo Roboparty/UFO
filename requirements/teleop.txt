@@ -1,0 +1,10 @@
+# PICO/XRoboToolkit teleop dependency set.
+# Includes runtime dependencies because onboard teleop Sim2Real also runs
+# realtime z, ONNX inference, policy code, and G1 runtime.
+-r runtime.txt
+
+# Teleop retarget-specific dependencies.
+# This file intentionally excludes legacy retarget packages and torch.
+mink
+qpsolvers
+daqp

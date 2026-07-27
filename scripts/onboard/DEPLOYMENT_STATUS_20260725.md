@@ -57,7 +57,14 @@ Not system-tested in this pass:
 
 ## Dependency Conclusions
 
-This deploy commit does not use the old external GMR stack.
+Current deploy does not require the external `general_motion_retargeting`/GMR
+package. Ordinary onboard Sim2Real has no human-pose or retargeting dependency.
+It uses the policy ONNX, observation, backward encoder latent `z`, UFO policy,
+and G1 command path directly.
+
+Onboard PICO teleop Sim2Real uses XRoboToolkit body joints, the vendored
+`scripts/teleop/motion_tracking_retarget/` package, and Mink IK. The legacy GMR
+architecture is no longer used by the deploy runtime.
 
 ```text
 general_motion_retargeting installed: no
@@ -78,7 +85,7 @@ joint-order mapping
 ```
 
 `qpsolvers` and `daqp`, when installed, are Mink solver dependencies. They are
-not old-GMR dependencies.
+not legacy GMR dependencies.
 
 ## Machine-Local Requirements
 

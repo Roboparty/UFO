@@ -1,3 +1,6 @@
+# Compatibility superset.
+# For deployment use requirements/runtime.txt or requirements/teleop.txt.
+# This full requirements.txt contains training/debug dependencies.
 mujoco
 mink
 loguru

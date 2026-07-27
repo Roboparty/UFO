@@ -56,7 +56,8 @@ Robot:
 - `xrobotoolkit_sdk` and canonical retarget dependencies in the onboard teleop Python environment
 - PICO headset with trackers/controllers for onboard teleop
 
-This deploy branch does not require the old external GMR stack:
+Current deploy does not require the external `general_motion_retargeting`/GMR
+package. The legacy GMR architecture is no longer used by the deploy runtime:
 
 ```text
 general_motion_retargeting installed: no
@@ -64,9 +65,16 @@ GMR required: no
 torch required for teleop retargeting: no
 ```
 
+Ordinary Sim2Real has no human-pose or retargeting dependency. It runs the
+released policy ONNX path directly: observation, backward encoder latent `z`,
+UFO policy, and G1 command.
+
 Onboard PICO teleop uses the vendored `scripts/teleop/motion_tracking_retarget/`
 package with XRoboToolkit polling and Mink IK. `qpsolvers` and `daqp`, when
-present, are Mink solver dependencies rather than GMR dependencies.
+present, are Mink solver dependencies rather than legacy GMR dependencies.
+
+See [docs/deployment_dependencies.md](docs/deployment_dependencies.md) for the
+deployment dependency matrix.
 
 ## Clone And Install
 
@@ -77,14 +85,29 @@ export UFO_ROOT=$PWD
 
 conda create -n ufo-deploy python=3.10 -y
 conda activate ufo-deploy
-pip install -r requirements.txt
+pip install -r requirements/runtime.txt
 ```
+
+For PICO teleop, install the teleop set in the teleop Python environment:
+
+```bash
+pip install -r requirements/teleop.txt
+```
+
+`requirements/teleop.txt` includes `requirements/runtime.txt` because direct
+onboard PICO teleop Sim2Real also runs realtime `z`, ONNX inference, policy
+code, and G1 runtime. It still excludes torch and the external GMR package.
+
+`requirements.txt` remains as a compatibility superset and includes
+training/debug dependencies. For ordinary deployment use
+`requirements/runtime.txt`; for PICO teleop deployment use
+`requirements/teleop.txt`.
 
 By default, policy inference uses ONNX Runtime `CPUExecutionProvider`. To use CUDA, install
 `onnxruntime-gpu` that matches your CUDA setup and set `onnx_providers` in
 `config/policy/g1_policy.yaml`.
 
-For CPU-only runs, the `onnxruntime` package from `requirements.txt` is enough.
+For CPU-only runs, the `onnxruntime` package from `requirements/runtime.txt` is enough.
 
 Check the base Python dependencies:
 

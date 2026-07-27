@@ -132,12 +132,15 @@ Create a Python 3.10 environment on the teleop host:
 ```bash
 conda create -n ufo-teleop python=3.10 -y
 conda activate ufo-teleop
-python -m pip install mink mujoco numpy scipy pyyaml pyzmq
+cd "$UFO_ROOT"
+python -m pip install -r requirements/teleop.txt
 ```
 
 Use this `ufo-teleop` environment for `scripts/teleop/teleop_pose_50hz.sh` and the onboard
 teleop bridge. Keep the main `ufo-deploy` environment for MuJoCo, realtime `z`, and policy
-inference.
+inference. `requirements/teleop.txt` inherits `requirements/runtime.txt` so a
+direct onboard teleop venv also has the realtime `z`, ONNX inference, policy,
+and G1 runtime dependencies.
 
 On the G1 Jetson you can also use a venv, for example:
 
@@ -145,7 +148,8 @@ On the G1 Jetson you can also use a venv, for example:
 python3 -m venv /home/unitree/ufo_teleop_venv
 source /home/unitree/ufo_teleop_venv/bin/activate
 pip install --upgrade pip
-python -m pip install mink mujoco numpy scipy pyyaml pyzmq
+cd /home/unitree/UFO-Deploy
+python -m pip install -r requirements/teleop.txt
 ```
 
 If the XRoboToolkit binding ships a native `.so`, make sure its directory is in
@@ -513,10 +517,14 @@ The onboard launcher automatically derives `UFO_ROOT` from its own path if `UFO_
 not set. It checks the Python executable, `mink`, `mujoco`, `numpy`, `scipy`, `pyyaml`,
 `pyzmq`, `xrobotoolkit_sdk`, the vendored canonical retarget assets, XRoboToolkit service,
 and required local ZMQ ports before starting `xrobot_teleop_to_pose_zmq_server.py`.
-This deploy path does not use `/home/xue/GMR`, `/home/xue/teleop_ws/GMR`,
-`general_motion_retargeting`, or torch for retargeting. The online retargeter is
-the vendored `scripts/teleop/motion_tracking_retarget/` package. `qpsolvers` and
-`daqp` are Mink dependencies, not old-GMR dependencies.
+Current deploy does not require the external `general_motion_retargeting`/GMR
+package. The legacy GMR architecture is no longer used by PICO teleop Sim2Real.
+Old GMR workspaces are not part of this deploy path.
+
+PICO teleop Sim2Real uses XRoboToolkit body joints, the vendored
+`scripts/teleop/motion_tracking_retarget/` package, and Mink IK. Torch is not a
+teleop retarget dependency. `qpsolvers` and `daqp` are Mink dependencies, not
+legacy GMR dependencies.
 The web viewer is off by default; enable it only for debugging:
 
 ```bash

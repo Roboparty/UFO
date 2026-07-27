@@ -1,0 +1,10 @@
+# Training/debug dependency set preserved separately from deploy runtime.
+# The deploy branch is runtime-focused; use this only for training-era tools.
+-r runtime.txt
+
+# Training/export dependencies.
+torch
+pynput
+ipdb
+pygame
+pytest

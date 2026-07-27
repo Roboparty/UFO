@@ -1,0 +1,13 @@
+# Runtime dependencies for MuJoCo sim2sim and ordinary onboard Sim2Real.
+# This file intentionally excludes teleop retarget and training-only packages.
+numpy
+mujoco
+onnxruntime
+pyyaml
+scipy
+pyzmq
+joblib
+loguru
+termcolor
+sshkeyboard
+huggingface-hub
