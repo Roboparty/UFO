@@ -219,6 +219,26 @@ def _check_viewer_dependencies(reporter: Reporter) -> None:
     _import_module("mjviser", "mjviser", reporter)
 
 
+def _teleop_yaml_requests_viewer(reporter: Reporter) -> bool:
+    config_path = Path(os.environ.get("TELEOP_CONFIG", "config/teleop/g1.yaml"))
+    if not config_path.is_absolute():
+        config_path = Path.cwd() / config_path
+    try:
+        import yaml
+
+        with config_path.open("r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+    except Exception as exc:
+        reporter.warn(f"could not read teleop config for viewer preflight: {config_path}: {exc}")
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    server = cfg.get("server")
+    if not isinstance(server, dict):
+        return False
+    return bool(server.get("visualize", False))
+
+
 def _read_cmdline(pid_dir: Path) -> str:
     try:
         raw = (pid_dir / "cmdline").read_bytes()
@@ -424,6 +444,7 @@ def main() -> int:
     args = parse_args()
     reporter = Reporter()
     ports = args.ports if args.ports is not None else list(PORT_PROFILES[args.port_profile])
+    viewer_requested = bool(args.web_visualize or os.environ.get("WEB_VISUALIZE", "0") == "1")
 
     reporter.info(f"python: {sys.executable}")
     _import_module("mink", "mink", reporter)
@@ -440,8 +461,14 @@ def main() -> int:
     if not args.skip_canonical_retarget:
         _check_canonical_retarget(reporter)
 
-    if args.web_visualize or os.environ.get("WEB_VISUALIZE", "0") == "1":
+    if not viewer_requested and _teleop_yaml_requests_viewer(reporter):
+        viewer_requested = True
+        reporter.info("web viewer requested by config/teleop/g1.yaml")
+
+    if viewer_requested:
         _check_viewer_dependencies(reporter)
+        if args.ports is None and int(os.environ.get("WEB_PORT", "8080")) not in ports:
+            ports = list(ports) + [int(os.environ.get("WEB_PORT", "8080"))]
 
     if not args.skip_service:
         _check_service(_parse_patterns(args.service_pattern), reporter)

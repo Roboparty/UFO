@@ -118,7 +118,21 @@ check_ports=(28701 28702 28703)
 if [[ -n "${CTRL_PUB_BIND_ADDR}" ]]; then
   check_ports+=(28704)
 fi
-if [[ "${WEB_VISUALIZE}" == "1" ]]; then
+
+yaml_visualize="$("${TELEOP_PY}" - "${UFO_ROOT}/config/teleop/g1.yaml" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+path = Path(sys.argv[1])
+try:
+    cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+    print("1" if bool((cfg or {}).get("server", {}).get("visualize", False)) else "0")
+except Exception:
+    print("0")
+PY
+)"
+if [[ "${WEB_VISUALIZE}" == "1" || "${yaml_visualize}" == "1" ]]; then
   check_ports+=("${WEB_PORT}")
   [[ -f "${WEB_MUJOCO_XML}" ]] || fail "missing web MuJoCo XML: ${WEB_MUJOCO_XML}"
 fi

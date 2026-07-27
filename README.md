@@ -51,10 +51,22 @@ Robot:
 - Python 3.10 venv
 - Unitree SDK2 Python binding, including `g1_interface`
 - CycloneDDS runtime
-- low-level network interface configured in `config/robot/g1_real.yaml`
+- low-level DDS network interface passed explicitly with `G1_INTERFACE` or a local `ROBOT_CONFIG`
 - XRoboToolkit headless service for onboard PICO teleop
 - `xrobotoolkit_sdk` and canonical retarget dependencies in the onboard teleop Python environment
 - PICO headset with trackers/controllers for onboard teleop
+
+This deploy branch does not require the old external GMR stack:
+
+```text
+general_motion_retargeting installed: no
+GMR required: no
+torch required for teleop retargeting: no
+```
+
+Onboard PICO teleop uses the vendored `scripts/teleop/motion_tracking_retarget/`
+package with XRoboToolkit polling and Mink IK. `qpsolvers` and `daqp`, when
+present, are Mink solver dependencies rather than GMR dependencies.
 
 ## Clone And Install
 
@@ -206,6 +218,86 @@ for key, path in files.items():
 print("model artifact sha256 ok")
 PY
 ```
+
+For onboard deployment, also run the repo-side manifest checker. This manifest
+records required paths and known hashes without committing large model binaries:
+
+```bash
+python scripts/onboard/check_deploy_artifacts.py
+```
+
+`model/g1_policy/artifact_manifest.yaml` contains authoritative hashes only when
+they are known. Missing pkl/metadata hashes are reported as warnings rather than
+invented values.
+
+## G1 Onboard Clean-Checkout Setup
+
+From a clean onboard checkout:
+
+```bash
+git clone --branch deploy --single-branch https://github.com/Roboparty/UFO.git UFO-Deploy
+cd UFO-Deploy
+git rev-parse HEAD
+```
+
+Then:
+
+1. Create a Python 3.10 venv and install ARM64 dependencies.
+2. Restore/download `model/g1_policy/` artifacts and run
+   `python scripts/onboard/check_deploy_artifacts.py`.
+3. Install the ARM64 XRoboToolkit SDK:
+
+   ```bash
+   scripts/onboard/install_xrobot_sdk.sh \
+     --sdk-root /path/to/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64 \
+     --venv /path/to/ufo_deploy_venv
+   ```
+
+4. Start/verify the XRoboToolkit service.
+5. Choose the low-level G1 DDS NIC explicitly:
+
+   ```bash
+   export G1_INTERFACE=<low-level-dds-interface>
+   ```
+
+   The launcher validates that this interface exists, is UP, has IPv4, and is
+   not the default-route interface unless explicitly allowed. It does not
+   silently auto-select a NIC.
+
+6. If the current prebuilt `g1_interface` requires OpenSSL 1.1 on an OpenSSL 3
+   system, provide:
+
+   ```bash
+   export OPENSSL11_LIB=/path/to/openssl-1.1/lib
+   ```
+
+   This is a compatibility requirement of the prebuilt Unitree binding, not a
+   UFO Python dependency.
+
+7. Run no-actuation preflight:
+
+   ```bash
+   scripts/onboard/run_preflight_suite.sh
+   scripts/onboard/run_preflight_suite.sh --require-body
+   ```
+
+The onboard diagnostics live in `scripts/onboard/`. They avoid real actuation by
+default and do not substitute for physical safety checks.
+
+## Real G1 Validation
+
+For the fixed d92 deployment, the user confirmed:
+
+- ordinary onboard Sim2Real ran on the real G1;
+- onboard PICO teleop Sim2Real ran on the real G1;
+- the path from PICO/XRobot motion through retargeting, realtime z, UFO policy,
+  and real G1 actuation was validated;
+- no obvious functional problem was observed during the user-confirmed real G1
+  test.
+
+This does not claim systematic R2 fault injection, physical e-stop fault
+injection, PICO disconnect testing, process-kill testing, long-duration free
+walking, or quantified impact limits. Those remain separate validation tasks.
 
 ## Repository Map
 

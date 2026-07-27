@@ -1,0 +1,33 @@
+version: 1
+artifacts:
+  - path: model/g1_policy/exported/FBcprAuxModel.onnx
+    type: policy_onnx
+    required: true
+    sha256: e0a67a6e7d40e6bb50253da4f4e25451556de2dba6446ebaa05f424aee118067
+    expected_inputs:
+      actor_obs: [1, 721]
+    expected_outputs:
+      action: [1, 29]
+
+  - path: model/g1_policy/exported/backward_encoder.onnx
+    type: backward_onnx
+    required: true
+    sha256: d420fe09720a4d549f501d2e72e946e9cd8adc554617e787a1adebdbac2899f3
+    expected_inputs:
+      state: [batch, 64]
+      privileged_state: [batch, 463]
+    expected_outputs:
+      z: [batch, 256]
+
+  - path: model/g1_policy/exported/metadata.json
+    type: metadata
+    required: false
+    sha256: null
+    note: "Optional metadata file; no authoritative hash was available during onboard deployment."
+
+  - path: model/g1_policy/tracking_inference_mjlab/zs_7.pkl
+    type: tracking_context
+    required: true
+    sha256: null
+    expected_last_dim: 256
+    note: "Required tracking context. No authoritative hash was available during onboard deployment."

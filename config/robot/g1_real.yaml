@@ -3,7 +3,7 @@ ROBOT_TYPE: 'g1_real' # UFO-Deploy release real runtime supports Unitree G1 29-D
 ## SIM
 DOMAIN_ID: 0 # Domain id
 # Interface
-INTERFACE: "eth0"   # "eth1"   
+INTERFACE: "eth0"   # Override per machine with G1_INTERFACE or ROBOT_CONFIG.
 USE_JOYSTICK: True
 
 

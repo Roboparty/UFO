@@ -513,6 +513,10 @@ The onboard launcher automatically derives `UFO_ROOT` from its own path if `UFO_
 not set. It checks the Python executable, `mink`, `mujoco`, `numpy`, `scipy`, `pyyaml`,
 `pyzmq`, `xrobotoolkit_sdk`, the vendored canonical retarget assets, XRoboToolkit service,
 and required local ZMQ ports before starting `xrobot_teleop_to_pose_zmq_server.py`.
+This deploy path does not use `/home/xue/GMR`, `/home/xue/teleop_ws/GMR`,
+`general_motion_retargeting`, or torch for retargeting. The online retargeter is
+the vendored `scripts/teleop/motion_tracking_retarget/` package. `qpsolvers` and
+`daqp` are Mink dependencies, not old-GMR dependencies.
 The web viewer is off by default; enable it only for debugging:
 
 ```bash
@@ -613,11 +617,15 @@ Run these steps on the G1 Jetson:
    ```bash
    cd /home/unitree/UFO-Deploy
    source /home/unitree/ufo_deploy_venv/bin/activate
+   G1_INTERFACE=<low-level-dds-interface> \
    UFO_REAL_ROBOT_OK=1 VENV_PATH=/home/unitree/ufo_deploy_venv/bin/activate \
      ./run_g1_teleop_policy_onboard.sh
    ```
 
    This subscribes to realtime `z` and runs UFO policy inference.
+   The G1 DDS interface must be explicit. The launcher validates the interface
+   and can generate a temporary robot-config overlay instead of committing a
+   machine-specific `INTERFACE` value.
 
 5. Use the G1 wireless remote to manage robot and policy state.
 
@@ -642,6 +650,9 @@ Run these steps on the G1 Jetson:
 
    PICO buttons do not enable policy, clear R2, enter default pose, reset the real policy
    state machine, or bypass the physical e-stop in the default flow.
+
+The G1 wireless remote controls robot and policy state. PICO controls only the
+live reference follow/freeze state for realtime `z`.
 
 Legacy/debug PICO policy-control compatibility is available only when both launchers are
 explicitly opted in:

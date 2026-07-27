@@ -10,6 +10,15 @@ _smoke_runs/
 *.egg-info/
 tea_debug.log
 
-# The curated policy is present locally under model/, but the ONNX is >100 MB.
-# Keep it out of normal git history unless you publish it with Git LFS.
+# The curated policy is present locally under model/, but the ONNX/context
+# artifacts are large. Keep binaries out of normal git history; only track the
+# small deployment artifact manifest.
 model/
+!model/
+model/*
+!model/g1_policy/
+model/g1_policy/*
+!model/g1_policy/artifact_manifest.yaml
+
+# Machine-local SDK/OpenSSL installs live here as symlinks or copied binaries.
+external/
