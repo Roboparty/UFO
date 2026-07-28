@@ -8,6 +8,9 @@ Usage: scripts/onboard/run_preflight_suite.sh [options]
 No-actuation onboard deployment checks. This script does not start robot
 control, teleop bridge, or realtime z server.
 
+The validated G1 onboard deployment uses a CPython 3.10 venv. Conda is the
+validated workstation default, not the onboard preflight default.
+
 Options:
   --profile PROFILE    Dependency profile: ordinary, teleop, diagnostic, all (default: ordinary).
   --require-body        Fail if XRoboToolkit body data is unavailable.
@@ -19,6 +22,8 @@ Options:
 Environment:
   UFO_ROOT              Repository root (default: auto-detected).
   ONBOARD_PY           Python executable (default: /home/unitree/ufo_deploy_venv/bin/python).
+  ONBOARD_ALLOW_NONDEFAULT_PY
+                       Set to 1 only for debugging non-default onboard Python environments.
   G1_INTERFACE          Explicit low-level DDS NIC used by real launch checks.
   UNITREE_SDK_PYTHON    Optional unitree_sdk2_python checkout for diagnostic profile.
 EOF
@@ -36,6 +41,7 @@ fail() {
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 UFO_ROOT="${UFO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}"
 ONBOARD_PY="${ONBOARD_PY:-/home/unitree/ufo_deploy_venv/bin/python}"
+ONBOARD_ALLOW_NONDEFAULT_PY="${ONBOARD_ALLOW_NONDEFAULT_PY:-0}"
 PROFILE="ordinary"
 REQUIRE_BODY=0
 CHECK_Z_STREAM=0
@@ -88,6 +94,7 @@ log "NO-ACTUATION: this suite does not start robot control, teleop bridge, or re
 log "repo: ${UFO_ROOT}"
 log "python: ${ONBOARD_PY}"
 log "profile: ${PROFILE}"
+log "onboard_python_policy: CPython 3.10 venv"
 log "git_head: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
 log "disk:"
 df -h . || true
@@ -116,7 +123,13 @@ case "${PROFILE}" in
     ;;
 esac
 
-"${ONBOARD_PY}" scripts/onboard/check_g1_onboard_env.py --profile "${PROFILE}"
+env_check_args=(--profile "${PROFILE}" --target g1-onboard)
+if [[ "${ONBOARD_ALLOW_NONDEFAULT_PY}" == "1" ]]; then
+  log "WARNING: ONBOARD_ALLOW_NONDEFAULT_PY=1; using a non-default onboard Python environment"
+  env_check_args+=(--allow-nondefault-python-env)
+fi
+
+"${ONBOARD_PY}" scripts/onboard/check_g1_onboard_env.py "${env_check_args[@]}"
 
 if [[ "${run_control_checks}" == "1" ]]; then
   "${ONBOARD_PY}" scripts/onboard/check_deploy_artifacts.py

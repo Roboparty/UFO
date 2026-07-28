@@ -127,7 +127,9 @@ runtime clone of `motion_tracking` is required.
 
 ## Python Environment
 
-Create a Python 3.10 environment on the teleop host:
+Create a Python 3.10 environment on the teleop host.
+
+On a workstation, the release-supported default is Conda:
 
 ```bash
 conda create -n ufo-teleop python=3.10 -y
@@ -136,21 +138,26 @@ cd "$UFO_ROOT"
 python -m pip install -r requirements/teleop.txt
 ```
 
-Use this `ufo-teleop` environment for `scripts/teleop/teleop_pose_50hz.sh` and the onboard
-teleop bridge. Keep the main `ufo-deploy` environment for MuJoCo, realtime `z`, and policy
-inference. `requirements/teleop.txt` inherits `requirements/runtime.txt` so a
-direct onboard teleop venv also has the realtime `z`, ONNX inference, policy,
-and G1 runtime dependencies.
+Use this `ufo-teleop` Conda environment for the workstation
+`scripts/teleop/teleop_pose_50hz.sh` bridge. Keep the main workstation
+`ufo-deploy` Conda environment for MuJoCo, realtime `z`, and policy inference.
 
-On the G1 Jetson you can also use a venv, for example:
+On the G1 onboard Jetson, the validated default is a Python 3.10 venv because
+native Unitree, XRoboToolkit, and CycloneDDS libraries depend on system ABI
+compatibility. Direct onboard PICO teleop can use the same deployment venv as
+policy and realtime `z`:
 
 ```bash
-python3 -m venv /home/unitree/ufo_teleop_venv
-source /home/unitree/ufo_teleop_venv/bin/activate
-pip install --upgrade pip
+python3.10 -m venv /home/unitree/ufo_deploy_venv
+source /home/unitree/ufo_deploy_venv/bin/activate
+python -m pip install --upgrade pip
 cd /home/unitree/UFO-Deploy
 python -m pip install -r requirements/teleop.txt
 ```
+
+`requirements/teleop.txt` inherits `requirements/runtime.txt` so a direct
+onboard teleop venv also has the realtime `z`, ONNX inference, policy, and G1
+runtime dependencies.
 
 If the XRoboToolkit binding ships a native `.so`, make sure its directory is in
 `LD_LIBRARY_PATH` before importing `xrobotoolkit_sdk`.
@@ -549,7 +556,14 @@ server so the qpos joint permutation is checked against the same `policy_joint_n
 used by policy inference. `server.visualize` in `config/teleop/g1.yaml` is the web viewer
 default, and `WEB_VISUALIZE=1` still enables it from the launcher.
 
-It probes UFO-specific environments in this order:
+The release-supported onboard default is:
+
+```text
+/home/unitree/ufo_deploy_venv/bin/python
+```
+
+For compatibility/debugging, the launcher probes UFO-specific environments in
+this order when `TELEOP_PY` is not set:
 
 ```text
 ${UFO_ROOT}/.venv/bin/python

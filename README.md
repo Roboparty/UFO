@@ -32,8 +32,7 @@ Only the released Unitree G1 29DoF policy artifact layout documented below is re
 
 Workstation:
 
-- Linux workstation with Conda
-- Python 3.10
+- Linux workstation with Conda and Python 3.10
 - MuJoCo
 - Optional CUDA-capable GPU for realtime `z` encoding
 
@@ -55,6 +54,26 @@ Robot:
 - for onboard PICO teleop only: XRoboToolkit headless service, `xrobotoolkit_sdk`,
   canonical retarget dependencies, and PICO headset with trackers/controllers
 - optional readonly diagnostics only: `unitree_sdk2py`
+
+## Official Python Environment Policy
+
+Release-supported defaults:
+
+```text
+Workstation:
+Conda with Python 3.10
+
+G1 onboard:
+Python 3.10 venv
+```
+
+Use Conda on the PC/workstation for local sim2sim, split-workstation teleop,
+model checks, and development validation. Use a CPython 3.10 `venv` on the G1
+onboard Jetson for ordinary Sim2Real, onboard PICO teleop Sim2Real, and
+readonly onboard diagnostics. The validated G1 onboard deployment uses Python
+3.10 venv by default because native Unitree, XRoboToolkit, and CycloneDDS
+libraries depend on system ABI compatibility. The onboard preflight validates
+that default when run with the G1 onboard target.
 
 ## External Runtime Dependencies
 
@@ -169,6 +188,10 @@ See [docs/deployment_dependencies.md](docs/deployment_dependencies.md) for the
 deployment dependency matrix.
 
 ## Clone And Install
+
+This section is the release-supported workstation setup. The validated G1
+onboard path uses the venv setup in
+[G1 Onboard Clean-Checkout Setup](#g1-onboard-clean-checkout-setup).
 
 ```bash
 git clone --branch deploy --single-branch https://github.com/Roboparty/UFO.git UFO-Deploy
@@ -382,8 +405,19 @@ Optional readonly diagnostics additionally require `unitree_sdk2py`.
 
 Set up ordinary onboard Sim2Real in this order:
 
-1. Create a Python 3.10 venv and install ARM64 dependencies from
-   `requirements/runtime.txt`.
+1. Create the release-supported Python 3.10 venv and install ARM64 dependencies
+   from `requirements/runtime.txt`:
+
+   ```bash
+   python3.10 -m venv /home/unitree/ufo_deploy_venv
+   source /home/unitree/ufo_deploy_venv/bin/activate
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements/runtime.txt
+   ```
+
+   For the validated G1 onboard path, activate this venv rather than a Conda
+   environment.
+
 2. Restore/download `model/g1_policy/` artifacts and run
    `python scripts/onboard/check_deploy_artifacts.py`.
 3. Install or expose the CPython 3.10 aarch64 `g1_interface` binding in the
@@ -411,7 +445,8 @@ Set up ordinary onboard Sim2Real in this order:
 6. Run no-actuation ordinary preflight:
 
    ```bash
-   scripts/onboard/run_preflight_suite.sh --profile ordinary
+   ONBOARD_PY=/home/unitree/ufo_deploy_venv/bin/python \
+     scripts/onboard/run_preflight_suite.sh --profile ordinary
    ```
 
 For onboard PICO teleop, install the teleop-only dependencies after the ordinary
@@ -421,21 +456,24 @@ runtime is healthy:
    python -m pip install -r requirements/teleop.txt
    scripts/onboard/install_xrobot_sdk.sh \
      --sdk-root /path/to/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64 \
-     --venv /path/to/ufo_deploy_venv
+     --venv /home/unitree/ufo_deploy_venv
    ```
 
 Start/verify the XRoboToolkit service, then run:
 
    ```bash
-   scripts/onboard/run_preflight_suite.sh --profile teleop
-   scripts/onboard/run_preflight_suite.sh --profile teleop --require-body
+   ONBOARD_PY=/home/unitree/ufo_deploy_venv/bin/python \
+     scripts/onboard/run_preflight_suite.sh --profile teleop
+   ONBOARD_PY=/home/unitree/ufo_deploy_venv/bin/python \
+     scripts/onboard/run_preflight_suite.sh --profile teleop --require-body
    ```
 
 For optional readonly low-state diagnostics, install `unitree_sdk2py` separately
 and run:
 
 ```bash
-scripts/onboard/run_preflight_suite.sh --profile diagnostic
+ONBOARD_PY=/home/unitree/ufo_deploy_venv/bin/python \
+  scripts/onboard/run_preflight_suite.sh --profile diagnostic
 ```
 
 The onboard diagnostics live in `scripts/onboard/`. They avoid real actuation by

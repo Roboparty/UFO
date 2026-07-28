@@ -3,6 +3,22 @@
 Current deploy does not require the external `general_motion_retargeting`/GMR
 package.
 
+## Python Environment Policy
+
+Release-supported defaults:
+
+| Host | Python environment |
+|-|-|
+| Workstation | Conda with Python 3.10 |
+| G1 onboard | Python 3.10 venv |
+
+Use workstation Conda for local MuJoCo sim2sim, split-workstation teleop,
+development checks, and packaging validation. Use the G1 onboard Python 3.10
+venv for ordinary Sim2Real, onboard PICO teleop Sim2Real, and readonly onboard
+diagnostics. The validated G1 onboard deployment uses venv by default because
+native Unitree, XRoboToolkit, and CycloneDDS libraries depend on system ABI
+compatibility.
+
 ## Flow Matrix
 
 | Flow | Human pose | XRoboToolkit | Retarget | GMR | Torch |

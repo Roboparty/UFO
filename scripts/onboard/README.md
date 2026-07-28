@@ -19,6 +19,44 @@ For the 2026-07-25 validated deployment, the expected base commit is:
 d92bd38e914f888e90da3a303d6ec2a73ad6e60d
 ```
 
+## Official Onboard Python Environment
+
+Release-supported defaults:
+
+```text
+Workstation:
+Conda with Python 3.10
+
+G1 onboard:
+Python 3.10 venv
+```
+
+These onboard helpers are written for the validated G1 Jetson venv path. Use
+Conda on the workstation. The default onboard venv path used by the preflight
+suite is:
+
+```text
+/home/unitree/ufo_deploy_venv
+```
+
+Create it from the clean checkout with the robot's Python 3.10:
+
+```bash
+python3.10 -m venv /home/unitree/ufo_deploy_venv
+source /home/unitree/ufo_deploy_venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements/runtime.txt
+```
+
+Onboard preflight validates the venv default when run with the G1 onboard
+target. It uses `/home/unitree/ufo_deploy_venv/bin/python` by default; set
+`ONBOARD_PY=/path/to/venv/bin/python` if you keep the venv in a non-default
+location.
+
+`scripts/onboard/run_preflight_suite.sh` passes `--target g1-onboard` to the
+environment checker. Direct PC/CI calls to `check_g1_onboard_env.py` default to
+`--target workstation`, where Conda is accepted.
+
 ## External Runtime Dependencies
 
 UFO deploy has three different external dependency categories.
@@ -113,7 +151,7 @@ IMU, and wireless remote state. It is not used by UFO policy control. Missing
 
 Set up ordinary onboard Sim2Real in this order:
 
-1. Create a Python 3.10 venv.
+1. Create and activate `/home/unitree/ufo_deploy_venv` as shown above.
 2. Install ARM64 runtime dependencies from `requirements/runtime.txt` or an
    onboard wheelhouse. Ordinary Sim2Real does not need human pose,
    XRoboToolkit, `xrobotoolkit_sdk`, PICO, retargeting, `unitree_sdk2py`, GMR,
@@ -142,7 +180,8 @@ Set up ordinary onboard Sim2Real in this order:
 8. Run no-actuation ordinary preflight:
 
    ```bash
-   scripts/onboard/run_preflight_suite.sh --profile ordinary
+   ONBOARD_PY=/home/unitree/ufo_deploy_venv/bin/python \
+     scripts/onboard/run_preflight_suite.sh --profile ordinary
    ```
 
 For onboard PICO teleop, start from the ordinary runtime above, then install the
@@ -154,20 +193,23 @@ inherits `requirements/runtime.txt` because onboard teleop also runs realtime
    python -m pip install -r requirements/teleop.txt
    scripts/onboard/install_xrobot_sdk.sh \
      --sdk-root /path/to/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64 \
-     --venv /path/to/ufo_deploy_venv
+     --venv /home/unitree/ufo_deploy_venv
    ```
 
 Start/verify the XRoboToolkit service, then run:
 
    ```bash
-   scripts/onboard/run_preflight_suite.sh --profile teleop
-   scripts/onboard/run_preflight_suite.sh --profile teleop --require-body
+   ONBOARD_PY=/home/unitree/ufo_deploy_venv/bin/python \
+     scripts/onboard/run_preflight_suite.sh --profile teleop
+   ONBOARD_PY=/home/unitree/ufo_deploy_venv/bin/python \
+     scripts/onboard/run_preflight_suite.sh --profile teleop --require-body
    ```
 
 Optional readonly diagnostics additionally require `unitree_sdk2py`:
 
 ```bash
-scripts/onboard/run_preflight_suite.sh --profile diagnostic
+ONBOARD_PY=/home/unitree/ufo_deploy_venv/bin/python \
+  scripts/onboard/run_preflight_suite.sh --profile diagnostic
 ```
 
 Run ordinary onboard Sim2Real or onboard PICO teleop Sim2Real only after the
@@ -203,7 +245,7 @@ dependencies. See `docs/deployment_dependencies.md` for the dependency matrix.
 Run from the repository root with the onboard venv:
 
 ```bash
-source /path/to/ufo_deploy_venv/bin/activate
+source /home/unitree/ufo_deploy_venv/bin/activate
 ```
 
 Recommended profiled suites:
@@ -218,7 +260,7 @@ scripts/onboard/run_preflight_suite.sh --profile all
 Individual ordinary control checks:
 
 ```bash
-python scripts/onboard/check_g1_onboard_env.py --g1-interface "$G1_INTERFACE"
+python scripts/onboard/check_g1_onboard_env.py --target g1-onboard --g1-interface "$G1_INTERFACE"
 python scripts/onboard/check_deploy_artifacts.py
 python scripts/onboard/check_policy_preflight.py --task config/exp/tracking/tracking.yaml
 ```
@@ -226,7 +268,7 @@ python scripts/onboard/check_policy_preflight.py --task config/exp/tracking/trac
 Individual onboard PICO teleop checks:
 
 ```bash
-python scripts/onboard/check_g1_onboard_env.py --profile teleop --g1-interface "$G1_INTERFACE"
+python scripts/onboard/check_g1_onboard_env.py --profile teleop --target g1-onboard --g1-interface "$G1_INTERFACE"
 python scripts/onboard/check_policy_preflight.py --task config/exp/tracking/teleop.yaml
 python scripts/onboard/check_xrobot_sdk.py --duration 5
 python scripts/onboard/check_xrobot_sdk.py --duration 5 --require-body
@@ -237,7 +279,7 @@ python scripts/onboard/check_z_stream.py --addr tcp://127.0.0.1:28711 --duration
 Individual optional diagnostic checks:
 
 ```bash
-python scripts/onboard/check_g1_onboard_env.py --profile diagnostic
+python scripts/onboard/check_g1_onboard_env.py --profile diagnostic --target g1-onboard
 ```
 
 `check_g1_state_readonly.py` is optional and subscribes only to live low state:

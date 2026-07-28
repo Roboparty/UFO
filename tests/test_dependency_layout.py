@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def _requirements(path: str, seen: set[Path] | None = None) -> set[str]:
@@ -142,9 +148,67 @@ def test_onboard_dependency_profiles_separate_external_sdks():
         encoding="utf-8"
     )
     assert 'PROFILE_CHOICES = ("ordinary", "teleop", "diagnostic", "all")' in source
+    assert 'TARGET_CHOICES = ("workstation", "g1-onboard")' in source
     assert 'CONTROL_PROFILES = ("ordinary", "teleop", "all")' in source
     assert 'TELEOP_PROFILES = ("teleop", "all")' in source
     assert 'DIAGNOSTIC_PROFILES = ("diagnostic", "all")' in source
+
+
+def test_onboard_python_environment_helpers_classify_venv_and_conda():
+    from scripts.onboard import check_g1_onboard_env as onboard_env
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        venv = tmp / "ufo_deploy_venv"
+        conda = tmp / "miniconda3" / "envs" / "ufo-deploy"
+        (conda / "conda-meta").mkdir(parents=True)
+
+        assert onboard_env._is_venv_python(
+            prefix=str(venv),
+            base_prefix="/usr",
+            real_prefix=None,
+        )
+        assert not onboard_env._is_venv_python(
+            prefix="/usr",
+            base_prefix="/usr",
+            real_prefix=None,
+        )
+        assert onboard_env._is_conda_python(
+            prefix=str(conda),
+            executable=str(conda / "bin" / "python"),
+            environ={"CONDA_PREFIX": str(conda)},
+        )
+        assert not onboard_env._is_conda_python(
+            prefix=str(venv),
+            executable=str(venv / "bin" / "python"),
+            environ={"CONDA_PREFIX": str(conda)},
+        )
+
+
+def test_workstation_target_does_not_reject_conda_or_venv():
+    from scripts.onboard import check_g1_onboard_env as onboard_env
+
+    reporter = onboard_env.Reporter()
+    with contextlib.redirect_stdout(io.StringIO()):
+        onboard_env._check_python_environment(
+            reporter,
+            target="workstation",
+            allow_nondefault=False,
+        )
+    assert reporter.failures == 0
+
+
+def test_onboard_env_checker_defines_supported_python_policy():
+    source = (ROOT / "scripts" / "onboard" / "check_g1_onboard_env.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'SUPPORTED_WORKSTATION_ENV = "Workstation: Conda with Python 3.10"' in source
+    assert 'SUPPORTED_ONBOARD_ENV = "G1 onboard: Python 3.10 venv"' in source
+    assert "--target" in source
+    assert "--allow-nondefault-python-env" in source
+    assert "UFO_ALLOW_NONDEFAULT_ONBOARD_PY" in source
+    assert "G1 onboard Python environment is a venv" in source
+    assert "workstation target accepts Conda Python" in source
 
 
 def test_onboard_profile_source_marks_skipped_dependencies():
@@ -171,11 +235,65 @@ def test_preflight_suite_profiles_gate_optional_checks():
     assert "run_diagnostic_checks=1" in source
     assert "scripts/onboard/check_xrobot_sdk.py" in source
     assert "scripts/onboard/check_g1_state_readonly.py" in source
-    assert 'scripts/onboard/check_g1_onboard_env.py --profile "${PROFILE}"' in source
+    assert 'env_check_args=(--profile "${PROFILE}" --target g1-onboard)' in source
+    assert 'scripts/onboard/check_g1_onboard_env.py "${env_check_args[@]}"' in source
+
+
+def test_preflight_suite_enforces_onboard_venv_by_default():
+    source = (ROOT / "scripts" / "onboard" / "run_preflight_suite.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "The validated G1 onboard deployment uses a CPython 3.10 venv." in source
+    assert "ONBOARD_ALLOW_NONDEFAULT_PY" in source
+    assert "--target g1-onboard" in source
+    assert "--allow-nondefault-python-env" in source
+    assert 'ONBOARD_ALLOW_NONDEFAULT_PY="${ONBOARD_ALLOW_NONDEFAULT_PY:-0}"' in source
+
+
+def test_xrobot_onboard_bootstrap_requires_python310_venv():
+    source = (ROOT / "scripts" / "onboard" / "install_xrobot_sdk.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "validated G1 onboard CPython 3.10 aarch64 venv" in source
+    assert "check_supported_onboard_python" in source
+    assert "expected_soabi = \"cpython-310-aarch64-linux-gnu\"" in source
+    assert "EXPECTED_XROBOT_EXT=\"xrobotoolkit_sdk.${EXPECTED_SOABI}.so\"" in source
+    assert "XRoboToolkit Python extension ABI mismatch" in source
+    assert "conda-meta" in source
+    assert "selected Python is not a venv" in source
+    assert "expected 3.10" in source
+
+
+def test_xrobot_bootstrap_rejects_cpython38_extension():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sdk_root = Path(tmpdir)
+        (sdk_root / "xrobotoolkit_sdk.cpython-38-aarch64-linux-gnu.so").write_bytes(b"")
+        proc = subprocess.run(
+            [
+                "scripts/onboard/install_xrobot_sdk.sh",
+                "--sdk-root",
+                str(sdk_root),
+                "--venv",
+                sys.executable,
+            ],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+
+    assert proc.returncode != 0
+    assert "XRoboToolkit Python extension ABI mismatch" in proc.stdout
+    assert "cpython-38-aarch64-linux-gnu" in proc.stdout
+    assert "cpython-310-aarch64-linux-gnu" in proc.stdout
 
 
 def test_dependency_matrix_documents_current_flows():
     text = (ROOT / "docs" / "deployment_dependencies.md").read_text(encoding="utf-8")
+    assert "| Workstation | Conda with Python 3.10 |" in text
+    assert "| G1 onboard | Python 3.10 venv |" in text
+    assert "The validated G1 onboard deployment uses venv by default" in text
     assert "| Ordinary onboard Sim2Real | No | No | No | No | No |" in text
     assert (
         "| PICO Teleop Sim2Real | Yes | Yes | `motion_tracking_retarget` + Mink IK | No | No for retarget |"
@@ -199,6 +317,37 @@ def test_onboard_docs_spell_out_runtime_plus_teleop_dependencies():
     assert "scripts/onboard/run_preflight_suite.sh --profile ordinary" in text
     assert "scripts/onboard/run_preflight_suite.sh --profile teleop" in text
     assert "scripts/onboard/run_preflight_suite.sh --profile diagnostic" in text
+    assert "check_g1_onboard_env.py --target g1-onboard" in text
+    assert "check_g1_onboard_env.py --profile teleop --target g1-onboard" in text
+
+
+def test_readme_documents_official_python_environment_policy():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "## Official Python Environment Policy" in text
+    assert "Workstation:\nConda with Python 3.10" in text
+    assert "G1 onboard:\nPython 3.10 venv" in text
+    assert "The validated G1 onboard deployment uses Python\n3.10 venv by default" in text
+    assert "For the validated G1 onboard path, activate this venv rather than a Conda" in text
+    assert "ONBOARD_PY=/home/unitree/ufo_deploy_venv/bin/python" in text
+
+
+def test_onboard_readme_documents_venv_default_path():
+    text = (ROOT / "scripts" / "onboard" / "README.md").read_text(encoding="utf-8")
+    assert "## Official Onboard Python Environment" in text
+    assert "Workstation:\nConda with Python 3.10" in text
+    assert "G1 onboard:\nPython 3.10 venv" in text
+    assert "/home/unitree/ufo_deploy_venv" in text
+    assert "Onboard preflight validates the venv default when run with the G1 onboard" in text
+    assert "Direct PC/CI calls to `check_g1_onboard_env.py` default to\n`--target workstation`" in text
+
+
+def test_teleop_readme_keeps_conda_workstation_only_for_release_path():
+    text = (ROOT / "scripts" / "teleop" / "README.md").read_text(encoding="utf-8")
+    assert "On a workstation, the release-supported default is Conda:" in text
+    assert "Use this `ufo-teleop` Conda environment for the workstation" in text
+    assert "On the G1 onboard Jetson, the validated default is a Python 3.10 venv" in text
+    assert "Direct onboard PICO teleop can use the same deployment venv" in text
+    assert "/home/unitree/ufo_deploy_venv/bin/python" in text
 
 
 def test_readme_no_longer_presents_all_sdks_as_required():
@@ -222,9 +371,18 @@ if __name__ == "__main__":
     test_runtime_policy_source_has_no_xrobot_or_gmr_import()
     test_check_teleop_env_checks_current_retarget_not_gmr()
     test_onboard_dependency_profiles_separate_external_sdks()
+    test_onboard_python_environment_helpers_classify_venv_and_conda()
+    test_workstation_target_does_not_reject_conda_or_venv()
+    test_onboard_env_checker_defines_supported_python_policy()
     test_onboard_profile_source_marks_skipped_dependencies()
     test_preflight_suite_profiles_gate_optional_checks()
+    test_preflight_suite_enforces_onboard_venv_by_default()
+    test_xrobot_onboard_bootstrap_requires_python310_venv()
+    test_xrobot_bootstrap_rejects_cpython38_extension()
     test_dependency_matrix_documents_current_flows()
     test_onboard_docs_spell_out_runtime_plus_teleop_dependencies()
+    test_readme_documents_official_python_environment_policy()
+    test_onboard_readme_documents_venv_default_path()
+    test_teleop_readme_keeps_conda_workstation_only_for_release_path()
     test_readme_no_longer_presents_all_sdks_as_required()
     print("dependency layout tests ok")

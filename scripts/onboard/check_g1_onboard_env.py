@@ -15,6 +15,7 @@ import platform
 import socket
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -48,9 +49,12 @@ class Reporter:
 
 
 PROFILE_CHOICES = ("ordinary", "teleop", "diagnostic", "all")
+TARGET_CHOICES = ("workstation", "g1-onboard")
 CONTROL_PROFILES = ("ordinary", "teleop", "all")
 TELEOP_PROFILES = ("teleop", "all")
 DIAGNOSTIC_PROFILES = ("diagnostic", "all")
+SUPPORTED_WORKSTATION_ENV = "Workstation: Conda with Python 3.10"
+SUPPORTED_ONBOARD_ENV = "G1 onboard: Python 3.10 venv"
 RUNTIME_IMPORTS = (
     ("mujoco", "mujoco"),
     ("numpy", "numpy"),
@@ -60,6 +64,7 @@ RUNTIME_IMPORTS = (
     ("zmq", "pyzmq"),
 )
 G1_INTERFACE_EXT = "g1_interface.cpython-310-aarch64-linux-gnu.so"
+
 
 def _read_yaml(path: Path) -> dict[str, Any]:
     import yaml
@@ -83,6 +88,67 @@ def _check_file(path: Path, label: str, reporter: Reporter) -> bool:
     return False
 
 
+def _is_venv_python(
+    prefix: str | None = None,
+    base_prefix: str | None = None,
+    real_prefix: str | None = None,
+) -> bool:
+    runtime_prefix = prefix if prefix is not None else sys.prefix
+    runtime_base_prefix = (
+        base_prefix
+        if base_prefix is not None
+        else getattr(sys, "base_prefix", runtime_prefix)
+    )
+    runtime_real_prefix = (
+        real_prefix
+        if real_prefix is not None
+        else getattr(sys, "real_prefix", None)
+    )
+    return runtime_prefix != runtime_base_prefix or runtime_real_prefix is not None
+
+
+def _is_conda_python(
+    prefix: str | None = None,
+    executable: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    runtime_prefix = Path(prefix if prefix is not None else sys.prefix)
+    runtime_executable = Path(executable if executable is not None else sys.executable)
+    runtime_env = os.environ if environ is None else environ
+
+    if (runtime_prefix / "conda-meta").exists():
+        return True
+
+    conda_prefix = runtime_env.get("CONDA_PREFIX")
+    if conda_prefix:
+        try:
+            if Path(conda_prefix).resolve(strict=False) == runtime_prefix.resolve(strict=False):
+                return True
+        except OSError:
+            if str(conda_prefix) == str(runtime_prefix):
+                return True
+
+    conda_path_markers = {
+        "anaconda",
+        "anaconda3",
+        "conda",
+        "miniconda",
+        "miniconda3",
+        "miniforge",
+        "miniforge3",
+        "mambaforge",
+    }
+    path_parts = {part.lower() for part in runtime_executable.parts}
+    return bool(path_parts & conda_path_markers)
+
+
+def _env_problem(reporter: Reporter, allow_nondefault: bool, message: str) -> None:
+    if allow_nondefault:
+        reporter.warn(f"non-default Python environment override: {message}")
+    else:
+        reporter.fail(message)
+
+
 def _check_python_version(reporter: Reporter) -> None:
     version = sys.version_info
     if (version.major, version.minor) == (3, 10):
@@ -91,6 +157,61 @@ def _check_python_version(reporter: Reporter) -> None:
         reporter.fail(
             f"Python version is {platform.python_version()}, expected 3.10 for the release runtime ABI"
         )
+
+
+def _check_python_environment(
+    reporter: Reporter,
+    target: str,
+    allow_nondefault: bool,
+) -> None:
+    reporter.info(
+        "release-supported Python environments: "
+        f"{SUPPORTED_WORKSTATION_ENV}; {SUPPORTED_ONBOARD_ENV}"
+    )
+    reporter.info(f"environment_target: {target}")
+    reporter.info(f"python_prefix: {sys.prefix}")
+    reporter.info(f"python_base_prefix: {getattr(sys, 'base_prefix', sys.prefix)}")
+
+    _check_python_version(reporter)
+
+    if platform.python_implementation() == "CPython":
+        reporter.ok("Python implementation is CPython")
+    else:
+        _env_problem(
+            reporter,
+            allow_nondefault,
+            f"Python implementation is {platform.python_implementation()}, expected CPython",
+        )
+
+    conda_python = _is_conda_python()
+    venv_python = _is_venv_python()
+
+    if target == "g1-onboard":
+        if venv_python:
+            reporter.ok("G1 onboard Python environment is a venv")
+        else:
+            _env_problem(
+                reporter,
+                allow_nondefault,
+                "validated G1 onboard deployment uses a Python 3.10 venv",
+            )
+
+        if conda_python:
+            _env_problem(
+                reporter,
+                allow_nondefault,
+                "Conda differs from the validated default G1 onboard environment",
+            )
+        else:
+            reporter.ok("G1 onboard Python environment is not Conda")
+        return
+
+    if conda_python:
+        reporter.ok("workstation target accepts Conda Python")
+    elif venv_python:
+        reporter.warn("workstation target is running from venv; Conda is the validated default")
+    else:
+        reporter.warn("workstation target is not Conda; Conda is the validated default")
 
 
 def _check_import(module_name: str, label: str, reporter: Reporter) -> object | None:
@@ -297,6 +418,15 @@ def _check_unitree_sdk2py(reporter: Reporter) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only G1 onboard deployment preflight")
     parser.add_argument("--profile", choices=PROFILE_CHOICES, default="ordinary")
+    parser.add_argument(
+        "--target",
+        choices=TARGET_CHOICES,
+        default=os.environ.get("UFO_DEPLOY_TARGET", "workstation"),
+        help=(
+            "environment target: workstation allows Conda; g1-onboard validates "
+            "the G1 Python 3.10 venv default (default: UFO_DEPLOY_TARGET or workstation)"
+        ),
+    )
     parser.add_argument("--robot-config", default="config/robot/g1_real.yaml")
     parser.add_argument("--policy-config", default="config/policy/g1_policy.yaml")
     parser.add_argument("--model-path", default="model/g1_policy/exported/FBcprAuxModel.onnx")
@@ -317,6 +447,15 @@ def main() -> int:
     parser.add_argument("--unitree-sdk-lib", default="/home/unitree/unitree_sdk2_bfm/build/lib")
     parser.add_argument("--openssl11-lib", default="external/openssl-1.1-aarch64")
     parser.add_argument("--skip-interface", action="store_true")
+    parser.add_argument(
+        "--allow-nondefault-python-env",
+        action="store_true",
+        default=os.environ.get("UFO_ALLOW_NONDEFAULT_ONBOARD_PY") == "1",
+        help=(
+            "allow non-default onboard Python environments for debugging "
+            "(set UFO_ALLOW_NONDEFAULT_ONBOARD_PY=1 to enable)"
+        ),
+    )
     args = parser.parse_args()
 
     reporter = Reporter()
@@ -326,6 +465,11 @@ def main() -> int:
     reporter.info(f"hostname: {socket.gethostname()}")
     reporter.info(f"python: {sys.executable} {platform.python_version()}")
     reporter.info(f"platform: {platform.platform()} machine={platform.machine()}")
+    _check_python_environment(
+        reporter,
+        target=args.target,
+        allow_nondefault=bool(args.allow_nondefault_python_env),
+    )
 
     try:
         reporter.info(f"cpu_online: {Path('/sys/devices/system/cpu/online').read_text().strip()}")
@@ -337,7 +481,6 @@ def main() -> int:
     diagnostic_profile = args.profile in DIAGNOSTIC_PROFILES
 
     if control_profile:
-        _check_python_version(reporter)
         _check_runtime_imports(reporter)
 
         robot_config_path = ROOT / args.robot_config

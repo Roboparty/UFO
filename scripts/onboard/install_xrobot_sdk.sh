@@ -7,6 +7,8 @@ Usage: scripts/onboard/install_xrobot_sdk.sh --sdk-root PATH --venv PATH [option
 
 Install the ARM64 CPython 3.10 XRoboToolkit binding into a stable UFO external
 directory and make the selected venv import it through an idempotent .pth file.
+The validated G1 onboard deployment uses a CPython 3.10 venv. Conda is the
+validated workstation default, not the onboard SDK install default.
 
 Options:
   --sdk-root PATH   XRoboToolkit-PC-Service-Pybind_X86_and_ARM64 root.
@@ -27,6 +29,54 @@ fail() {
 
 log() {
   echo "[install_xrobot_sdk] $*"
+}
+
+check_supported_onboard_python() {
+  local python_bin="$1"
+  "${python_bin}" - <<'PY'
+import platform
+import sys
+import sysconfig
+from pathlib import Path
+
+problems = []
+expected_soabi = "cpython-310-aarch64-linux-gnu"
+if platform.python_implementation() != "CPython":
+    problems.append(f"Python implementation is {platform.python_implementation()}, expected CPython")
+if sys.version_info[:2] != (3, 10):
+    problems.append(f"Python version is {platform.python_version()}, expected 3.10")
+soabi = sysconfig.get_config_var("SOABI") or ""
+if soabi != expected_soabi:
+    problems.append(f"Python SOABI is {soabi!r}, expected {expected_soabi!r}")
+
+is_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix) or hasattr(sys, "real_prefix")
+if not is_venv:
+    problems.append("selected Python is not a venv")
+
+prefix = Path(sys.prefix)
+executable_parts = {part.lower() for part in Path(sys.executable).parts}
+conda_markers = {
+    "anaconda",
+    "anaconda3",
+    "conda",
+    "miniconda",
+    "miniconda3",
+    "miniforge",
+    "miniforge3",
+    "mambaforge",
+}
+if (prefix / "conda-meta").exists() or executable_parts & conda_markers:
+    problems.append("selected Python appears to be Conda; validated onboard SDK install uses venv")
+
+if problems:
+    for problem in problems:
+        print(problem)
+    raise SystemExit(1)
+
+print(f"[OK] Python: {platform.python_version()}")
+print(f"[OK] Python SOABI: {soabi}")
+print("[OK] Python environment: venv")
+PY
 }
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,10 +129,29 @@ else
   fail "venv python not found from --venv ${VENV}"
 fi
 
-PY_EXT="${SDK_ROOT}/xrobotoolkit_sdk.cpython-310-aarch64-linux-gnu.so"
+EXPECTED_SOABI="cpython-310-aarch64-linux-gnu"
+EXPECTED_XROBOT_EXT="xrobotoolkit_sdk.${EXPECTED_SOABI}.so"
+PY_EXT="${SDK_ROOT}/${EXPECTED_XROBOT_EXT}"
 NATIVE_LIB="${SDK_ROOT}/lib/aarch64/libPXREARobotSDK.so"
+
+shopt -s nullglob
+SDK_PY_EXTS=("${SDK_ROOT}"/xrobotoolkit_sdk.cpython-*.so)
+shopt -u nullglob
+[[ ${#SDK_PY_EXTS[@]} -gt 0 ]] || fail "no XRoboToolkit Python extension found under ${SDK_ROOT}"
+for ext_path in "${SDK_PY_EXTS[@]}"; do
+  ext_name="$(basename "${ext_path}")"
+  if [[ "${ext_name}" != "${EXPECTED_XROBOT_EXT}" ]]; then
+    fail "XRoboToolkit Python extension ABI mismatch: found ${ext_name}, expected ${EXPECTED_XROBOT_EXT}"
+  fi
+done
+
 [[ -f "${PY_EXT}" ]] || fail "missing Python extension: ${PY_EXT}"
 [[ -f "${NATIVE_LIB}" ]] || fail "missing native library: ${NATIVE_LIB}"
+log "[OK] XRoboToolkit Python extension ABI: ${EXPECTED_XROBOT_EXT}"
+
+if ! check_supported_onboard_python "${PYTHON}"; then
+  fail "--venv must point to the validated G1 onboard CPython 3.10 aarch64 venv"
+fi
 
 check_file_arch() {
   local path="$1"
