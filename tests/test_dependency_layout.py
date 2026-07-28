@@ -137,6 +137,43 @@ def test_check_teleop_env_checks_current_retarget_not_gmr():
     assert "GeneralMotionRetargeting" not in source
 
 
+def test_onboard_dependency_profiles_separate_external_sdks():
+    source = (ROOT / "scripts" / "onboard" / "check_g1_onboard_env.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'PROFILE_CHOICES = ("ordinary", "teleop", "diagnostic", "all")' in source
+    assert 'CONTROL_PROFILES = ("ordinary", "teleop", "all")' in source
+    assert 'TELEOP_PROFILES = ("teleop", "all")' in source
+    assert 'DIAGNOSTIC_PROFILES = ("diagnostic", "all")' in source
+
+
+def test_onboard_profile_source_marks_skipped_dependencies():
+    source = (ROOT / "scripts" / "onboard" / "check_g1_onboard_env.py").read_text(
+        encoding="utf-8"
+    )
+    assert "Dependency profile: {args.profile}" in source
+    assert "[SKIP]" in source
+    assert "xrobotoolkit_sdk (teleop only)" in source
+    assert "unitree_sdk2py (diagnostic only)" in source
+    assert "g1_interface (control only)" in source
+    assert "g1_interface.cpython-310-aarch64-linux-gnu.so" in source
+    assert "g1_interface.cpython-38-aarch64-linux-gnu.so" not in source
+
+
+def test_preflight_suite_profiles_gate_optional_checks():
+    source = (ROOT / "scripts" / "onboard" / "run_preflight_suite.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "--profile PROFILE" in source
+    assert "ordinary|teleop|diagnostic|all" in source
+    assert "run_control_checks=1" in source
+    assert "run_teleop_checks=1" in source
+    assert "run_diagnostic_checks=1" in source
+    assert "scripts/onboard/check_xrobot_sdk.py" in source
+    assert "scripts/onboard/check_g1_state_readonly.py" in source
+    assert 'scripts/onboard/check_g1_onboard_env.py --profile "${PROFILE}"' in source
+
+
 def test_dependency_matrix_documents_current_flows():
     text = (ROOT / "docs" / "deployment_dependencies.md").read_text(encoding="utf-8")
     assert "| Ordinary onboard Sim2Real | No | No | No | No | No |" in text
@@ -151,9 +188,30 @@ def test_dependency_matrix_documents_current_flows():
 def test_onboard_docs_spell_out_runtime_plus_teleop_dependencies():
     text = (ROOT / "scripts" / "onboard" / "README.md").read_text(encoding="utf-8")
     assert "Ordinary Sim2Real does not need human pose" in text
-    assert "XRoboToolkit, retargeting, GMR, or torch" in text
-    assert "`requirements/teleop.txt` inherits `requirements/runtime.txt`" in text
-    assert "realtime `z`, ONNX inference, policy code" in text
+    assert "XRoboToolkit, `xrobotoolkit_sdk`, PICO, retargeting, `unitree_sdk2py`, GMR" in text
+    assert "`requirements/teleop.txt`\ninherits `requirements/runtime.txt`" in text
+    assert "realtime\n`z`, ONNX inference, policy code" in text
+    assert "UFO deploy has three different external dependency categories." in text
+    assert "g1_interface.cpython-310-aarch64-linux-gnu.so" in text
+    assert "g1_interface.cpython-38-aarch64-linux-gnu.so" in text
+    assert "xrobotoolkit_sdk`" in text
+    assert "unitree_sdk2py" in text
+    assert "scripts/onboard/run_preflight_suite.sh --profile ordinary" in text
+    assert "scripts/onboard/run_preflight_suite.sh --profile teleop" in text
+    assert "scripts/onboard/run_preflight_suite.sh --profile diagnostic" in text
+
+
+def test_readme_no_longer_presents_all_sdks_as_required():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "## External Runtime Dependencies" in text
+    assert "UFO deploy has three different external dependency categories." in text
+    assert "Required For Any Real G1 Control" in text
+    assert "Required Only For Onboard PICO Teleop" in text
+    assert "Optional Diagnostics" in text
+    assert "Unitree SDK2 Python binding, including `g1_interface`" not in text
+    assert "Install Unitree SDK" not in text
+    assert "Missing `unitree_sdk2py` does not block ordinary Sim2Real or PICO teleop." in text
+    assert "Ordinary Sim2Real does not need `xrobotoolkit_sdk`" in text
 
 
 if __name__ == "__main__":
@@ -163,6 +221,10 @@ if __name__ == "__main__":
     test_teleop_imports_vendored_motion_tracking_retarget()
     test_runtime_policy_source_has_no_xrobot_or_gmr_import()
     test_check_teleop_env_checks_current_retarget_not_gmr()
+    test_onboard_dependency_profiles_separate_external_sdks()
+    test_onboard_profile_source_marks_skipped_dependencies()
+    test_preflight_suite_profiles_gate_optional_checks()
     test_dependency_matrix_documents_current_flows()
     test_onboard_docs_spell_out_runtime_plus_teleop_dependencies()
+    test_readme_no_longer_presents_all_sdks_as_required()
     print("dependency layout tests ok")

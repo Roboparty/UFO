@@ -49,12 +49,104 @@ Robot:
 
 - Unitree G1 29-DoF onboard Jetson
 - Python 3.10 venv
-- Unitree SDK2 Python binding, including `g1_interface`
 - CycloneDDS runtime
+- `g1_interface` CPython 3.10 aarch64 binding for real G1 control
 - low-level DDS network interface passed explicitly with `G1_INTERFACE` or a local `ROBOT_CONFIG`
-- XRoboToolkit headless service for onboard PICO teleop
-- `xrobotoolkit_sdk` and canonical retarget dependencies in the onboard teleop Python environment
-- PICO headset with trackers/controllers for onboard teleop
+- for onboard PICO teleop only: XRoboToolkit headless service, `xrobotoolkit_sdk`,
+  canonical retarget dependencies, and PICO headset with trackers/controllers
+- optional readonly diagnostics only: `unitree_sdk2py`
+
+## External Runtime Dependencies
+
+UFO deploy has three different external dependency categories.
+
+### A. Required For Any Real G1 Control
+
+Required:
+
+- `g1_interface`
+
+Use:
+
+```text
+UFO policy
+-> g1_interface
+-> G1 hardware control
+```
+
+Source:
+
+```text
+https://github.com/EGalahad/unitree_sdk2
+```
+
+This is required by both ordinary onboard Sim2Real and onboard teleop Sim2Real.
+It must match the UFO Python runtime ABI. The current runtime Python is Python
+3.10, so the required onboard extension is:
+
+```text
+g1_interface.cpython-310-aarch64-linux-gnu.so
+```
+
+Do not use these incompatible bindings:
+
+```text
+g1_interface.cpython-38-aarch64-linux-gnu.so
+g1_interface.cpython-310-x86_64-linux-gnu.so
+```
+
+Verify:
+
+```bash
+python - <<'PY'
+import g1_interface
+print(g1_interface.G1_NUM_MOTOR)
+assert g1_interface.G1_NUM_MOTOR == 29
+PY
+```
+
+### B. Required Only For Onboard PICO Teleop
+
+Optional for ordinary Sim2Real. Required only for onboard PICO teleop:
+
+- `xrobotoolkit_sdk`
+- XRoboToolkit headless service
+
+Use:
+
+```text
+PICO
+-> XRoboToolkit
+-> xrobotoolkit_sdk
+-> motion_tracking_retarget
+-> G1 qpos
+```
+
+Ordinary Sim2Real does not need `xrobotoolkit_sdk`, XRoboToolkit service, PICO,
+or retargeted qpos. `xrobotoolkit_sdk` is not the policy runtime and is not the
+G1 control binding.
+
+### C. Optional Diagnostics
+
+Optional:
+
+- `unitree_sdk2py`
+
+Source:
+
+```text
+https://github.com/unitreerobotics/unitree_sdk2_python
+```
+
+Use only:
+
+```text
+scripts/onboard/check_g1_state_readonly.py
+```
+
+This optional diagnostic dependency is for readonly low-state subscriber checks:
+`q`, `dq`, IMU, and wireless remote state. It is not used by UFO policy control.
+Missing `unitree_sdk2py` does not block ordinary Sim2Real or PICO teleop.
 
 Current deploy does not require the external `general_motion_retargeting`/GMR
 package. The legacy GMR architecture is no longer used by the deploy runtime:
@@ -265,19 +357,38 @@ git rev-parse HEAD
 
 Then:
 
-1. Create a Python 3.10 venv and install ARM64 dependencies.
+Ordinary onboard Sim2Real requires:
+
+- Python 3.10
+- runtime dependencies from `requirements/runtime.txt`
+- released `model/g1_policy/` artifacts
+- `g1_interface.cpython-310-aarch64-linux-gnu.so`
+- CycloneDDS runtime
+- explicit low-level DDS interface via `G1_INTERFACE` or local `ROBOT_CONFIG`
+
+It does not require `xrobotoolkit_sdk`, XRoboToolkit service, PICO, retargeting,
+or `unitree_sdk2py`.
+
+Onboard PICO Teleop Sim2Real requires everything from ordinary onboard Sim2Real,
+plus:
+
+- `requirements/teleop.txt`
+- `xrobotoolkit_sdk`
+- XRoboToolkit headless service
+- vendored `motion_tracking_retarget` dependencies
+- PICO headset with trackers/controllers
+
+Optional readonly diagnostics additionally require `unitree_sdk2py`.
+
+Set up ordinary onboard Sim2Real in this order:
+
+1. Create a Python 3.10 venv and install ARM64 dependencies from
+   `requirements/runtime.txt`.
 2. Restore/download `model/g1_policy/` artifacts and run
    `python scripts/onboard/check_deploy_artifacts.py`.
-3. Install the ARM64 XRoboToolkit SDK:
-
-   ```bash
-   scripts/onboard/install_xrobot_sdk.sh \
-     --sdk-root /path/to/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64 \
-     --venv /path/to/ufo_deploy_venv
-   ```
-
-4. Start/verify the XRoboToolkit service.
-5. Choose the low-level G1 DDS NIC explicitly:
+3. Install or expose the CPython 3.10 aarch64 `g1_interface` binding in the
+   runtime environment.
+4. Choose the low-level G1 DDS NIC explicitly:
 
    ```bash
    export G1_INTERFACE=<low-level-dds-interface>
@@ -287,7 +398,7 @@ Then:
    not the default-route interface unless explicitly allowed. It does not
    silently auto-select a NIC.
 
-6. If the current prebuilt `g1_interface` requires OpenSSL 1.1 on an OpenSSL 3
+5. If the current prebuilt `g1_interface` requires OpenSSL 1.1 on an OpenSSL 3
    system, provide:
 
    ```bash
@@ -297,12 +408,35 @@ Then:
    This is a compatibility requirement of the prebuilt Unitree binding, not a
    UFO Python dependency.
 
-7. Run no-actuation preflight:
+6. Run no-actuation ordinary preflight:
 
    ```bash
-   scripts/onboard/run_preflight_suite.sh
-   scripts/onboard/run_preflight_suite.sh --require-body
+   scripts/onboard/run_preflight_suite.sh --profile ordinary
    ```
+
+For onboard PICO teleop, install the teleop-only dependencies after the ordinary
+runtime is healthy:
+
+   ```bash
+   python -m pip install -r requirements/teleop.txt
+   scripts/onboard/install_xrobot_sdk.sh \
+     --sdk-root /path/to/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64 \
+     --venv /path/to/ufo_deploy_venv
+   ```
+
+Start/verify the XRoboToolkit service, then run:
+
+   ```bash
+   scripts/onboard/run_preflight_suite.sh --profile teleop
+   scripts/onboard/run_preflight_suite.sh --profile teleop --require-body
+   ```
+
+For optional readonly low-state diagnostics, install `unitree_sdk2py` separately
+and run:
+
+```bash
+scripts/onboard/run_preflight_suite.sh --profile diagnostic
+```
 
 The onboard diagnostics live in `scripts/onboard/`. They avoid real actuation by
 default and do not substitute for physical safety checks.

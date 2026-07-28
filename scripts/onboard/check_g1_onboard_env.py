@@ -9,6 +9,7 @@ and joint mapping needed before a real control process is allowed.
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import platform
 import socket
@@ -42,6 +43,23 @@ class Reporter:
         self.failures += 1
         print(f"[FAIL] {message}")
 
+    def skip(self, message: str) -> None:
+        print(f"[SKIP] {message}")
+
+
+PROFILE_CHOICES = ("ordinary", "teleop", "diagnostic", "all")
+CONTROL_PROFILES = ("ordinary", "teleop", "all")
+TELEOP_PROFILES = ("teleop", "all")
+DIAGNOSTIC_PROFILES = ("diagnostic", "all")
+RUNTIME_IMPORTS = (
+    ("mujoco", "mujoco"),
+    ("numpy", "numpy"),
+    ("onnxruntime", "onnxruntime"),
+    ("scipy", "scipy"),
+    ("yaml", "pyyaml"),
+    ("zmq", "pyzmq"),
+)
+G1_INTERFACE_EXT = "g1_interface.cpython-310-aarch64-linux-gnu.so"
 
 def _read_yaml(path: Path) -> dict[str, Any]:
     import yaml
@@ -63,6 +81,35 @@ def _check_file(path: Path, label: str, reporter: Reporter) -> bool:
         return True
     reporter.fail(f"{label} missing: {path}")
     return False
+
+
+def _check_python_version(reporter: Reporter) -> None:
+    version = sys.version_info
+    if (version.major, version.minor) == (3, 10):
+        reporter.ok("Python version is 3.10")
+    else:
+        reporter.fail(
+            f"Python version is {platform.python_version()}, expected 3.10 for the release runtime ABI"
+        )
+
+
+def _check_import(module_name: str, label: str, reporter: Reporter) -> object | None:
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        reporter.fail(f"{label} missing: {exc.__class__.__name__}: {exc}")
+        return None
+    origin = getattr(module, "__file__", None)
+    if origin:
+        reporter.ok(f"{label} import ok: {origin}")
+    else:
+        reporter.ok(f"{label} import ok")
+    return module
+
+
+def _check_runtime_imports(reporter: Reporter) -> None:
+    for module_name, label in RUNTIME_IMPORTS:
+        _check_import(module_name, label, reporter)
 
 
 def _check_onnx(path: Path, reporter: Reporter) -> None:
@@ -116,15 +163,27 @@ def _check_joint_mapping(policy_config: dict[str, Any], reporter: Reporter) -> N
 
 
 def _check_g1_import(sdk_lib: Path, openssl11_lib: Path, reporter: Reporter) -> None:
-    if not sdk_lib.is_dir():
-        reporter.warn(f"UNITREE_SDK_LIB does not exist: {sdk_lib}")
-        return
+    expected_so = sdk_lib / G1_INTERFACE_EXT
+    if sdk_lib.is_dir():
+        found = sorted(path.name for path in sdk_lib.glob("g1_interface*.so"))
+        if expected_so.is_file():
+            reporter.ok(f"g1_interface CPython 3.10 aarch64 extension exists: {expected_so}")
+        elif found:
+            reporter.fail(
+                "g1_interface extension ABI mismatch; expected "
+                f"{G1_INTERFACE_EXT}, found {found}"
+            )
+        else:
+            reporter.fail(f"g1_interface extension missing: {expected_so}")
+    else:
+        reporter.warn(f"UNITREE_SDK_LIB does not exist: {sdk_lib}; trying Python import path")
 
     code = (
         "import sys; "
         f"sys.path.insert(0, {str(sdk_lib)!r}); "
         "import g1_interface; "
-        "print(getattr(g1_interface, 'G1_NUM_MOTOR', None))"
+        "print(getattr(g1_interface, 'G1_NUM_MOTOR', None)); "
+        "print(getattr(g1_interface, '__file__', ''))"
     )
     env = dict(os.environ)
 
@@ -149,23 +208,95 @@ def _check_g1_import(sdk_lib: Path, openssl11_lib: Path, reporter: Reporter) -> 
 
     if rc != 0:
         reporter.fail(f"failed to import g1_interface: {output}")
-        so_path = sdk_lib / "g1_interface.cpython-310-aarch64-linux-gnu.so"
-        if so_path.exists():
+        if expected_so.exists():
             try:
                 reporter.info("ldd g1_interface:")
-                print(_run_text(["ldd", str(so_path)]))
+                print(_run_text(["ldd", str(expected_so)]))
             except Exception as exc:
-                reporter.warn(f"ldd failed for {so_path}: {exc}")
+                reporter.warn(f"ldd failed for {expected_so}: {exc}")
         return
 
-    if output.splitlines()[-1].strip() == "29":
+    lines = output.splitlines()
+    motor_count = lines[0].strip() if lines else ""
+    module_file = lines[1].strip() if len(lines) > 1 else ""
+    if motor_count == "29":
         reporter.ok("g1_interface imports and G1_NUM_MOTOR=29")
     else:
         reporter.fail(f"g1_interface imported but G1_NUM_MOTOR output={output!r}, expected 29")
+    if module_file:
+        if module_file.endswith(G1_INTERFACE_EXT):
+            reporter.ok(f"g1_interface ABI is CPython 3.10 aarch64: {module_file}")
+        else:
+            reporter.fail(
+                "g1_interface ABI must be CPython 3.10 aarch64; "
+                f"imported {module_file}"
+            )
+
+
+def _check_xrobotoolkit_sdk(reporter: Reporter) -> None:
+    xrt = _check_import("xrobotoolkit_sdk", "xrobotoolkit_sdk", reporter)
+    if xrt is None:
+        return
+
+    if hasattr(xrt, "init"):
+        reporter.ok("xrobotoolkit_sdk has init()")
+    else:
+        reporter.fail("xrobotoolkit_sdk missing init()")
+
+    callback_api = all(
+        hasattr(xrt, name)
+        for name in ("register_frame_callback", "clear_frame_callback", "has_frame_callback")
+    )
+    polling_api = all(
+        hasattr(xrt, name)
+        for name in ("is_body_data_available", "get_body_joints_pose", "get_body_timestamp_ns")
+    )
+    if callback_api:
+        reporter.ok("xrobotoolkit_sdk callback API available")
+    if polling_api:
+        reporter.ok("xrobotoolkit_sdk polling API available")
+    if not callback_api and not polling_api:
+        reporter.fail("xrobotoolkit_sdk has neither callback nor polling API")
+
+
+def _check_motion_tracking_retarget(reporter: Reporter) -> None:
+    teleop_root = ROOT / "scripts" / "teleop"
+    sys.path.insert(0, str(teleop_root))
+    try:
+        package = importlib.import_module("motion_tracking_retarget")
+        joint_mapping = importlib.import_module("motion_tracking_retarget.joint_mapping")
+        qpos_size = int(joint_mapping.qpos_size("g1"))
+    except Exception as exc:
+        reporter.fail(f"motion_tracking_retarget unavailable: {exc.__class__.__name__}: {exc}")
+        return
+    finally:
+        if sys.path and sys.path[0] == str(teleop_root):
+            sys.path.pop(0)
+
+    origin = getattr(package, "__file__", "")
+    if origin and Path(origin).resolve().is_relative_to(teleop_root / "motion_tracking_retarget"):
+        reporter.ok(f"motion_tracking_retarget vendored package import ok: {origin}")
+    else:
+        reporter.fail(f"motion_tracking_retarget did not resolve to vendored package: {origin}")
+    if qpos_size == 36:
+        reporter.ok("motion_tracking_retarget G1 qpos_size=36")
+    else:
+        reporter.fail(f"motion_tracking_retarget G1 qpos_size={qpos_size}, expected 36")
+
+
+def _check_unitree_sdk2py(reporter: Reporter) -> None:
+    _check_import("unitree_sdk2py", "unitree_sdk2py", reporter)
+    _check_import("unitree_sdk2py.core.channel", "unitree_sdk2py ChannelSubscriber API", reporter)
+    _check_import(
+        "unitree_sdk2py.idl.unitree_hg.msg.dds_",
+        "unitree_sdk2py G1 low-state IDL",
+        reporter,
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only G1 onboard deployment preflight")
+    parser.add_argument("--profile", choices=PROFILE_CHOICES, default="ordinary")
     parser.add_argument("--robot-config", default="config/robot/g1_real.yaml")
     parser.add_argument("--policy-config", default="config/policy/g1_policy.yaml")
     parser.add_argument("--model-path", default="model/g1_policy/exported/FBcprAuxModel.onnx")
@@ -190,6 +321,7 @@ def main() -> int:
 
     reporter = Reporter()
     reporter.info("NO-ACTUATION: this script does not create G1Interface, set control mode, or write low commands")
+    print(f"Dependency profile: {args.profile}")
     reporter.info(f"repo: {ROOT}")
     reporter.info(f"hostname: {socket.gethostname()}")
     reporter.info(f"python: {sys.executable} {platform.python_version()}")
@@ -200,68 +332,90 @@ def main() -> int:
     except Exception as exc:
         reporter.warn(f"could not read cpu_online: {exc}")
 
-    robot_config_path = ROOT / args.robot_config
-    policy_config_path = ROOT / args.policy_config
-    model_path = ROOT / args.model_path
-    backward_path = ROOT / args.backward_onnx
-    mujoco_xml = ROOT / args.mujoco_xml
-    teleop_xml = ROOT / args.teleop_xml
+    control_profile = args.profile in CONTROL_PROFILES
+    teleop_profile = args.profile in TELEOP_PROFILES
+    diagnostic_profile = args.profile in DIAGNOSTIC_PROFILES
 
-    ok_files = [
-        _check_file(robot_config_path, "robot config", reporter),
-        _check_file(policy_config_path, "policy config", reporter),
-        _check_file(model_path, "policy ONNX", reporter),
-        _check_file(backward_path, "backward ONNX", reporter),
-        _check_file(mujoco_xml, "runtime MuJoCo XML", reporter),
-        _check_file(teleop_xml, "teleop canonical XML", reporter),
-    ]
+    if control_profile:
+        _check_python_version(reporter)
+        _check_runtime_imports(reporter)
 
-    robot_config: dict[str, Any] = {}
-    policy_config: dict[str, Any] = {}
-    if ok_files[0]:
-        try:
-            robot_config = _read_yaml(robot_config_path)
-            reporter.ok(f"robot config loads: ROBOT_TYPE={robot_config.get('ROBOT_TYPE')!r}")
-        except Exception as exc:
-            reporter.fail(f"robot config load failed: {exc.__class__.__name__}: {exc}")
-    if ok_files[1]:
-        try:
-            policy_config = _read_yaml(policy_config_path)
-            reporter.ok("policy config loads")
-        except Exception as exc:
-            reporter.fail(f"policy config load failed: {exc.__class__.__name__}: {exc}")
+        robot_config_path = ROOT / args.robot_config
+        policy_config_path = ROOT / args.policy_config
+        model_path = ROOT / args.model_path
+        backward_path = ROOT / args.backward_onnx
+        mujoco_xml = ROOT / args.mujoco_xml
 
-    if robot_config:
-        if not args.skip_interface:
+        ok_files = [
+            _check_file(robot_config_path, "robot config", reporter),
+            _check_file(policy_config_path, "policy config", reporter),
+            _check_file(model_path, "policy ONNX", reporter),
+            _check_file(backward_path, "backward ONNX", reporter),
+            _check_file(mujoco_xml, "runtime MuJoCo XML", reporter),
+        ]
+
+        robot_config: dict[str, Any] = {}
+        policy_config: dict[str, Any] = {}
+        if ok_files[0]:
             try:
-                from scripts.onboard.interface_config import validate_interface
-
-                validate_interface(
-                    str(args.g1_interface or robot_config.get("INTERFACE", "")),
-                    reporter,
-                    allow_default_route_interface=bool(args.allow_default_route_interface),
-                )
+                robot_config = _read_yaml(robot_config_path)
+                reporter.ok(f"robot config loads: ROBOT_TYPE={robot_config.get('ROBOT_TYPE')!r}")
             except Exception as exc:
-                reporter.fail(f"interface validation failed: {exc.__class__.__name__}: {exc}")
-        if robot_config.get("ROBOT_TYPE") == "g1_real":
-            reporter.ok("ROBOT_TYPE is g1_real")
-        else:
-            reporter.fail(f"ROBOT_TYPE is {robot_config.get('ROBOT_TYPE')!r}, expected 'g1_real'")
+                reporter.fail(f"robot config load failed: {exc.__class__.__name__}: {exc}")
+        if ok_files[1]:
+            try:
+                policy_config = _read_yaml(policy_config_path)
+                reporter.ok("policy config loads")
+            except Exception as exc:
+                reporter.fail(f"policy config load failed: {exc.__class__.__name__}: {exc}")
 
-    if policy_config:
-        _check_joint_mapping(policy_config, reporter)
+        if robot_config:
+            if not args.skip_interface:
+                try:
+                    from scripts.onboard.interface_config import validate_interface
 
-    for path in (model_path, backward_path):
-        if path.is_file():
-            _check_onnx(path, reporter)
-    for path in (mujoco_xml, teleop_xml):
-        if path.is_file():
-            _check_xml(path, reporter)
+                    validate_interface(
+                        str(args.g1_interface or robot_config.get("INTERFACE", "")),
+                        reporter,
+                        allow_default_route_interface=bool(args.allow_default_route_interface),
+                    )
+                except Exception as exc:
+                    reporter.fail(f"interface validation failed: {exc.__class__.__name__}: {exc}")
+            if robot_config.get("ROBOT_TYPE") == "g1_real":
+                reporter.ok("ROBOT_TYPE is g1_real")
+            else:
+                reporter.fail(f"ROBOT_TYPE is {robot_config.get('ROBOT_TYPE')!r}, expected 'g1_real'")
 
-    openssl11_lib = Path(args.openssl11_lib)
-    if not openssl11_lib.is_absolute():
-        openssl11_lib = ROOT / openssl11_lib
-    _check_g1_import(Path(args.unitree_sdk_lib), openssl11_lib, reporter)
+        if policy_config:
+            _check_joint_mapping(policy_config, reporter)
+
+        for path in (model_path, backward_path):
+            if path.is_file():
+                _check_onnx(path, reporter)
+        if mujoco_xml.is_file():
+            _check_xml(mujoco_xml, reporter)
+
+        openssl11_lib = Path(args.openssl11_lib)
+        if not openssl11_lib.is_absolute():
+            openssl11_lib = ROOT / openssl11_lib
+        _check_g1_import(Path(args.unitree_sdk_lib), openssl11_lib, reporter)
+    else:
+        reporter.skip("g1_interface (control only)")
+
+    if teleop_profile:
+        teleop_xml = ROOT / args.teleop_xml
+        if _check_file(teleop_xml, "teleop canonical XML", reporter):
+            _check_xml(teleop_xml, reporter)
+        _check_xrobotoolkit_sdk(reporter)
+        _check_motion_tracking_retarget(reporter)
+    else:
+        reporter.skip("xrobotoolkit_sdk (teleop only)")
+        reporter.skip("motion_tracking_retarget (teleop only)")
+
+    if diagnostic_profile:
+        _check_unitree_sdk2py(reporter)
+    else:
+        reporter.skip("unitree_sdk2py (diagnostic only)")
 
     if reporter.failures:
         reporter.info(f"summary: {reporter.failures} failure(s), {reporter.warnings} warning(s)")
