@@ -576,31 +576,50 @@ def distance_proximity(next_obs: torch.Tensor, tracking_target: torch.Tensor, bo
 
 def _calc_metrics(ep):
     metr = {}
-    num_dofs = ep["target_joint_pos"].shape[-1]
     observation_state = torch.as_tensor(ep["observation"]["state"], dtype=torch.float32)
     target_state = torch.as_tensor(ep["tracking_target"]["state"], dtype=torch.float32)
+    joint_pos = torch.as_tensor(ep["joint_pos"], dtype=torch.float32)
+    target_joint_pos = torch.as_tensor(ep["target_joint_pos"], dtype=torch.float32)
+    num_dofs = target_joint_pos.shape[-1] if target_joint_pos.ndim > 0 else 0
 
     shape_errors = []
     if num_dofs <= 0:
         shape_errors.append("num_dofs must be greater than zero")
-    if observation_state.ndim < 2:
-        shape_errors.append("observation state must include time and feature dimensions")
+    if observation_state.ndim != 2:
+        shape_errors.append("observation state must be two-dimensional [T, D]")
     elif observation_state.shape[-1] < num_dofs:
         shape_errors.append("observation state feature dimension is smaller than num_dofs")
-    if target_state.ndim < 2:
-        shape_errors.append("tracking target state must include time and feature dimensions")
+    if target_state.ndim != 2:
+        shape_errors.append("tracking target state must be two-dimensional [T, D]")
     elif target_state.shape[-1] < num_dofs:
         shape_errors.append("tracking target state feature dimension is smaller than num_dofs")
-    if observation_state.ndim > 0 and target_state.ndim > 0 and observation_state.shape[0] != target_state.shape[0]:
+    if joint_pos.ndim != 2:
+        shape_errors.append("joint_pos must be two-dimensional [T, D]")
+    elif joint_pos.shape[-1] <= 0:
+        shape_errors.append("joint_pos feature dimension must be greater than zero")
+    if target_joint_pos.ndim != 2:
+        shape_errors.append("target_joint_pos must be two-dimensional [T, D]")
+    elif target_joint_pos.shape[-1] <= 0:
+        shape_errors.append("target_joint_pos feature dimension must be greater than zero")
+    if joint_pos.ndim == 2 and target_joint_pos.ndim == 2 and joint_pos.shape != target_joint_pos.shape:
+        shape_errors.append("joint_pos and target_joint_pos shapes must match")
+    if joint_pos.ndim == 2 and joint_pos.shape[0] < 3:
+        shape_errors.append("joint_pos must contain at least 3 time steps")
+    if target_joint_pos.ndim == 2 and target_joint_pos.shape[0] < 3:
+        shape_errors.append("target_joint_pos must contain at least 3 time steps")
+    if observation_state.ndim == 2 and target_state.ndim == 2 and observation_state.shape[0] != target_state.shape[0]:
         shape_errors.append("observation and tracking target time dimensions must match")
-    if observation_state.ndim >= 2 and target_state.ndim >= 2 and observation_state.shape[:-1] != target_state.shape[:-1]:
-        shape_errors.append("observation and tracking target leading dimensions must match")
+    if observation_state.ndim == 2 and joint_pos.ndim == 2 and observation_state.shape[0] != joint_pos.shape[0]:
+        shape_errors.append("observation state and joint_pos time dimensions must match")
+    if target_state.ndim == 2 and target_joint_pos.ndim == 2 and target_state.shape[0] != target_joint_pos.shape[0]:
+        shape_errors.append("tracking target state and target_joint_pos time dimensions must match")
     if shape_errors:
         raise ValueError(
-            "Invalid evaluation state shapes: "
+            "Invalid tracking metric shapes: "
             f"observation_state.shape={tuple(observation_state.shape)}, "
             f"tracking_target_state.shape={tuple(target_state.shape)}, "
-            f"target_joint_pos.shape={tuple(ep['target_joint_pos'].shape)}, "
+            f"joint_pos.shape={tuple(joint_pos.shape)}, "
+            f"target_joint_pos.shape={tuple(target_joint_pos.shape)}, "
             f"num_dofs={num_dofs}; "
             + "; ".join(shape_errors)
         )
@@ -627,7 +646,7 @@ def _calc_metrics(ep):
     # metr["success_phc_mean_xpos"] = torch.all(torch.norm(jpos_pred - jpos_gt, dim=-1).mean(dim=-1) <= 0.5).float()
 
     # phc metrics
-    phc_metrics = compute_joint_pos_metrics(joint_pos=ep["joint_pos"], target_joint_pos=ep["target_joint_pos"])
+    phc_metrics = compute_joint_pos_metrics(joint_pos=joint_pos, target_joint_pos=target_joint_pos)
     metr.update(phc_metrics)
     for k, v in metr.items():
         if isinstance(v, torch.Tensor):
@@ -642,15 +661,14 @@ def compute_joint_pos_metrics(joint_pos, target_joint_pos):
     # Next observation should match the desired target (if possible in 1 step)
     stats["mpjpe_l"] = torch.norm(joint_pos - target_joint_pos, dim=-1).mean(-1) * 1000
 
-    # we compute the velocity as finite difference
-    vel_gt = target_joint_pos[:, 1:] - target_joint_pos[:, :-1]  # num_env x T x D
-    vel_pred = joint_pos[:, 1:] - joint_pos[:, :-1]  # num_env x T x D
-    stats["vel_dist"] = torch.norm(vel_pred - vel_gt, dim=-1).mean(-1) * 1000  # num_env
+    # We compute velocity as a finite difference along the time dimension.
+    vel_gt = torch.diff(target_joint_pos, dim=-2)
+    vel_pred = torch.diff(joint_pos, dim=-2)
+    stats["vel_dist"] = torch.norm(vel_pred - vel_gt, dim=-1).mean(-1) * 1000
 
-    # Computes acceleration error:
-    #     1/(n-2) \sum_{i=1}^{n-1} X_{i-1} - 2X_i + X_{i+1}
-    accel_gt = target_joint_pos[:, :-2] - 2 * target_joint_pos[:, 1:-1] + target_joint_pos[:, 2:]
-    accel_pred = joint_pos[:, :-2] - 2 * joint_pos[:, 1:-1] + joint_pos[:, 2:]
+    # We compute acceleration as a second finite difference along time.
+    accel_gt = torch.diff(target_joint_pos, n=2, dim=-2)
+    accel_pred = torch.diff(joint_pos, n=2, dim=-2)
     stats["accel_dist"] = torch.norm(accel_pred - accel_gt, dim=-1).mean(-1) * 100
 
     stats.update(

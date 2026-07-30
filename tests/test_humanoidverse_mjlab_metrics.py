@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from humanoidverse.agents.evaluations.humanoidverse_mjlab import _calc_metrics, emd_numpy
+from humanoidverse.agents.evaluations.humanoidverse_mjlab import _calc_metrics, compute_joint_pos_metrics, emd_numpy
 
 
 def _episode(
@@ -45,6 +45,58 @@ def test_obs_state_metrics_include_all_29_g1_joint_positions() -> None:
     assert emd_numpy(legacy_observation, legacy_target)["emd"] == 0.0
 
 
+def test_joint_metrics_difference_along_time() -> None:
+    time = torch.arange(4, dtype=torch.float32)
+    joint_pos = time.square().unsqueeze(-1).repeat(1, 3)
+    target_joint_pos = torch.zeros_like(joint_pos)
+
+    metrics = compute_joint_pos_metrics(joint_pos, target_joint_pos)
+    expected_vel = torch.norm(
+        torch.diff(joint_pos, dim=0) - torch.diff(target_joint_pos, dim=0),
+        dim=-1,
+    ).mean() * 1000
+    expected_accel = torch.norm(
+        torch.diff(joint_pos, n=2, dim=0) - torch.diff(target_joint_pos, n=2, dim=0),
+        dim=-1,
+    ).mean() * 100
+
+    torch.testing.assert_close(metrics["vel_dist"], expected_vel)
+    torch.testing.assert_close(metrics["accel_dist"], expected_accel)
+
+    legacy_vel = joint_pos[:, 1:] - joint_pos[:, :-1]
+    legacy_accel = joint_pos[:, :-2] - 2 * joint_pos[:, 1:-1] + joint_pos[:, 2:]
+    torch.testing.assert_close(legacy_vel, torch.zeros_like(legacy_vel))
+    torch.testing.assert_close(legacy_accel, torch.zeros_like(legacy_accel))
+
+
+def test_static_joint_offsets_are_not_temporal_motion() -> None:
+    base_pose = torch.arange(4, dtype=torch.float32)
+    joint_pos = base_pose.unsqueeze(0).repeat(4, 1)
+    target_joint_pos = torch.zeros_like(joint_pos)
+
+    metrics = compute_joint_pos_metrics(joint_pos, target_joint_pos)
+
+    torch.testing.assert_close(metrics["vel_dist"], torch.tensor(0.0))
+    torch.testing.assert_close(metrics["accel_dist"], torch.tensor(0.0))
+
+
+def test_joint_metrics_preserve_non_temporal_definitions() -> None:
+    base_pose = torch.arange(4, dtype=torch.float32)
+    joint_pos = base_pose.unsqueeze(0).repeat(4, 1)
+    target_joint_pos = torch.zeros_like(joint_pos)
+    distance = torch.norm(joint_pos - target_joint_pos, dim=-1)
+    in_bounds = distance <= 2.0
+    out_bounds = distance > 4.0
+    expected_proximity = (in_bounds + ((4.0 - distance) / 2.0) * (~in_bounds) * (~out_bounds)).mean()
+
+    metrics = compute_joint_pos_metrics(joint_pos, target_joint_pos)
+
+    torch.testing.assert_close(metrics["mpjpe_l"], distance.mean() * 1000)
+    torch.testing.assert_close(metrics["distance"], distance.mean())
+    torch.testing.assert_close(metrics["proximity"], expected_proximity)
+    assert metrics["emd"] == pytest.approx(distance.mean().item())
+
+
 @pytest.mark.parametrize("num_dofs", [23, 29, 30])
 def test_obs_state_metrics_support_dynamic_robot_dofs(num_dofs: int) -> None:
     ep = _episode(num_dofs)
@@ -64,12 +116,32 @@ def test_obs_state_metrics_support_dynamic_robot_dofs(num_dofs: int) -> None:
         (_episode(29, target_width=28), "tracking target state feature dimension is smaller than num_dofs"),
         (_episode(29, target_time_steps=5), "observation and tracking target time dimensions must match"),
         (
+            {**_episode(3), "joint_pos": torch.zeros(4, 2)},
+            "joint_pos and target_joint_pos shapes must match",
+        ),
+        ({**_episode(3), "joint_pos": torch.zeros(4)}, "joint_pos must be two-dimensional"),
+        ({**_episode(3), "joint_pos": torch.zeros(4, 1, 3)}, "joint_pos must be two-dimensional"),
+        (
+            {**_episode(3), "target_joint_pos": torch.zeros(4, 1, 3)},
+            "target_joint_pos must be two-dimensional",
+        ),
+        (_episode(3, time_steps=1), "joint_pos must contain at least 3 time steps"),
+        (_episode(3, time_steps=2), "joint_pos must contain at least 3 time steps"),
+        (
+            {**_episode(3), "observation": {"state": torch.zeros(4, 1, 12)}},
+            "observation state must be two-dimensional",
+        ),
+        (
+            {**_episode(3), "tracking_target": {"state": torch.zeros(4, 1, 12)}},
+            "tracking target state must be two-dimensional",
+        ),
+        (
             {
-                **_episode(29),
-                "observation": {"state": torch.zeros(4, 1, 64)},
-                "tracking_target": {"state": torch.zeros(4, 2, 64)},
+                **_episode(3),
+                "observation": {"state": torch.zeros(5, 12)},
+                "tracking_target": {"state": torch.zeros(5, 12)},
             },
-            "observation and tracking target leading dimensions must match",
+            "observation state and joint_pos time dimensions must match",
         ),
     ],
 )
@@ -81,5 +153,6 @@ def test_obs_state_metrics_validate_shapes(episode, expected_error: str) -> None
     assert expected_error in message
     assert "observation_state.shape=" in message
     assert "tracking_target_state.shape=" in message
+    assert "joint_pos.shape=" in message
     assert "target_joint_pos.shape=" in message
     assert "num_dofs=" in message
