@@ -545,12 +545,6 @@ def _async_tracking_worker(
     return metrics
 
 
-
-QPOS_START = 23 + 3
-QPOS_END = 23 + 3 + 23
-QVEL_IDX = 23
-
-
 def distance_matrix(X: torch.Tensor, Y: torch.Tensor):
     X_norm = X.pow(2).sum(1).reshape(-1, 1)
     Y_norm = Y.pow(2).sum(1).reshape(1, -1)
@@ -582,11 +576,40 @@ def distance_proximity(next_obs: torch.Tensor, tracking_target: torch.Tensor, bo
 
 def _calc_metrics(ep):
     metr = {}
-    next_obs = torch.tensor(ep["observation"]["state"][:, :QVEL_IDX], dtype=torch.float32)
-    tracking_target = torch.tensor(ep["tracking_target"]["state"][:, :QVEL_IDX], dtype=torch.float32)
-    dist_prox_res = distance_proximity(next_obs=next_obs, tracking_target=tracking_target, prefix="obs_state_")
+    num_dofs = ep["target_joint_pos"].shape[-1]
+    observation_state = torch.as_tensor(ep["observation"]["state"], dtype=torch.float32)
+    target_state = torch.as_tensor(ep["tracking_target"]["state"], dtype=torch.float32)
+
+    shape_errors = []
+    if num_dofs <= 0:
+        shape_errors.append("num_dofs must be greater than zero")
+    if observation_state.ndim < 2:
+        shape_errors.append("observation state must include time and feature dimensions")
+    elif observation_state.shape[-1] < num_dofs:
+        shape_errors.append("observation state feature dimension is smaller than num_dofs")
+    if target_state.ndim < 2:
+        shape_errors.append("tracking target state must include time and feature dimensions")
+    elif target_state.shape[-1] < num_dofs:
+        shape_errors.append("tracking target state feature dimension is smaller than num_dofs")
+    if observation_state.ndim > 0 and target_state.ndim > 0 and observation_state.shape[0] != target_state.shape[0]:
+        shape_errors.append("observation and tracking target time dimensions must match")
+    if observation_state.ndim >= 2 and target_state.ndim >= 2 and observation_state.shape[:-1] != target_state.shape[:-1]:
+        shape_errors.append("observation and tracking target leading dimensions must match")
+    if shape_errors:
+        raise ValueError(
+            "Invalid evaluation state shapes: "
+            f"observation_state.shape={tuple(observation_state.shape)}, "
+            f"tracking_target_state.shape={tuple(target_state.shape)}, "
+            f"target_joint_pos.shape={tuple(ep['target_joint_pos'].shape)}, "
+            f"num_dofs={num_dofs}; "
+            + "; ".join(shape_errors)
+        )
+
+    next_qpos = observation_state[..., :num_dofs]
+    target_qpos = target_state[..., :num_dofs]
+    dist_prox_res = distance_proximity(next_obs=next_qpos, tracking_target=target_qpos, prefix="obs_state_")
     metr.update(dist_prox_res)
-    emd_res = emd_numpy(next_obs=next_obs, tracking_target=tracking_target, prefix="obs_state_")
+    emd_res = emd_numpy(next_obs=next_qpos, tracking_target=target_qpos, prefix="obs_state_")
     metr.update(emd_res)
     # # add distance wrt xpos
     # xpos = torch.tensor(ep["xpos"], dtype=torch.float32).view(ep["xpos"].shape[0], -1)  # [keyframes, 72]
