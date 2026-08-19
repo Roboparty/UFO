@@ -18,6 +18,7 @@ import hydra
 import numpy as np
 import pydantic
 import torch
+import torch.nn.functional as F
 from gymnasium import Env
 from gymnasium.vector import VectorEnv
 from omegaconf import OmegaConf
@@ -55,6 +56,72 @@ HYDRA_CONFIG_DIR = os.path.join(HUMANOIDVERSE_DIR, "config")
 HYDRA_CONFIG_REL_PATH = os.path.join("exp", "bfm_zero", "bfm_zero")
 G1_MJLAB_MJCF_PATH = "humanoidverse/data/robots/g1_mjlab/g1_29dof.xml"
 G1_MJLAB_ACTUATOR_SOURCE = "g1-mode_15"
+
+
+def peak_contact_force(force_history: torch.Tensor) -> torch.Tensor:
+    """Select each body's strongest net contact force over a policy step."""
+    if force_history.ndim != 4 or force_history.shape[-1] != 3:
+        raise ValueError(f"force_history must have shape [B, N, H, 3], got {tuple(force_history.shape)}")
+    peak_index = torch.linalg.vector_norm(force_history, dim=-1).argmax(dim=-1, keepdim=True)
+    gather_index = peak_index.unsqueeze(-1).expand(*peak_index.shape, 3)
+    return torch.gather(force_history, dim=2, index=gather_index).squeeze(2)
+
+
+def body_contact_severity(
+    contact_force: torch.Tensor,
+    pre_body_vel: torch.Tensor,
+    robot_weight: torch.Tensor,
+    *,
+    force_threshold_ratio: float = 0.05,
+    smooth_l1_beta: float = 0.25,
+    impact_velocity_scale: float = 1.0,
+    impact_velocity_cap: float = 2.0,
+    severity_cap: float = 4.0,
+) -> torch.Tensor:
+    """Continuous loaded-contact severity with an incoming-speed gain.
+
+    MJLab contact force points from the primary body toward the secondary
+    contact object. Positive velocity along that direction is therefore an
+    incoming velocity.
+    """
+    if contact_force.shape != pre_body_vel.shape or contact_force.shape[-1] != 3:
+        raise ValueError("contact_force and pre_body_vel must have matching [B, N, 3] shapes")
+    weight = robot_weight.reshape(-1, 1).clamp_min(1.0e-6)
+    force_norm = torch.linalg.vector_norm(contact_force, dim=-1)
+    force_direction = contact_force / (force_norm.unsqueeze(-1) + 1.0e-6)
+    impact_velocity = torch.relu((pre_body_vel * force_direction).sum(dim=-1))
+    force_ratio = torch.relu(force_norm / weight - force_threshold_ratio)
+    force_severity = F.smooth_l1_loss(
+        force_ratio,
+        torch.zeros_like(force_ratio),
+        beta=smooth_l1_beta,
+        reduction="none",
+    )
+    impact_gain = 1.0 + torch.clamp(
+        impact_velocity / impact_velocity_scale,
+        min=0.0,
+        max=impact_velocity_cap,
+    ).square()
+    return torch.clamp((force_severity * impact_gain).sum(dim=1), max=severity_cap)
+
+
+def tangential_contact_speed(
+    contact_force: torch.Tensor,
+    body_vel: torch.Tensor,
+    robot_weight: torch.Tensor,
+    *,
+    force_threshold_ratio: float = 0.05,
+) -> torch.Tensor:
+    """Sum loaded bodies' velocity tangent to their contact-force direction."""
+    if contact_force.shape != body_vel.shape or contact_force.shape[-1] != 3:
+        raise ValueError("contact_force and body_vel must have matching [B, N, 3] shapes")
+    weight = robot_weight.reshape(-1, 1).clamp_min(1.0e-6)
+    force_norm = torch.linalg.vector_norm(contact_force, dim=-1)
+    force_direction = contact_force / (force_norm.unsqueeze(-1) + 1.0e-6)
+    normal_velocity = (body_vel * force_direction).sum(dim=-1, keepdim=True)
+    tangent_velocity = body_vel - normal_velocity * force_direction
+    loaded = force_norm / weight > force_threshold_ratio
+    return (torch.linalg.vector_norm(tangent_velocity, dim=-1) * loaded).sum(dim=1)
 
 
 def _resolve_humanoidverse_path(path_value: str | os.PathLike[str]) -> str:
@@ -781,6 +848,7 @@ class HumanoidVerseMjlabCore:
         self.extras: dict[str, Any] = {"aux_rewards": {}}
 
         self._init_reward_scales()
+        self.terrain_aware_auxiliary = bool(hv_config.rewards.get("terrain_aware_auxiliary", False))
         self._validate_aux_reward_semantics(hv_config)
         self.feet_indices = torch.tensor([self.body_names.index(name) for name in hv_config.robot.contact_bodies], device=self.device, dtype=torch.long)
         self.torso_index = self.body_names.index(hv_config.robot.torso_name)
@@ -788,6 +856,11 @@ class HumanoidVerseMjlabCore:
         for pattern in _to_list(hv_config.robot.penalize_contacts_on):
             penalized.extend([i for i, name in enumerate(self.body_names) if pattern in name])
         self.penalised_contact_indices = torch.tensor(sorted(set(penalized)), device=self.device, dtype=torch.long)
+        self.robot_weight = (
+            self._read_robot_weight()
+            if self.terrain_aware_auxiliary
+            else torch.ones(self.num_envs, device=self.device)
+        )
         self.left_ankle_dof_indices = torch.tensor([self.dof_names.index(n) for n in hv_config.robot.left_ankle_dof_names], device=self.device)
         self.right_ankle_dof_indices = torch.tensor([self.dof_names.index(n) for n in hv_config.robot.right_ankle_dof_names], device=self.device)
 
@@ -948,6 +1021,8 @@ class HumanoidVerseMjlabCore:
         self.body_ang_vel = body_vel[..., 3:6]
         self.torques = data.qfrc_actuator[:, self._joint_ids].clone()
         self.contact_forces = self._read_contact_forces()
+        if self.terrain_aware_auxiliary:
+            self.contact_force_history = self._read_contact_force_history()
         self.episode_length_buf = self.mjlab_env.episode_length_buf.clone()
 
     def _read_contact_forces(self) -> torch.Tensor:
@@ -963,6 +1038,32 @@ class HumanoidVerseMjlabCore:
             if name in self.body_names[: self.num_bodies]:
                 forces[:, self.body_names.index(name), :] = contact_data.force[:, i, :]
         return forces
+
+    def _read_contact_force_history(self) -> torch.Tensor:
+        sensor = self.mjlab_env.scene.sensors.get("body_contact")
+        history_length = int(self.config.simulator.config.sim.control_decimation)
+        history = torch.zeros(self.num_envs, self.num_bodies, history_length, 3, device=self.device)
+        if sensor is None or sensor.data.force_history is None:
+            return history
+        names = [name.split("/")[-1] for name in sensor.primary_names]
+        for i, name in enumerate(names):
+            if name in self.body_names[: self.num_bodies]:
+                history[:, self.body_names.index(name), :, :] = sensor.data.force_history[:, i, :, :]
+        return history
+
+    def _read_robot_weight(self) -> torch.Tensor:
+        scene_body_ids = self.robot.data.indexing.body_ids[self._body_ids]
+        body_mass = self.mjlab_env.sim.model.body_mass
+        if body_mass.ndim == 1:
+            robot_mass = body_mass[scene_body_ids].sum().expand(self.num_envs)
+        else:
+            robot_mass = body_mass[:, scene_body_ids].sum(dim=1)
+        gravity = torch.as_tensor(
+            self.mjlab_env.cfg.sim.mujoco.gravity,
+            device=self.device,
+            dtype=robot_mass.dtype,
+        ).norm()
+        return robot_mass * gravity
 
     def _extend_body_state(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.num_extend_bodies == 0:
@@ -1168,7 +1269,7 @@ class HumanoidVerseMjlabCore:
             obs = tree_map(lambda x: x.detach().cpu().numpy(), obs)
         return obs
 
-    def _compute_reward(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _compute_reward(self, *, pre_body_vel: torch.Tensor | None = None) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         aux: dict[str, torch.Tensor] = {}
         contact = self.contact_forces
         foot_contact = contact[:, self.feet_indices, 2] > 1.0
@@ -1185,6 +1286,15 @@ class HumanoidVerseMjlabCore:
         else:
             undesired = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         aux["penalty_undesired_contact"] = undesired.float()
+        if self.terrain_aware_auxiliary:
+            if pre_body_vel is None:
+                raise ValueError("terrain-aware auxiliary rewards require pre-step body velocity")
+            peak_force = peak_contact_force(self.contact_force_history)
+            aux["penalty_body_impact"] = body_contact_severity(
+                peak_force[:, self.penalised_contact_indices],
+                pre_body_vel[:, self.penalised_contact_indices],
+                self.robot_weight,
+            )
         left_ankle_roll = self.dof_pos[:, self.left_ankle_dof_indices[1:2]]
         right_ankle_roll = self.dof_pos[:, self.right_ankle_dof_indices[1:2]]
         aux["penalty_ankle_roll"] = torch.sum(torch.square(left_ankle_roll) + torch.square(right_ankle_roll), dim=1)
@@ -1197,7 +1307,17 @@ class HumanoidVerseMjlabCore:
             + torch.sum(torch.square(right_gravity[:, :2]), dim=1).sqrt() * foot_contact[:, 1]
         )
         foot_vel = self.body_vel[:, self.feet_indices]
-        aux["penalty_slippage"] = torch.sum(torch.norm(foot_vel, dim=-1) * (torch.norm(contact[:, self.feet_indices, :], dim=-1) > 1.0), dim=1)
+        if self.terrain_aware_auxiliary:
+            aux["penalty_slippage"] = tangential_contact_speed(
+                contact[:, self.feet_indices],
+                foot_vel,
+                self.robot_weight,
+            )
+        else:
+            aux["penalty_slippage"] = torch.sum(
+                torch.norm(foot_vel, dim=-1) * (torch.norm(contact[:, self.feet_indices, :], dim=-1) > 1.0),
+                dim=1,
+            )
         forward_left = my_quat_rotate(left_quat, self.forward_vec)
         forward_right = my_quat_rotate(right_quat, self.forward_vec)
         root_forward = my_quat_rotate(self.base_quat, self.forward_vec)
@@ -1229,6 +1349,7 @@ class HumanoidVerseMjlabCore:
 
     def step(self, actions: torch.Tensor):
         actions = actions.to(self.device, dtype=torch.float32)
+        pre_body_vel = self.body_vel.clone() if self.terrain_aware_auxiliary else None
         self.last_actions[:] = self.actions
         self.last_dof_vel[:] = self.dof_vel
         self.actions[:] = self._normalized_action(actions)
@@ -1238,7 +1359,7 @@ class HumanoidVerseMjlabCore:
         boundary_resets = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         if self.terrain_enabled:
             boundary_resets = self._check_terrain_boundary()
-        reward, aux = self._compute_reward()
+        reward, aux = self._compute_reward(pre_body_vel=pre_body_vel)
         # Patch boundaries are an artificial domain limit, not a behavior failure.
         # Truncate and reset before an invalid off-terrain transition can continue.
         time_outs = torch.logical_or(time_outs.bool(), boundary_resets)

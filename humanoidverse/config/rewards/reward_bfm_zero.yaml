@@ -4,6 +4,7 @@
 #   - reward_base
 
 rewards:
+  terrain_aware_auxiliary: False
   set_reward: Zhengyi
   set_reward_date: 20250320
   only_positive_rewards: False

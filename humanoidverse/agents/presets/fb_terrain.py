@@ -37,7 +37,27 @@ def build_fb_terrain_agent(**kwargs):
     normalizers["terrain_priv"] = BatchNormNormalizerConfig(name="BatchNormNormalizerConfig", momentum=0.01)
     terrain_normalizer = base.model.obs_normalizer.model_copy(update={"normalizers": normalizers})
     terrain_model = base.model.model_copy(update={"archi": terrain_archi, "obs_normalizer": terrain_normalizer})
-    return base.model_copy(update={"model": terrain_model})
+    update = {"model": terrain_model}
+    if not kwargs.get("cartwheel_aux_safe", False):
+        update.update(
+            {
+                "aux_rewards": [
+                    "penalty_action_rate",
+                    "limits_dof_pos",
+                    "penalty_body_impact",
+                    "penalty_slippage",
+                    "penalty_ankle_roll",
+                ],
+                "aux_rewards_scaling": {
+                    "penalty_action_rate": -0.1,
+                    "limits_dof_pos": -10.0,
+                    "penalty_body_impact": -1.0,
+                    "penalty_slippage": -1.0,
+                    "penalty_ankle_roll": -1.0,
+                },
+            }
+        )
+    return base.model_copy(update=update)
 
 
 __all__ = ["TRAIN_RUNTIME", "build_fb_terrain_agent"]

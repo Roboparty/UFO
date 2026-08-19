@@ -15,7 +15,13 @@ from mjlab.terrains.terrain_entity import _proportional_counts
 from omegaconf import OmegaConf
 
 from humanoidverse.agents.buffers.transition import DictBuffer
-from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig, HumanoidVerseMjlabCore
+from humanoidverse.agents.envs.humanoidverse_mjlab import (
+    HumanoidVerseMjlabConfig,
+    HumanoidVerseMjlabCore,
+    body_contact_severity,
+    peak_contact_force,
+    tangential_contact_speed,
+)
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import _calc_metrics, emd_numpy
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
@@ -164,6 +170,34 @@ def _canonical_privileged_state(root_height: float, ground_height: float) -> tor
 
 
 class TerrainPhysicsObservationTest(unittest.TestCase):
+    def test_peak_contact_force_selects_strongest_physics_substep(self) -> None:
+        history = torch.tensor([[[[0.0, 0.0, 10.0], [0.0, 0.0, 80.0], [0.0, 0.0, 20.0]]]])
+
+        torch.testing.assert_close(peak_contact_force(history), torch.tensor([[[0.0, 0.0, 80.0]]]))
+
+    def test_body_contact_severity_distinguishes_impact_direction_and_speed(self) -> None:
+        # MJLab's primary-to-secondary force points downward for a body-ground contact.
+        force = torch.tensor([[[0.0, 0.0, -100.0]]])
+        weight = torch.tensor([500.0])
+        falling = body_contact_severity(force, torch.tensor([[[0.0, 0.0, -1.5]]]), weight)
+        resting = body_contact_severity(force, torch.zeros_like(force), weight)
+        rising = body_contact_severity(force, torch.tensor([[[0.0, 0.0, 1.5]]]), weight)
+        light = body_contact_severity(torch.tensor([[[0.0, 0.0, -20.0]]]), torch.zeros_like(force), weight)
+
+        self.assertGreater(falling.item(), resting.item())
+        torch.testing.assert_close(rising, resting)
+        torch.testing.assert_close(light, torch.zeros_like(light))
+
+    def test_slippage_uses_only_loaded_tangential_velocity(self) -> None:
+        force = torch.tensor([[[0.0, 0.0, -100.0]]])
+        weight = torch.tensor([500.0])
+
+        normal = tangential_contact_speed(force, torch.tensor([[[0.0, 0.0, 2.0]]]), weight)
+        tangent = tangential_contact_speed(force, torch.tensor([[[0.6, 0.8, 2.0]]]), weight)
+
+        torch.testing.assert_close(normal, torch.zeros_like(normal), atol=1.0e-6, rtol=0.0)
+        torch.testing.assert_close(tangent, torch.ones_like(tangent), atol=1.0e-6, rtol=0.0)
+
     def test_inference_camera_tracks_negative_world_height_on_sloped_terrain(self) -> None:
         root = np.array([-135.0, 0.0, -0.39])
 
@@ -478,6 +512,32 @@ class TerrainNetworkRoutingTest(unittest.TestCase):
         self.assertEqual(archi.critic.input_filter.key, ["state", "privileged_state", "last_action", "history_actor"])
         self.assertNotIn("terrain_priv", cfg.model.obs_normalizer.normalizers)
         self.assertNotIn("terrain_actor", cfg.model.obs_normalizer.normalizers)
+        self.assertIn("penalty_undesired_contact", cfg.aux_rewards)
+        self.assertIn("penalty_feet_ori", cfg.aux_rewards)
+        self.assertNotIn("penalty_body_impact", cfg.aux_rewards)
+
+    def test_terrain_auxiliary_rewards_use_continuous_impact(self) -> None:
+        cfg = _preset("fb_terrain")
+        self.assertEqual(
+            cfg.aux_rewards,
+            [
+                "penalty_action_rate",
+                "limits_dof_pos",
+                "penalty_body_impact",
+                "penalty_slippage",
+                "penalty_ankle_roll",
+            ],
+        )
+        self.assertEqual(
+            cfg.aux_rewards_scaling,
+            {
+                "penalty_action_rate": -0.1,
+                "limits_dof_pos": -10.0,
+                "penalty_body_impact": -1.0,
+                "penalty_slippage": -1.0,
+                "penalty_ankle_roll": -1.0,
+            },
+        )
 
     def test_terrain_normalizer_is_opt_in(self) -> None:
         self.assertIn("terrain_priv", _preset("fb_terrain").model.obs_normalizer.normalizers)

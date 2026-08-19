@@ -194,6 +194,9 @@ def build_ufo_mjlab_config(
                 "terrain=terrain_ufo_v0",
                 f"terrain.terrain_type={terrain_mode}",
                 f"terrain.seed={seed}",
+                "rewards.terrain_aware_auxiliary=true",
+                "rewards.reward_scales.penalty_undesired_contact=0.0",
+                "rewards.reward_scales.penalty_feet_ori=0.0",
             ]
         )
     elif terrain_mode is not None:
