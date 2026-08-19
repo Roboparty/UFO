@@ -203,6 +203,34 @@ class RobotConfigOnnxExportTest(unittest.TestCase):
         self.assertEqual(saved["actor_obs_dim"], 52 + 27 + 100 + 12)
         self.assertEqual(saved["output_action_dim"], 27)
 
+    def test_tracking_policy_export_writes_soft_limit_mapping_metadata(self) -> None:
+        model = _FakePolicyModel(state_dim=52, last_action_dim=2, action_dim=2)
+        env = SimpleNamespace(
+            action_mapping="soft_limit_bias",
+            action_mapping_bias=torch.tensor([0.25, -0.5]),
+            action_mapping_range=torch.tensor([1.5, 2.0]),
+            action_mapping_lower=torch.tensor([-1.25, -2.5]),
+            action_mapping_upper=torch.tensor([1.75, 1.5]),
+            action_target_scale=torch.tensor([[0.4, 0.2]]),
+            default_dof_pos=torch.tensor([[0.1, -0.2]]),
+            dof_pos_limits=torch.tensor([[-0.4, 0.8], [-0.7, 0.1]]),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch("humanoidverse.utils.helpers.torch.onnx.export"):
+            metadata = _export_policy_model(model, Path(tmpdir), _fake_robot_training(2), env)
+            saved = json.loads((Path(tmpdir) / "_FakePolicyModel.meta.json").read_text())
+
+        self.assertEqual(metadata["action_mapping"], "soft_limit_bias")
+        self.assertEqual(saved["action_mapping_bias"], [0.25, -0.5])
+        self.assertEqual(saved["action_mapping_range"], [1.5, 2.0])
+        self.assertTrue(torch.allclose(torch.tensor(saved["action_target_scale"]), torch.tensor([0.4, 0.2])))
+        self.assertTrue(
+            torch.allclose(
+                torch.tensor(saved["soft_dof_pos_limits"]),
+                torch.tensor([[-0.4, 0.8], [-0.7, 0.1]]),
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

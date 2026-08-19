@@ -113,6 +113,7 @@ def build_ufo_mjlab_config(
     cartwheel_aux_safe: bool = False,
     num_agent_updates: int | None = None,
     robot_config: str | Path | None = None,
+    action_mapping: str = "effort_kp",
 ) -> TrainConfig:
     agent = canonical_agent_name(agent)
     robot_training = load_robot_training_spec(robot_config or DEFAULT_ROBOT_CONFIG)
@@ -200,6 +201,7 @@ def build_ufo_mjlab_config(
             max_episode_length_s=None,
             disable_obs_noise=disable_obs_noise,
             disable_domain_randomization=disable_dr,
+            action_mapping=action_mapping,
             relative_config_path="exp/bfm_zero/bfm_zero",
             include_last_action=True,
             hydra_overrides=hydra_overrides,
@@ -319,6 +321,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         cartwheel_aux_safe=bool(args.cartwheel_aux_safe),
         num_agent_updates=args.num_agent_updates,
         robot_config=args.robot_config,
+        action_mapping=args.action_mapping,
     )
     print(
         "[INFO] UFO train: "
@@ -328,7 +331,8 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"num_envs_per_rank={args.num_envs}, global_parallel_envs={args.num_envs * world_size}, "
         f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, "
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
-        f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
+        f"cartwheel_aux_safe={args.cartwheel_aux_safe}, action_mapping={args.action_mapping}, "
+        f"lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
         f"compile={cfg.agent.compile}",
         flush=True,
@@ -453,6 +457,15 @@ def parse_args() -> argparse.Namespace:
         help="Override latent update interval. Defaults to 100 for FB and 10 for TeCH.",
     )
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="Replay capacity per rank/GPU.")
+    parser.add_argument(
+        "--action-mapping",
+        choices=("effort_kp", "soft_limit_bias"),
+        default="effort_kp",
+        help=(
+            "Action-to-position-target mapping. effort_kp preserves the existing effort/Kp scaling; "
+            "soft_limit_bias maps [-1, 1] affinely onto each joint's configured soft limits."
+        ),
+    )
     parser.add_argument(
         "--num-agent-updates",
         type=int,

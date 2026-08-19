@@ -281,6 +281,31 @@ def _action_target_scale(config) -> torch.Tensor:
     return torch.tensor(scales, dtype=torch.float32)
 
 
+def _soft_limit_action_affine(
+    soft_limits: torch.Tensor,
+    default_pos: torch.Tensor,
+    target_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build an affine map from normalized actions to soft joint limits.
+
+    ``JointPositionAction`` applies ``default_pos + target_scale * action``.
+    This helper expresses the desired soft-limit interval in that action input
+    space, so ``bias + half_range * normalized_action`` reaches both limits
+    when the normalized policy output spans ``[-1, 1]``.
+    """
+    scale = target_scale.squeeze(0)
+    if torch.any(scale <= 0.0):
+        raise ValueError("soft_limit_bias action mapping requires positive target scales")
+    default = default_pos[0]
+    lower = (soft_limits[:, 0] - default) / scale
+    upper = (soft_limits[:, 1] - default) / scale
+    if torch.any(lower >= upper):
+        raise ValueError("soft_limit_bias action mapping received invalid soft joint limits")
+    bias = 0.5 * (upper + lower)
+    half_range = 0.5 * (upper - lower)
+    return bias, half_range, lower, upper
+
+
 def _small_random_quaternions(n: int, max_angle: float, device: str) -> torch.Tensor:
     axis = torch.randn((n, 3), device=device)
     axis = axis / torch.clamp(torch.norm(axis, dim=1, keepdim=True), min=1.0e-6)
@@ -676,6 +701,31 @@ class HumanoidVerseMjlabCore:
         center = (lower + upper) * 0.5
         radius = (upper - lower) * 0.5 * limit_scale
         self.dof_pos_limits = torch.stack((center - radius, center + radius), dim=-1)
+        self.action_mapping = creation_config.action_mapping
+        self.action_mapping_bias = torch.zeros(self.num_dof, device=self.device)
+        self.action_mapping_range = torch.ones(self.num_dof, device=self.device)
+        self.action_mapping_lower = -torch.ones(self.num_dof, device=self.device)
+        self.action_mapping_upper = torch.ones(self.num_dof, device=self.device)
+        if self.action_mapping == "soft_limit_bias":
+            (
+                self.action_mapping_bias,
+                self.action_mapping_range,
+                self.action_mapping_lower,
+                self.action_mapping_upper,
+            ) = _soft_limit_action_affine(
+                self.dof_pos_limits,
+                self.default_dof_pos,
+                self.action_target_scale,
+            )
+            print(
+                "[INFO] action_mapping=soft_limit_bias "
+                f"soft_limit_factor={limit_scale:g} "
+                f"lower={self.action_mapping_lower.tolist()} "
+                f"upper={self.action_mapping_upper.tolist()} "
+                f"bias={self.action_mapping_bias.tolist()} "
+                f"range={self.action_mapping_range.tolist()}",
+                flush=True,
+            )
         self.torque_limits = torch.tensor(_to_list(hv_config.robot.dof_effort_limit_list), device=self.device, dtype=torch.float32)
         self.dof_vel_limits = torch.tensor(_to_list(hv_config.robot.dof_vel_limit_list), device=self.device, dtype=torch.float32)
 
@@ -1016,6 +1066,9 @@ class HumanoidVerseMjlabCore:
         return reward, aux
 
     def _normalized_action(self, actions: torch.Tensor) -> torch.Tensor:
+        if self.action_mapping == "soft_limit_bias":
+            normalized = torch.clamp(actions, -1.0, 1.0)
+            return self.action_mapping_bias + self.action_mapping_range * normalized
         if bool(self.config.robot.control.normalize_action):
             actions = actions * float(self.config.robot.control.normalize_action_to) / float(self.config.robot.control.normalize_action_from)
         return torch.clamp(actions, -float(self.config.robot.control.action_clip_value), float(self.config.robot.control.action_clip_value))
@@ -1275,6 +1328,7 @@ class HumanoidVerseMjlabConfig(BaseConfig):
     max_episode_length_s: float | None = None
     disable_obs_noise: bool = False
     disable_domain_randomization: bool = False
+    action_mapping: tp.Literal["effort_kp", "soft_limit_bias"] = "effort_kp"
     relative_config_path: str = HYDRA_CONFIG_REL_PATH
     include_last_action: bool = True
     hydra_overrides: tp.List[str] = pydantic.Field(default_factory=list)

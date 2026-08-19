@@ -98,7 +98,32 @@ def _tracking_z(model: torch.nn.Module, obs: Any) -> torch.Tensor:
     return model.project_z(z)
 
 
-def _export_policy_model(model: torch.nn.Module, output_dir: Path, robot_training: Any) -> dict[str, Any]:
+def _action_mapping_export_metadata(env: Any | None) -> dict[str, Any]:
+    if env is None:
+        return {}
+    mapping = str(env.action_mapping)
+    metadata: dict[str, Any] = {"action_mapping": mapping}
+    if mapping == "soft_limit_bias":
+        metadata.update(
+            {
+                "action_mapping_bias": env.action_mapping_bias.detach().cpu().tolist(),
+                "action_mapping_range": env.action_mapping_range.detach().cpu().tolist(),
+                "action_mapping_lower": env.action_mapping_lower.detach().cpu().tolist(),
+                "action_mapping_upper": env.action_mapping_upper.detach().cpu().tolist(),
+                "action_target_scale": env.action_target_scale[0].detach().cpu().tolist(),
+                "default_dof_pos": env.default_dof_pos[0].detach().cpu().tolist(),
+                "soft_dof_pos_limits": env.dof_pos_limits.detach().cpu().tolist(),
+            }
+        )
+    return metadata
+
+
+def _export_policy_model(
+    model: torch.nn.Module,
+    output_dir: Path,
+    robot_training: Any,
+    env: Any | None = None,
+) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     model_name = model.__class__.__name__
     output_name = f"{model_name}.onnx"
@@ -122,6 +147,7 @@ def _export_policy_model(model: torch.nn.Module, output_dir: Path, robot_trainin
             "xml_path": str(Path(robot_training.robot.xml_path).expanduser().resolve()),
             "num_dof": num_dof,
             "control_joint_names": control_joint_names,
+            **_action_mapping_export_metadata(env),
         }
     )
     metadata_path = output_dir / f"{model_name}.meta.json"
@@ -131,8 +157,8 @@ def _export_policy_model(model: torch.nn.Module, output_dir: Path, robot_trainin
     return export_metadata
 
 
-def _export_tracking_onnx(model: torch.nn.Module, output_dir: Path, robot_training: Any) -> None:
-    _export_policy_model(model, output_dir, robot_training)
+def _export_tracking_onnx(model: torch.nn.Module, output_dir: Path, robot_training: Any, env: Any | None = None) -> None:
+    _export_policy_model(model, output_dir, robot_training, env)
     try:
         export_backward_encoder_from_model(model, output_dir / "backward_encoder.onnx")
     except UnsupportedBackwardEncoderExport as exc:
@@ -192,9 +218,6 @@ def run_tracking_inference(
     model.to(device)
     model.eval()
 
-    if export_onnx:
-        _export_tracking_onnx(model, model_folder / "exported", robot_training)
-
     env_cfg, use_root_height_obs = load_mjlab_env_cfg(
         model_folder,
         data_path=data_path,
@@ -207,6 +230,9 @@ def run_tracking_inference(
     )
     wrapped_env, _ = env_cfg.build(num_envs=1)
     env = wrapped_env._env
+
+    if export_onnx:
+        _export_tracking_onnx(model, model_folder / "exported", robot_training, env)
 
     output_dir = model_folder / "tracking_inference"
     output_dir.mkdir(parents=True, exist_ok=True)
