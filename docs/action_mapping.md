@@ -24,6 +24,66 @@ ends of an asymmetric interval.
 
 第二种映射适用于关节范围明显不对称的机器人。与以零为中心的缩放不同，它通过偏置项使归一化动作能够覆盖不对称区间的两个端点。
 
+## Concrete G1 example / G1 具体例子
+
+The repository's G1 configuration provides a concrete asymmetric case. For
+`left_hip_roll_joint`, it specifies:
+
+仓库中的 G1 配置提供了一个具体的不对称关节案例。对于 `left_hip_roll_joint`，配置为：
+
+```text
+hard limits        = [-0.52360, 2.96710] rad = [-30.00°, 170.00°]
+soft-limit factor  = 0.95
+soft limits        = [-0.43633, 2.87983] rad = [-25.00°, 165.00°]
+default position   = 0 rad
+effort limit       = 139 N·m
+Kp                 = 99.09843 N·m/rad
+base action scale  = 0.25
+action normalize   = 5.0
+```
+
+With the existing mapping, the MJLab target scale is
+`s = 0.25 * 139 / 99.09843 = 0.35066`. A normalized policy action
+`a in [-1, 1]` is first multiplied by `5`, producing this target interval:
+
+使用现有映射时，MJLab 的位置目标缩放系数为
+`s = 0.25 * 139 / 99.09843 = 0.35066`。归一化策略动作
+`a in [-1, 1]` 会先乘以 `5`，因此得到的位置目标区间为：
+
+```text
+q_target = q_default + s * (5 * a)
+         = [-1.75331, 1.75331] rad
+         = [-100.46°, 100.46°]
+```
+
+The negative side requests positions far beyond the joint's `-25°` soft
+limit, while the positive side cannot reach the `165°` soft upper limit; it is
+short by `1.12653 rad` (`64.55°`). The mirrored right-hip-roll joint has the
+same problem in the opposite direction.
+
+负方向的位置目标远远超过关节 `-25°` 的软下限，而正方向最多只能到 `100.46°`，距离 `165°` 的软上限还差 `1.12653 rad`（`64.55°`）。镜像的右髋 roll 关节则在相反方向存在同样的问题。
+
+For the same joint, `soft_limit_bias` computes the action-space endpoints and
+affine parameters as follows:
+
+对于同一个关节，`soft_limit_bias` 计算出的动作空间端点和仿射参数为：
+
+```text
+lower      = -1.24431
+upper      =  8.21257
+bias       =  3.48413
+half_range =  4.72844
+```
+
+Therefore policy outputs `-1`, `0`, and `1` produce position targets `-25°`,
+`70°`, and `165°`, respectively. This proves the coverage property of the
+mapping: both soft-limit endpoints are reachable and no normalized-action
+range is allocated to targets outside that interval. It is a geometric
+correctness argument, not by itself a claim that every training task must
+improve.
+
+因此，策略输出 `-1`、`0` 和 `1` 时，位置目标分别为 `-25°`、`70°` 和 `165°`。这证明了该映射的空间覆盖性质：两个软限位端点均可达，且不会把归一化动作范围浪费在软限位区间之外。这是对映射几何正确性的证明，但它本身不等价于“所有训练任务都必然获得提升”。
+
 ## Mapping formula / 映射公式
 
 For a soft interval `[q_min, q_max]`, default position `q_default`, and MJLab
