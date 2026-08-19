@@ -464,7 +464,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--terrain-mode",
-        choices=["flat", "slope", "stairs", "rough", "mixed"],
+        choices=["flat", "slope", "stairs", "rough", "platforms", "mixed"],
         default=None,
         help="Physical terrain for --agent fb_terrain (default: mixed).",
     )

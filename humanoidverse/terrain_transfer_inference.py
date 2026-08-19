@@ -1,4 +1,4 @@
-"""Same-z evaluation across physical flat, slope, stairs, and rough terrain."""
+"""Same-z evaluation across the configured physical terrain families."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from humanoidverse.tracking_inference import _target_states_from_obs, _tracking_
 from humanoidverse.utils.helpers import get_backward_observation
 from humanoidverse.utils.robot_spec import load_robot_training_spec
 
-SUPPORTED_TERRAINS = ("flat", "slope", "stairs", "rough", "course")
+SUPPORTED_TERRAINS = ("flat", "slope", "stairs", "rough", "platforms", "course")
 
 
 def _stairs_step_center_offset(step: int, *, platform_width: float, step_depth: float) -> float:
@@ -62,11 +62,12 @@ def _terrain_env_cfg(base_cfg, terrain: str, seed: int, *, dense_terrain: bool =
     if terrain == "course":
         overrides = replace_hydra_override(overrides, "terrain.num_rows", 1)
     if dense_terrain:
-        # Evaluation-only presentation preset. The 30 m coverage invariant is
-        # unchanged, but stairs span most of the patch instead of one small ring.
-        overrides = replace_hydra_override(overrides, "terrain.stairs.num_steps", 20)
+        # Keep the legacy flag as an explicit presentation preset while using
+        # the same bounded obstacle semantics as training.
+        overrides = replace_hydra_override(overrides, "terrain.stairs.num_steps", 6)
         overrides = replace_hydra_override(overrides, "terrain.stairs.step_depth", 0.30)
-        overrides = replace_hydra_override(overrides, "terrain.stairs.platform_width", 1.5)
+        overrides = replace_hydra_override(overrides, "terrain.stairs.platform_width", 1.0)
+        overrides = replace_hydra_override(overrides, "terrain.stairs.plateau_width", 1.2)
     return base_cfg.model_copy(update={"hydra_overrides": overrides, "seed": seed})
 
 
@@ -308,7 +309,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dense-terrain",
         action="store_true",
-        help="Evaluation-only terrain presentation preset with stairs spanning most of the 30 m patch.",
+        help="Evaluation-only preset using the bounded six-step stair presentation.",
     )
     parser.add_argument("--data-path", type=Path, default=DEFAULT_INFERENCE_DATA_PATH)
     parser.add_argument("--robot-config", type=Path, default=None)

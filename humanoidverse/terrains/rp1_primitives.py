@@ -52,6 +52,48 @@ def _mark_as_terrain(output: TerrainOutput) -> TerrainOutput:
     return output
 
 
+def _add_square_ring(
+    body: mujoco.MjsBody,
+    *,
+    center_xy: tuple[float, float],
+    inner_width: float,
+    outer_width: float,
+    bottom: float,
+    top: float,
+    color: tuple[float, float, float, float],
+) -> list[TerrainGeometry]:
+    """Build a square annulus from four non-overlapping boxes."""
+    band_width = (outer_width - inner_width) / 2
+    if band_width <= 1e-6:
+        return []
+    center_x, center_y = center_xy
+    offset = inner_width / 2 + band_width / 2
+    geometries = []
+    for y in (center_y - offset, center_y + offset):
+        geometries.append(
+            _add_box(
+                body,
+                center_xy=(center_x, y),
+                size_xy=(outer_width, band_width),
+                bottom=bottom,
+                top=top,
+                color=color,
+            )
+        )
+    for x in (center_x - offset, center_x + offset):
+        geometries.append(
+            _add_box(
+                body,
+                center_xy=(x, center_y),
+                size_xy=(band_width, inner_width),
+                bottom=bottom,
+                top=top,
+                color=color,
+            )
+        )
+    return geometries
+
+
 @dataclass(kw_only=True)
 class TerrainBoxFlatCfg(BoxFlatTerrainCfg):
     def function(self, difficulty: float, spec: mujoco.MjSpec, rng: np.random.Generator) -> TerrainOutput:
@@ -68,12 +110,13 @@ class TerrainInvertedPyramidStairsCfg(BoxInvertedPyramidStairsTerrainCfg):
 
 @dataclass(kw_only=True)
 class TerrainBoundedStairsCfg(SubTerrainCfg):
-    """Concentric stairs that ascend for a fixed count and then plateau."""
+    """Repeat bounded up-platform-down stair cycles across the patch."""
 
-    step_height_range: tuple[float, float] = (0.08, 0.11)
+    step_height_range: tuple[float, float] = (0.10, 0.18)
     step_width: float = 0.30
     platform_width: float = 1.5
-    num_steps: int = 4
+    num_steps: int = 6
+    plateau_width: float = 1.2
     border_width: float = 0.5
     base_thickness: float = 0.25
 
@@ -81,10 +124,14 @@ class TerrainBoundedStairsCfg(SubTerrainCfg):
         del rng
         if self.num_steps <= 0:
             raise ValueError("num_steps must be positive")
+        if min(self.step_width, self.platform_width, self.plateau_width) <= 0.0:
+            raise ValueError("stair widths must be positive")
         available_width = min(self.size) - 2 * self.border_width
-        ascent_width = self.platform_width + 2 * self.num_steps * self.step_width
-        if ascent_width >= available_width:
-            raise ValueError("terrain patch is too small for bounded stairs and plateau")
+        cycle_radius = 2 * self.num_steps * self.step_width + 2 * self.plateau_width
+        available_radius = (available_width - self.platform_width) / 2
+        num_cycles = int(available_radius // cycle_radius)
+        if num_cycles <= 0:
+            raise ValueError("terrain patch is too small for one complete up-platform-down cycle")
 
         step_height = self.step_height_range[0] + difficulty * (
             self.step_height_range[1] - self.step_height_range[0]
@@ -103,39 +150,60 @@ class TerrainBoundedStairsCfg(SubTerrainCfg):
             )
         ]
 
-        for step in range(1, self.num_steps + 1):
-            inner_width = self.platform_width + 2 * (step - 1) * self.step_width
-            outer_width = (
-                available_width
-                if step == self.num_steps
-                else self.platform_width + 2 * step * self.step_width
+        center_xy = (center_x, center_y)
+        peak_height = self.num_steps * step_height
+        current_width = self.platform_width
+        for cycle in range(num_cycles):
+            for step in range(1, self.num_steps + 1):
+                outer_width = current_width + 2 * self.step_width
+                top = step * step_height
+                color = (0.30 + 0.04 * step, 0.34 + 0.03 * step, 0.38 + 0.02 * step, 1.0)
+                geometries.extend(
+                    _add_square_ring(
+                        body,
+                        center_xy=center_xy,
+                        inner_width=current_width,
+                        outer_width=outer_width,
+                        bottom=0.0,
+                        top=top,
+                        color=color,
+                    )
+                )
+                current_width = outer_width
+
+            plateau_outer_width = current_width + 2 * self.plateau_width
+            geometries.extend(
+                _add_square_ring(
+                    body,
+                    center_xy=center_xy,
+                    inner_width=current_width,
+                    outer_width=plateau_outer_width,
+                    bottom=0.0,
+                    top=peak_height,
+                    color=(0.52, 0.52, 0.50, 1.0),
+                )
             )
-            band_width = (outer_width - inner_width) / 2
-            offset = inner_width / 2 + band_width / 2
-            top = step * step_height
-            color = (0.30 + 0.04 * step, 0.34 + 0.03 * step, 0.38 + 0.02 * step, 1.0)
-            for y in (center_y - offset, center_y + offset):
-                geometries.append(
-                    _add_box(
-                        body,
-                        center_xy=(center_x, y),
-                        size_xy=(outer_width, band_width),
-                        bottom=0.0,
-                        top=top,
-                        color=color,
+            current_width = plateau_outer_width
+
+            for step in range(1, self.num_steps + 1):
+                outer_width = current_width + 2 * self.step_width
+                top = (self.num_steps - step) * step_height
+                if top > 0.0:
+                    geometries.extend(
+                        _add_square_ring(
+                            body,
+                            center_xy=center_xy,
+                            inner_width=current_width,
+                            outer_width=outer_width,
+                            bottom=0.0,
+                            top=top,
+                            color=(0.42, 0.43, 0.43, 1.0),
+                        )
                     )
-                )
-            for x in (center_x - offset, center_x + offset):
-                geometries.append(
-                    _add_box(
-                        body,
-                        center_xy=(x, center_y),
-                        size_xy=(band_width, inner_width),
-                        bottom=0.0,
-                        top=top,
-                        color=color,
-                    )
-                )
+                current_width = outer_width
+
+            # The base box supplies the low platform before the next cycle.
+            current_width += 2 * self.plateau_width
 
         return _mark_as_terrain(
             TerrainOutput(
@@ -275,6 +343,8 @@ class BoxPlatformsTerrainCfg(SubTerrainCfg):
     def function(self, difficulty: float, spec: mujoco.MjSpec, rng: np.random.Generator) -> TerrainOutput:
         del rng
         available_width = min(self.size) - 2 * self.border_width
+        if min(self.band_width, self.center_width) <= 0.0:
+            raise ValueError("Platform band and center widths must be positive.")
         if self.center_width >= available_width:
             raise ValueError("Terrain patch is too small for platform bands.")
 
@@ -300,33 +370,23 @@ class BoxPlatformsTerrainCfg(SubTerrainCfg):
             outer_width = min(inner_width + 2 * self.band_width, available_width)
             actual_band_width = (outer_width - inner_width) / 2
             if band_index % 2 == 0 and actual_band_width > 1e-6:
-                offset = inner_width / 2 + actual_band_width / 2
-                for y in (center_y - offset, center_y + offset):
-                    geometries.append(
-                        _add_box(
-                            body,
-                            center_xy=(center_x, y),
-                            size_xy=(outer_width, actual_band_width),
-                            bottom=0.0,
-                            top=platform_height,
-                            color=green,
-                        )
+                geometries.extend(
+                    _add_square_ring(
+                        body,
+                        center_xy=(center_x, center_y),
+                        inner_width=inner_width,
+                        outer_width=outer_width,
+                        bottom=0.0,
+                        top=platform_height,
+                        color=green,
                     )
-                for x in (center_x - offset, center_x + offset):
-                    geometries.append(
-                        _add_box(
-                            body,
-                            center_xy=(x, center_y),
-                            size_xy=(actual_band_width, inner_width),
-                            bottom=0.0,
-                            top=platform_height,
-                            color=green,
-                        )
-                    )
+                )
             inner_width = outer_width
             band_index += 1
 
-        return TerrainOutput(
-            origin=np.array([center_x, center_y, 0.0]),
-            geometries=geometries,
+        return _mark_as_terrain(
+            TerrainOutput(
+                origin=np.array([center_x, center_y, 0.0]),
+                geometries=geometries,
+            )
         )

@@ -114,6 +114,10 @@ def _physics_height_profile(mode: str) -> np.ndarray:
 
 
 def _physics_heights_at_offsets(mode: str, offsets: list[float]) -> np.ndarray:
+    return _physics_heights_at_xy_offsets(mode, [(offset, 0.0) for offset in offsets])
+
+
+def _physics_heights_at_xy_offsets(mode: str, offsets: list[tuple[float, float]]) -> np.ndarray:
     config = OmegaConf.load("humanoidverse/config/terrain/terrain_ufo_v0.yaml").terrain
     config = OmegaConf.merge(config, {"num_rows": 1, "difficulty_range": [1.0, 1.0]})
     generator = TerrainGenerator(make_ufo_v0_generator_cfg(mode, config))
@@ -125,8 +129,8 @@ def _physics_heights_at_offsets(mode: str, offsets: list[float]) -> np.ndarray:
     origin = generator.terrain_origins[0, 0]
     heights = []
     terrain_group = np.array([0, 0, 0, 0, 0, 1], dtype=np.uint8)
-    for x_offset in offsets:
-        point = np.array([origin[0] + x_offset, origin[1], origin[2] + 3.0])
+    for x_offset, y_offset in offsets:
+        point = np.array([origin[0] + x_offset, origin[1] + y_offset, origin[2] + 3.0])
         distance = mujoco.mj_ray(
             model,
             data,
@@ -138,7 +142,7 @@ def _physics_heights_at_offsets(mode: str, offsets: list[float]) -> np.ndarray:
             np.array([-1], dtype=np.int32),
         )
         if distance < 0:
-            raise AssertionError(f"ray missed {mode} collision geometry at x={x_offset}")
+            raise AssertionError(f"ray missed {mode} collision geometry at ({x_offset}, {y_offset})")
         heights.append(point[2] - distance)
     return np.asarray(heights)
 
@@ -303,14 +307,73 @@ class TerrainPhysicsObservationTest(unittest.TestCase):
         self.assertGreater(values[-1], values[0] + 0.02)
         self.assertGreaterEqual(float(np.diff(values).min()), -1e-5)
 
-    def test_stair_collision_heights_have_discrete_levels(self) -> None:
-        values = _physics_height_profile("stairs")
-        rounded = np.unique(np.round(values, 3))
-        self.assertGreaterEqual(len(rounded), 4)
-        self.assertGreater(values[-1], values[0] + 0.3)
-        self.assertGreater(np.count_nonzero(np.isclose(np.diff(values), 0.0, atol=1e-5)), 5)
-        positive_steps = np.diff(values)[np.diff(values) > 1e-5]
-        np.testing.assert_allclose(positive_steps, 0.15, atol=1e-5)
+    def test_stairs_have_bounded_up_platform_down_profile(self) -> None:
+        offsets = [
+            0.0,
+            0.65,
+            0.95,
+            1.25,
+            1.55,
+            1.85,
+            2.15,
+            2.7,
+            3.65,
+            3.95,
+            4.25,
+            4.55,
+            4.85,
+            5.15,
+            5.6,
+        ]
+        values = _physics_heights_at_offsets("stairs", offsets)
+        expected = [
+            0.0,
+            0.18,
+            0.36,
+            0.54,
+            0.72,
+            0.90,
+            1.08,
+            1.08,
+            0.90,
+            0.72,
+            0.54,
+            0.36,
+            0.18,
+            0.0,
+            0.0,
+        ]
+        np.testing.assert_allclose(values, expected, atol=1e-5)
+
+    def test_stairs_repeat_the_complete_cycle_across_the_patch(self) -> None:
+        offsets = [5.8, 6.65, 8.15, 8.7, 9.65, 11.15, 12.0, 13.5]
+        values = _physics_heights_at_offsets("stairs", offsets)
+        expected = [0.0, 0.18, 1.08, 1.08, 0.90, 0.0, 0.0, 0.0]
+        np.testing.assert_allclose(values, expected, atol=1e-5)
+
+    def test_stairs_have_the_same_profile_in_all_four_directions(self) -> None:
+        for radius, expected_height in (
+            (0.65, 0.18),
+            (2.15, 1.08),
+            (2.7, 1.08),
+            (3.65, 0.90),
+            (5.6, 0.0),
+            (6.65, 0.18),
+            (8.15, 1.08),
+            (9.65, 0.90),
+            (11.5, 0.0),
+        ):
+            offsets = [(radius, 0.0), (-radius, 0.0), (0.0, radius), (0.0, -radius)]
+            np.testing.assert_allclose(
+                _physics_heights_at_xy_offsets("stairs", offsets),
+                expected_height,
+                atol=1e-5,
+            )
+
+    def test_platform_bands_alternate_between_raised_and_flat(self) -> None:
+        offsets = [0.0, 1.0, 1.8, 2.6, 3.4, 4.2]
+        values = _physics_heights_at_offsets("platforms", offsets)
+        np.testing.assert_allclose(values, [0.0, 0.15, 0.0, 0.15, 0.0, 0.15], atol=1e-5)
 
     def test_traversal_course_has_ordered_flat_stairs_ramp_flat_profile(self) -> None:
         offsets = [0.0, 1.9, 3.4, 4.2, 5.8, 6.7, 8.8, 9.3]
@@ -424,27 +487,36 @@ class TerrainNetworkRoutingTest(unittest.TestCase):
 
     def test_phase2_uses_fixed_harder_terrain_distribution(self) -> None:
         terrain = OmegaConf.load("humanoidverse/config/terrain/terrain_ufo_v0.yaml").terrain
-        self.assertEqual(dict(terrain.terrain_mix), {"flat": 0.2, "slope": 0.2, "stairs": 0.3, "rough": 0.3})
-        self.assertEqual(list(terrain.stairs.step_height_range), [0.08, 0.15])
+        self.assertEqual(
+            dict(terrain.terrain_mix),
+            {"flat": 0.15, "slope": 0.15, "stairs": 0.3, "rough": 0.2, "platforms": 0.2},
+        )
+        self.assertEqual(list(terrain.stairs.step_height_range), [0.10, 0.18])
         self.assertEqual(list(terrain.rough.amplitude_range), [0.03, 0.05])
         self.assertEqual(float(terrain.slope.max_angle_deg), 8.0)
         self.assertEqual(list(terrain.patch_size), [30.0, 30.0])
-        self.assertEqual(int(terrain.stairs.num_steps), 20)
-        stair_transition_width = float(terrain.stairs.platform_width) + 2 * (
-            int(terrain.stairs.num_steps) * float(terrain.stairs.step_depth)
+        self.assertEqual(int(terrain.stairs.num_steps), 6)
+        self.assertEqual(float(terrain.stairs.plateau_width), 1.2)
+        cycle_radius = (
+            2 * int(terrain.stairs.num_steps) * float(terrain.stairs.step_depth)
+            + 2 * float(terrain.stairs.plateau_width)
         )
         available_width = min(float(value) for value in terrain.patch_size) - 2 * float(
             terrain.stairs.border_width
         )
-        self.assertAlmostEqual(stair_transition_width, 13.5)
+        available_radius = (available_width - float(terrain.stairs.platform_width)) / 2
+        num_cycles = int(available_radius // cycle_radius)
+        stair_transition_width = float(terrain.stairs.platform_width) + 2 * num_cycles * cycle_radius
+        self.assertEqual(num_cycles, 2)
+        self.assertAlmostEqual(stair_transition_width, 25.0)
         self.assertLess(stair_transition_width, available_width)
         np.testing.assert_array_equal(
             _proportional_counts(1024, np.asarray(list(terrain.terrain_mix.values()))),
-            [205, 205, 307, 307],
+            [154, 154, 306, 205, 205],
         )
         np.testing.assert_array_equal(
             _proportional_counts(8192, np.asarray(list(terrain.terrain_mix.values()))),
-            [1639, 1639, 2457, 2457],
+            [1229, 1229, 2457, 1639, 1638],
         )
         self.assertFalse(bool(terrain.coverage.fail_on_boundary_violation))
 
@@ -486,7 +558,7 @@ class TerrainReplayAndTransferTest(unittest.TestCase):
 
     def test_exact_same_z_is_reused_for_every_terrain(self) -> None:
         z = torch.arange(3 * 256, dtype=torch.float32).reshape(3, 256)
-        terrains = ["flat", "slope", "stairs", "rough"]
+        terrains = ["flat", "slope", "stairs", "rough", "platforms"]
         clones = clone_same_z_for_terrains(z, terrains)
         checksums = {tensor_checksum(value) for value in clones.values()}
         self.assertEqual(checksums, {tensor_checksum(z)})
@@ -525,7 +597,10 @@ class TerrainPriorityEvaluationTest(unittest.TestCase):
         torch.testing.assert_close(terrain_priv, torch.zeros_like(terrain_priv))
 
     def test_mixed_train_and_flat_priority_component_sets(self) -> None:
-        self.assertEqual(terrain_component_names("mixed"), ("flat", "slope", "stairs", "rough"))
+        self.assertEqual(
+            terrain_component_names("mixed"),
+            ("flat", "slope", "stairs", "rough", "platforms"),
+        )
         self.assertEqual(terrain_component_names("flat"), ("flat",))
 
     def test_priority_eval_env_is_lazy_reused_and_closed(self) -> None:

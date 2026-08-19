@@ -6,11 +6,11 @@ defaults:
 terrain:
   # Selected only by --agent fb_terrain; original FB remains unchanged.
   enabled: true
-  terrain_type: mixed  # flat, slope, stairs, rough, mixed
+  terrain_type: mixed  # flat, slope, stairs, rough, platforms, mixed
   seed: 0
   # Harder phase-2 fixed distribution, used after global step 99,295,232.
   # This is an explicit distribution shift, not a time-varying curriculum.
-  terrain_mix: {flat: 0.20, slope: 0.20, stairs: 0.30, rough: 0.30}
+  terrain_mix: {flat: 0.15, slope: 0.15, stairs: 0.30, rough: 0.20, platforms: 0.20}
   patch_size: [30.0, 30.0]
   border_width: 1.0
   num_rows: 10
@@ -25,10 +25,17 @@ terrain:
     border_width: 0.5
 
   stairs:
-    step_height_range: [0.08, 0.15]
+    step_height_range: [0.10, 0.18]
     step_depth: 0.30
-    platform_width: 1.5
-    num_steps: 20
+    platform_width: 1.0
+    num_steps: 6
+    plateau_width: 1.2
+    border_width: 0.5
+
+  platforms:
+    height_range: [0.05, 0.15]
+    band_width: 0.8
+    center_width: 1.5
     border_width: 0.5
 
   rough:

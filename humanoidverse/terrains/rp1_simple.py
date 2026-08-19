@@ -9,6 +9,7 @@ from typing import Any, Literal
 from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 
 from humanoidverse.terrains.rp1_primitives import (
+    BoxPlatformsTerrainCfg,
     NeutralHfPerlinNoiseTerrainCfg,
     NeutralHfPyramidSlopedTerrainCfg,
     TerrainBoundedStairsCfg,
@@ -17,18 +18,19 @@ from humanoidverse.terrains.rp1_primitives import (
     spawn_patch_sampling,
 )
 
-TerrainMode = Literal["plane", "flat", "slope", "stairs", "rough", "mixed", "rp1_simple", "course"]
+TerrainMode = Literal["plane", "flat", "slope", "stairs", "rough", "platforms", "mixed", "rp1_simple", "course"]
 SUPPORTED_TERRAINS: tuple[TerrainMode, ...] = (
     "plane",
     "flat",
     "slope",
     "stairs",
     "rough",
+    "platforms",
     "mixed",
     "rp1_simple",
     "course",
 )
-TERRAIN_COMPONENT_NAMES = ("flat", "slope", "stairs", "rough")
+TERRAIN_COMPONENT_NAMES = ("flat", "slope", "stairs", "rough", "platforms")
 
 
 def _get(config: Any, path: str, default: Any) -> Any:
@@ -54,7 +56,8 @@ def terrain_component_names(mode: TerrainMode) -> tuple[str, ...]:
 
 def _terrain_mix(config: Any) -> dict[str, float]:
     raw = _get(config, "terrain_mix", None)
-    weights = {name: float(_get(raw, name, 0.25)) for name in TERRAIN_COMPONENT_NAMES}
+    default_weight = 1.0 / len(TERRAIN_COMPONENT_NAMES)
+    weights = {name: float(_get(raw, name, default_weight)) for name in TERRAIN_COMPONENT_NAMES}
     if any(value < 0.0 for value in weights.values()) or sum(weights.values()) <= 0.0:
         raise ValueError(f"terrain_mix must be non-negative and have positive total weight: {weights}")
     total = sum(weights.values())
@@ -73,7 +76,7 @@ def make_ufo_v0_generator_cfg(mode: TerrainMode, config: Any) -> TerrainGenerato
     size = tuple(float(x) for x in _get(config, "patch_size", (8.0, 8.0)))
     slope_min_deg = float(_get(config, "slope.min_angle_deg", 5.0))
     slope_max_deg = float(_get(config, "slope.max_angle_deg", 12.0))
-    step_height = tuple(float(x) for x in _get(config, "stairs.step_height_range", (0.08, 0.15)))
+    step_height = tuple(float(x) for x in _get(config, "stairs.step_height_range", (0.10, 0.18)))
     horizontal_scale = float(_get(config, "heightfield.horizontal_scale", 0.1))
     spawn_center_range = float(_get(config, "spawn.center_range", 1.25))
 
@@ -95,7 +98,8 @@ def make_ufo_v0_generator_cfg(mode: TerrainMode, config: Any) -> TerrainGenerato
             step_height_range=step_height,
             step_width=float(_get(config, "stairs.step_depth", 0.30)),
             platform_width=float(_get(config, "stairs.platform_width", 1.5)),
-            num_steps=int(_get(config, "stairs.num_steps", 4)),
+            num_steps=int(_get(config, "stairs.num_steps", 6)),
+            plateau_width=float(_get(config, "stairs.plateau_width", 1.2)),
             border_width=float(_get(config, "stairs.border_width", 0.5)),
         ),
         "rough": NeutralHfPerlinNoiseTerrainCfg(
@@ -113,6 +117,15 @@ def make_ufo_v0_generator_cfg(mode: TerrainMode, config: Any) -> TerrainGenerato
                 patch_center_range=spawn_center_range,
                 patch_size=size,
             ),
+        ),
+        "platforms": BoxPlatformsTerrainCfg(
+            proportion=weights["platforms"],
+            platform_height_range=tuple(
+                float(x) for x in _get(config, "platforms.height_range", (0.05, 0.15))
+            ),
+            band_width=float(_get(config, "platforms.band_width", 0.8)),
+            center_width=float(_get(config, "platforms.center_width", 1.5)),
+            border_width=float(_get(config, "platforms.border_width", 0.5)),
         ),
         "course": TerrainTraversalCourseCfg(
             proportion=1.0,
