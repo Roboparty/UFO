@@ -128,7 +128,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --buffer-size 5120000
 ```
 
-### 4. TeCH training on G1
+### 4. TeCH Training on G1
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -238,6 +238,16 @@ See [Import Wizard](docs/import_wizard.md) for data schemas and import commands,
 ## Multi-source skill injection
 
 UFO supports manifest-based, source-weighted multi-source data mixing. This is useful for injecting rare agile skills, such as cartwheel motions, while preserving the base motion distribution. The dataset identity is sampled from a fixed source ratio, and prioritized sampling is applied within each source. See `configs/data/example_mix.yaml` for a compact manifest example.
+
+## Terrain-conditioned FB feasibility experiment
+
+An opt-in `fb_terrain` preset adds physical MJLab flat, slope, bounded stairs,
+rough, and mixed terrain. The actor receives robot-centric terrain clearances;
+F and critics receive ground-relative geometry, while B and the discriminator
+remain terrain-agnostic. The original `fb` preset and LaFAN expert semantics are
+unchanged. See
+[Terrain-Conditioned FB V0](docs/TERRAIN_FEASIBILITY_V0.md) for architecture,
+smoke, future training, and exact same-z evaluation commands.
 
 ## Documentation
 

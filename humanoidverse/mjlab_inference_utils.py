@@ -421,60 +421,191 @@ def to_rgb_uint8(frame: Any) -> np.ndarray:
     return np.ascontiguousarray(array.astype(np.uint8))
 
 
+def _limit_absolute_near_clip(model: mujoco.MjModel, max_near: float = 0.015) -> float:
+    """Keep large merged scenes from pushing the near plane through the robot."""
+    extent = max(float(model.stat.extent), 1.0e-6)
+    model.vis.map.znear = min(float(model.vis.map.znear), float(max_near) / extent)
+    return float(model.vis.map.znear) * extent
+
+
+def _inference_scene_option() -> mujoco.MjvOption:
+    """Show collision terrain, which MJLab stores in geom group 5."""
+    option = mujoco.MjvOption()
+    option.geomgroup[5] = 1
+    return option
+
+
+def _style_untextured_terrain(model: mujoco.MjModel) -> None:
+    """Give default achromatic terrain a readable neutral render color."""
+    terrain = np.asarray(model.geom_group) == 5
+    rgb = np.asarray(model.geom_rgba[:, :3])
+    default_gray = (np.ptp(rgb, axis=1) < 0.02) & (np.mean(rgb, axis=1) >= 0.45)
+    model.geom_rgba[terrain & default_gray] = np.array([0.24, 0.30, 0.27, 1.0])
+    model.geom_matid[terrain] = -1
+
+
+def _camera_lookat_from_root(root_pos: np.ndarray) -> np.ndarray:
+    """Track the pelvis in world coordinates without assuming ground z=0."""
+    root_pos = np.asarray(root_pos, dtype=np.float64).reshape(-1)
+    if root_pos.size < 3 or not np.isfinite(root_pos[:3]).all():
+        raise ValueError(f"Expected a finite root xyz for camera tracking, got {root_pos}")
+    return root_pos[:3].copy()
+
+
 class MujocoQposRenderer:
     """Pure MuJoCo renderer for qpos playback from an MJCF."""
 
     def __init__(
         self,
-        xml_path: Path,
+        xml_path: Path | None,
         render_size: int = 480,
         *,
+        scene_spec: mujoco.MjSpec | None = None,
+        source_xml_path: Path | None = None,
+        add_floor: bool = True,
         camera_distance: float = 3.0,
         camera_azimuth: float = 135.0,
         camera_elevation: float = -18.0,
         expected_qpos_size: int | None = None,
     ):
-        spec = mujoco.MjSpec.from_file(str(xml_path))
-        spec.worldbody.add_geom(
-            name="inference_floor",
-            type=mujoco.mjtGeom.mjGEOM_PLANE,
-            pos=[0.0, 0.0, 0.0],
-            size=[20.0, 20.0, 0.02],
-            rgba=[0.45, 0.47, 0.50, 1.0],
-            contype=0,
-            conaffinity=0,
-        )
+        if (xml_path is None) == (scene_spec is None):
+            raise ValueError("Provide exactly one of xml_path or scene_spec")
+        spec = scene_spec.copy() if scene_spec is not None else mujoco.MjSpec.from_file(str(xml_path))
+        if add_floor:
+            spec.worldbody.add_geom(
+                name="inference_floor",
+                type=mujoco.mjtGeom.mjGEOM_PLANE,
+                pos=[0.0, 0.0, 0.0],
+                size=[20.0, 20.0, 0.02],
+                rgba=[0.45, 0.47, 0.50, 1.0],
+                contype=0,
+                conaffinity=0,
+            )
         spec.worldbody.add_light(
             name="inference_key_light",
             pos=[0.0, -3.0, 4.0],
             dir=[0.2, 0.5, -1.0],
-            diffuse=[0.8, 0.8, 0.8],
-            ambient=[0.35, 0.35, 0.35],
-            specular=[0.1, 0.1, 0.1],
+            type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
+            diffuse=[0.45, 0.45, 0.45],
+            ambient=[0.15, 0.15, 0.15],
+            specular=[0.05, 0.05, 0.05],
         )
         self.model = spec.compile()
+        _style_untextured_terrain(self.model)
+        self._absolute_near_clip = _limit_absolute_near_clip(self.model)
+        self._qpos_mapping: list[tuple[slice, slice]] | None = None
+        self._input_nq = int(self.model.nq)
+        self._camera_input_qpos_adr = 0
+        self._target_root_body_id: int | None = None
+        self._target_root_qpos_adr: int | None = None
+        if source_xml_path is not None:
+            source_model = mujoco.MjModel.from_xml_path(str(source_xml_path))
+            self._input_nq = int(source_model.nq)
+            source_joints = {
+                mujoco.mj_id2name(source_model, mujoco.mjtObj.mjOBJ_JOINT, joint_id): joint_id
+                for joint_id in range(source_model.njnt)
+            }
+            mapping = []
+            mapped_source_qpos = set()
+            for target_joint_id in range(self.model.njnt):
+                target_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, target_joint_id)
+                source_name = target_name.split("/", 1)[-1] if target_name is not None else None
+                if source_name not in source_joints:
+                    continue
+                source_joint_id = source_joints[source_name]
+                source_adr = int(source_model.jnt_qposadr[source_joint_id])
+                target_adr = int(self.model.jnt_qposadr[target_joint_id])
+                joint_type = int(source_model.jnt_type[source_joint_id])
+                width = 7 if joint_type == int(mujoco.mjtJoint.mjJNT_FREE) else 4 if joint_type == int(mujoco.mjtJoint.mjJNT_BALL) else 1
+                mapping.append((slice(source_adr, source_adr + width), slice(target_adr, target_adr + width)))
+                mapped_source_qpos.update(range(source_adr, source_adr + width))
+                if joint_type == int(mujoco.mjtJoint.mjJNT_FREE):
+                    self._camera_input_qpos_adr = source_adr
+                    self._target_root_body_id = int(self.model.jnt_bodyid[target_joint_id])
+                    self._target_root_qpos_adr = target_adr
+            if mapped_source_qpos != set(range(source_model.nq)):
+                missing = sorted(set(range(source_model.nq)) - mapped_source_qpos)
+                raise ValueError(f"Scene renderer could not map all source qpos addresses: missing={missing}")
+            self._qpos_mapping = mapping
         self.model.vis.global_.offwidth = max(int(self.model.vis.global_.offwidth), int(render_size))
         self.model.vis.global_.offheight = max(int(self.model.vis.global_.offheight), int(render_size))
         self.data = mujoco.MjData(self.model)
         self.renderer = mujoco.Renderer(self.model, height=render_size, width=render_size)
+        self.scene_option = _inference_scene_option()
         self.camera = mujoco.MjvCamera()
         self.camera.type = mujoco.mjtCamera.mjCAMERA_FREE
         self.camera.distance = float(camera_distance)
         self.camera.azimuth = float(camera_azimuth)
         self.camera.elevation = float(camera_elevation)
-        if expected_qpos_size is not None and self.model.nq != int(expected_qpos_size):
-            raise ValueError(f"Expected renderer nq={expected_qpos_size}, got nq={self.model.nq}")
+        if expected_qpos_size is not None and self._input_nq != int(expected_qpos_size):
+            raise ValueError(f"Expected renderer input nq={expected_qpos_size}, got nq={self._input_nq}")
+
+    @property
+    def input_nq(self) -> int:
+        return self._input_nq
 
     def render_qpos(self, qpos: np.ndarray) -> np.ndarray:
         qpos = np.asarray(qpos, dtype=np.float64).reshape(-1)
-        if qpos.size != self.model.nq:
-            raise ValueError(f"Expected qpos size {self.model.nq}, got {qpos.size}")
-        self.data.qpos[:] = qpos
+        if qpos.size != self._input_nq:
+            raise ValueError(f"Expected qpos size {self._input_nq}, got {qpos.size}")
+        if self._qpos_mapping is None:
+            self.data.qpos[:] = qpos
+        else:
+            self.data.qpos[:] = self.model.qpos0
+            for source_slice, target_slice in self._qpos_mapping:
+                self.data.qpos[target_slice] = qpos[source_slice]
         self.data.qvel[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
-        self.camera.lookat[:] = [float(qpos[0]), float(qpos[1]), max(float(qpos[2]), 0.75)]
-        self.renderer.update_scene(self.data, camera=self.camera)
+        if self._target_root_body_id is not None:
+            root_pos = self.data.xpos[self._target_root_body_id]
+        else:
+            root_adr = self._camera_input_qpos_adr
+            root_pos = qpos[root_adr : root_adr + 3]
+        self.camera.lookat[:] = _camera_lookat_from_root(root_pos)
+        self.renderer.update_scene(self.data, camera=self.camera, scene_option=self.scene_option)
         return to_rgb_uint8(self.renderer.render())
+
+    def render_debug_state(self) -> dict[str, Any]:
+        root_body_pos = None
+        root_qpos = None
+        robot_geom_bounds = None
+        if self._target_root_body_id is not None:
+            root_body_pos = self.data.xpos[self._target_root_body_id].tolist()
+            descendants = np.zeros(self.model.nbody, dtype=bool)
+            descendants[self._target_root_body_id] = True
+            for body_id in range(self._target_root_body_id + 1, self.model.nbody):
+                descendants[body_id] = descendants[int(self.model.body_parentid[body_id])]
+            robot_geom_mask = descendants[self.model.geom_bodyid]
+            robot_geom_pos = self.data.geom_xpos[robot_geom_mask]
+            if robot_geom_pos.size:
+                robot_geom_bounds = {
+                    "min": robot_geom_pos.min(axis=0).tolist(),
+                    "max": robot_geom_pos.max(axis=0).tolist(),
+                }
+        if self._target_root_qpos_adr is not None:
+            root_qpos = self.data.qpos[self._target_root_qpos_adr : self._target_root_qpos_adr + 7].tolist()
+        scene_cameras = []
+        for camera in self.renderer.scene.camera:
+            scene_cameras.append(
+                {
+                    "pos": camera.pos.tolist(),
+                    "forward": camera.forward.tolist(),
+                    "up": camera.up.tolist(),
+                    "frustum_top": float(camera.frustum_top),
+                    "frustum_bottom": float(camera.frustum_bottom),
+                }
+            )
+        return {
+            "camera_lookat": self.camera.lookat.tolist(),
+            "camera_distance": float(self.camera.distance),
+            "root_body_pos": root_body_pos,
+            "root_qpos": root_qpos,
+            "robot_geom_bounds": robot_geom_bounds,
+            "model_center": self.model.stat.center.tolist(),
+            "model_extent": float(self.model.stat.extent),
+            "absolute_near_clip": self._absolute_near_clip,
+            "scene_cameras": scene_cameras,
+        }
 
     def close(self) -> None:
         self.renderer.close()
@@ -505,4 +636,4 @@ def render_policy_frame(
                 "[INFO] wrapped_env.render() did not return an RGB frame; "
                 f"falling back to MJLab qpos rendering for policy frames ({exc})."
             )
-    return renderer.render_qpos(policy_qpos_from_env(wrapped_env, expected_qpos_size=renderer.model.nq)), False
+    return renderer.render_qpos(policy_qpos_from_env(wrapped_env, expected_qpos_size=renderer.input_nq)), False

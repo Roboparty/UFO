@@ -62,6 +62,28 @@ Evaluation = tp.Annotated[
 Agent = FBcprAgentConfig | FBcprAuxAgentConfig | TldrDistAuxAgentConfig
 
 
+def make_flat_terrain_priority_eval_config(env_cfg: HumanoidVerseMjlabConfig) -> HumanoidVerseMjlabConfig:
+    """Copy a terrain-aware MJLab config and select analytic fixed-flat observations."""
+    overrides = list(env_cfg.hydra_overrides)
+    terrain_preset = any(value == "terrain=terrain_ufo_v0" for value in overrides)
+    terrain_mode_index = next(
+        (index for index, value in enumerate(overrides) if value.startswith("terrain.terrain_type=")),
+        None,
+    )
+    if not terrain_preset or terrain_mode_index is None:
+        raise ValueError("fixed-flat priority evaluation requires the fb_terrain Hydra overrides")
+    overrides[terrain_mode_index] = "terrain.terrain_type=plane"
+    observation_mode_index = next(
+        (index for index, value in enumerate(overrides) if value.startswith("terrain.terrain_priv.mode=")),
+        None,
+    )
+    if observation_mode_index is None:
+        overrides.append("terrain.terrain_priv.mode=flat_zero")
+    else:
+        overrides[observation_mode_index] = "terrain.terrain_priv.mode=flat_zero"
+    return env_cfg.model_copy(update={"hydra_overrides": overrides})
+
+
 def _trajectory_output_keys(agent: Agent) -> list[str]:
     keys = [
         "observation",
@@ -477,6 +499,7 @@ class Workspace:
                 f.write(self.cfg.model_dump_json(indent=4))
 
         self.priorization_eval_name = None
+        self._priority_eval_env = None
         if self.cfg.prioritization:
             for name, evaluation in self.evaluations.items():
                 if isinstance(evaluation.cfg, HumanoidVerseMjlabTrackingEvaluationConfig):
@@ -496,7 +519,36 @@ class Workspace:
 
     def train(self):
         self.start_time = time.time()
-        self.train_online()
+        try:
+            self.train_online()
+        finally:
+            self._close_priority_eval_env()
+
+    def _uses_fixed_flat_priority_eval(self, evaluation_name: str) -> bool:
+        return (
+            self.cfg.prioritization
+            and self.cfg.tags.get("agent") == "fb_terrain"
+            and evaluation_name == self.priorization_eval_name
+        )
+
+    def _get_priority_eval_env(self):
+        if self._priority_eval_env is None:
+            if self.cfg.distributed_sync and self.distributed_rank != 0:
+                raise RuntimeError("fixed-flat priority evaluation environment may only be built on rank 0")
+            eval_cfg = make_flat_terrain_priority_eval_config(self.cfg.env)
+            self._priority_eval_env, _ = eval_cfg.build(num_envs=self.cfg.online_parallel_envs)
+            print(
+                "[INFO] Built persistent fb_terrain priority evaluation environment: "
+                f"terrain=plane, observation=flat_zero, sensor=off, "
+                f"num_envs={self.cfg.online_parallel_envs}, rank={self.distributed_rank}",
+                flush=True,
+            )
+        return self._priority_eval_env
+
+    def _close_priority_eval_env(self) -> None:
+        if self._priority_eval_env is not None:
+            self._priority_eval_env.close()
+            self._priority_eval_env = None
 
     def _get_torso_contact_force_metrics(self, train_env) -> dict[str, float]:
         if not self.cfg.log_torso_contact_forces:
@@ -551,6 +603,57 @@ class Workspace:
                         "torso_z_contact_p05": 0.0,
                     }
                 )
+            return metrics
+
+    def _get_terrain_metrics(self, train_env) -> dict[str, float]:
+        raw_env = getattr(train_env, "_env", train_env)
+        if not getattr(raw_env, "terrain_enabled", False):
+            return {}
+        with torch.no_grad():
+            root_clearance, _terrain_actor, _terrain_priv = raw_env._terrain_observations()
+            pelvis_world_z = raw_env.body_pos[:, 0, 2]
+            root_clearance = root_clearance[:, 0]
+            local_ground_z = pelvis_world_z - root_clearance
+            terrain_entity = raw_env.mjlab_env.scene["terrain"]
+            terrain_ids = getattr(
+                terrain_entity,
+                "terrain_types",
+                torch.zeros(raw_env.num_envs, device=raw_env.device, dtype=torch.long),
+            )
+            metrics: dict[str, float] = {}
+            for terrain_id, name in enumerate(raw_env.terrain_component_names):
+                mask = terrain_ids == terrain_id
+                if not torch.any(mask):
+                    continue
+                for metric_name, values in (
+                    ("pelvis_world_z", pelvis_world_z),
+                    ("local_ground_z", local_ground_z),
+                    ("pelvis_clearance", root_clearance),
+                ):
+                    selected = values[mask]
+                    prefix = f"terrain/{name}/{metric_name}"
+                    metrics[f"{prefix}_mean"] = np.round(selected.mean().item(), 6)
+                    metrics[f"{prefix}_min"] = np.round(selected.min().item(), 6)
+                    metrics[f"{prefix}_p05"] = np.round(torch.quantile(selected, 0.05).item(), 6)
+
+            boundary_margin = raw_env._terrain_boundary_margin()
+            if boundary_margin is not None:
+                boundary_min = boundary_margin.min()
+                boundary_historical_min = raw_env._terrain_boundary_min.clone()
+                boundary_violation_count = raw_env._terrain_boundary_violation_count.clone()
+                if self.cfg.distributed_sync and self.distributed_world_size > 1:
+                    torch.distributed.all_reduce(boundary_min, op=torch.distributed.ReduceOp.MIN)
+                    torch.distributed.all_reduce(boundary_historical_min, op=torch.distributed.ReduceOp.MIN)
+                    torch.distributed.all_reduce(boundary_violation_count, op=torch.distributed.ReduceOp.SUM)
+                metrics["terrain/boundary_margin_min"] = np.round(boundary_min.item(), 6)
+                metrics["terrain/boundary_margin_p05"] = np.round(torch.quantile(boundary_margin, 0.05).item(), 6)
+                metrics["terrain/boundary_margin_historical_min"] = np.round(
+                    boundary_historical_min.item(), 6
+                )
+                metrics["terrain/boundary_required_margin"] = np.round(
+                    raw_env._terrain_boundary_required, 6
+                )
+                metrics["terrain/boundary_violation_count"] = int(boundary_violation_count.item())
             return metrics
 
     def train_online(self) -> None:
@@ -962,6 +1065,7 @@ class Workspace:
                     tmp = total_metrics[k] / metric_update_counts[k]
                     m_dict[k] = np.round(tmp.mean().item(), 6)
                 m_dict.update(self._get_torso_contact_force_metrics(train_env))
+                m_dict.update(self._get_terrain_metrics(train_env))
                 m_dict["duration [minutes]"] = (time.time() - start_time) / 60
                 m_dict["FPS"] = (1 if global_time == 0 else self.cfg.log_every_updates) / (time.time() - fps_start_time)
                 if self.cfg.distributed_sync and self.distributed_world_size > 1:
@@ -1016,9 +1120,13 @@ class Workspace:
             self.agent._model.train(False)
 
             if isinstance(self.cfg.env, HumanoidVerseMjlabConfig):
-                # Pass train env
+                eval_env = (
+                    self._get_priority_eval_env()
+                    if self._uses_fixed_flat_priority_eval(evaluation_name)
+                    else self.train_env
+                )
                 evaluation_metrics, wandb_dict = evaluation.run(
-                    timestep=t, agent_or_model=self.agent, replay_buffer=replay_buffer, logger=logger, env=self.train_env
+                    timestep=t, agent_or_model=self.agent, replay_buffer=replay_buffer, logger=logger, env=eval_env
                 )
             else:
                 evaluation_metrics, wandb_dict = evaluation.run(

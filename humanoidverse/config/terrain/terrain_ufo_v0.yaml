@@ -1,0 +1,61 @@
+# @package _global_
+
+defaults:
+  - terrain_base
+
+terrain:
+  # Selected only by --agent fb_terrain; original FB remains unchanged.
+  enabled: true
+  terrain_type: mixed  # flat, slope, stairs, rough, mixed
+  seed: 0
+  # Harder phase-2 fixed distribution, used after global step 99,295,232.
+  # This is an explicit distribution shift, not a time-varying curriculum.
+  terrain_mix: {flat: 0.20, slope: 0.20, stairs: 0.30, rough: 0.30}
+  patch_size: [30.0, 30.0]
+  border_width: 1.0
+  num_rows: 10
+  difficulty_range: [0.0, 1.0]
+  heightfield: {horizontal_scale: 0.1, vertical_scale: 0.005}
+  spawn: {patch_radius: 0.45, center_range: 1.25}
+
+  slope:
+    min_angle_deg: 5.0
+    max_angle_deg: 8.0
+    platform_width: 1.5
+    border_width: 0.5
+
+  stairs:
+    step_height_range: [0.08, 0.15]
+    step_depth: 0.30
+    platform_width: 1.5
+    num_steps: 20
+    border_width: 0.5
+
+  rough:
+    amplitude_range: [0.03, 0.05]
+    spatial_scale: 20.0
+    octaves: 2
+    persistence: 0.25
+    lacunarity: 2.0
+    border_width: 0.5
+
+  terrain_priv:
+    # One scan produces raw pelvis clearances for Actor and relative geometry
+    # for F/Critic. flat_zero is the fixed-flat evaluation optimization.
+    mode: raycast  # raycast, flat_zero
+    reference: local_ground
+    clip: 0.5
+    max_ray_distance: 3.0
+    x_min: -0.4
+    x_max: 1.6
+    y_min: -0.6
+    y_max: 0.6
+    resolution: 0.1
+    debug_vis: false
+
+  coverage:
+    policy_margin: 2.0
+    boundary_safety_margin: 0.5
+    # Formal training truncates and resets only the affected env. Enable this
+    # fail-fast switch in dedicated debug runs, where stopping is intentional.
+    fail_on_boundary_violation: false

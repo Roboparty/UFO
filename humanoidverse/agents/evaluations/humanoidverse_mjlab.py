@@ -446,7 +446,10 @@ def _async_tracking_worker(
             dof_init_state[..., 0] = tracking_target_dict["dof_pos"][0]
             dof_init_state[..., 1] = tracking_target_dict["ref_dof_vel"][0]
             dof_states_list[env_id] = dof_init_state
-            root_states_list[env_id] = ref_root_init_state
+            root_state = ref_root_init_state.clone()
+            if getattr(core_env, "terrain_enabled", False):
+                root_state[:3] += core_env.env_origins[env_id]
+            root_states_list[env_id] = root_state
             # target_xpos_dict[env_id] = tracking_target_dict["ref_body_pos"][:, : len(xpos_bodies)]
 
     # this is for environments that are not initialized
@@ -553,14 +556,22 @@ def distance_matrix(X: torch.Tensor, Y: torch.Tensor):
 
 
 def emd_numpy(next_obs: torch.Tensor, tracking_target: torch.Tensor, prefix=""):
+    if not torch.isfinite(next_obs).all():
+        raise ValueError(f"Cannot compute {prefix}EMD: rollout observation contains non-finite values")
+    if not torch.isfinite(tracking_target).all():
+        raise ValueError(f"Cannot compute {prefix}EMD: tracking target contains non-finite values")
     # keep only pose part of the observations
     agent_obs = next_obs.to("cpu")
     tracked_obs = tracking_target.to("cpu")
     # compute optimal transport cost
     cost_matrix = distance_matrix(agent_obs, tracked_obs).cpu().detach().numpy()
+    if not np.isfinite(cost_matrix).all():
+        raise ValueError(f"Cannot compute {prefix}EMD: cost matrix contains non-finite values")
     X_pot = np.ones(agent_obs.shape[0]) / agent_obs.shape[0]
     Y_pot = np.ones(tracked_obs.shape[0]) / tracked_obs.shape[0]
     transport_cost = ot.emd2(X_pot, Y_pot, cost_matrix, numItermax=100000)
+    if not np.isfinite(transport_cost):
+        raise ValueError(f"Cannot compute {prefix}EMD: POT returned non-finite transport cost {transport_cost}")
     return {f"{prefix}emd": transport_cost}
 
 
@@ -622,6 +633,19 @@ def _calc_metrics(ep):
             f"target_joint_pos.shape={tuple(target_joint_pos.shape)}, "
             f"num_dofs={num_dofs}; "
             + "; ".join(shape_errors)
+        )
+
+    finite_inputs = {
+        "observation_state": observation_state,
+        "tracking_target_state": target_state,
+        "joint_pos": joint_pos,
+        "target_joint_pos": target_joint_pos,
+    }
+    nonfinite = [name for name, value in finite_inputs.items() if not torch.isfinite(value).all()]
+    if nonfinite:
+        raise ValueError(
+            "Tracking metrics contain non-finite inputs: "
+            f"motion_id={ep['motion_id']}, motion_file={ep['motion_file']}, tensors={nonfinite}"
         )
 
     next_qpos = observation_state[..., :num_dofs]

@@ -27,7 +27,7 @@ from humanoidverse.mjlab_inference_utils import (
     add_bool_arg,
     checkpoint_load_device,
     load_mjlab_env_cfg,
-    render_policy_frame,
+    policy_qpos_from_env,
 )
 from humanoidverse.utils.helpers import export_meta_policy_as_onnx, get_backward_observation
 from humanoidverse.utils.motion_data import prepare_manifest_dataset_path, prepare_manifest_robot_config_path
@@ -88,6 +88,20 @@ def _target_states_from_obs(obs_dict: dict[str, torch.Tensor], device: str, *, n
     dof_state[:, 0] = obs_dict["dof_pos"][0].to(device=device, dtype=torch.float32)
     dof_state[:, 1] = obs_dict["ref_dof_vel"][0].to(device=device, dtype=torch.float32)
     return {"root_states": root_state_xyzw.unsqueeze(0), "dof_states": dof_state.unsqueeze(0)}
+
+
+def _center_target_states_on_terrain(target_states: dict[str, torch.Tensor], env: Any) -> dict[str, torch.Tensor]:
+    """Place a reference reset at its assigned terrain origin without changing body state."""
+    if not bool(getattr(env, "terrain_enabled", False)):
+        return target_states
+    centered = dict(target_states)
+    root_states = target_states["root_states"].clone()
+    root_states[:, :2] = env.env_origins[: root_states.shape[0], :2].to(
+        device=root_states.device,
+        dtype=root_states.dtype,
+    )
+    centered["root_states"] = root_states
+    return centered
 
 
 @torch.no_grad()
@@ -233,6 +247,21 @@ def run_tracking_inference(
         if save_mp4
         else None
     )
+    policy_renderer = (
+        MujocoQposRenderer(
+            None,
+            render_size=render_size,
+            scene_spec=env.mjlab_env.scene.spec,
+            source_xml_path=robot_xml,
+            add_floor=False,
+            camera_distance=camera_distance,
+            camera_azimuth=camera_azimuth,
+            camera_elevation=camera_elevation,
+            expected_qpos_size=7 + num_dof,
+        )
+        if save_mp4
+        else None
+    )
     try:
         for motion_id in motion_list:
             backward_obs, obs_dict = get_backward_observation(env, motion_id, use_root_height_obs=use_root_height_obs)
@@ -241,6 +270,7 @@ def run_tracking_inference(
             print(f"[INFO] Saved z embedding: {output_dir / f'zs_{motion_id}.pkl'}")
 
             target_states = _target_states_from_obs(obs_dict, device=device, num_dof=num_dof)
+            target_states = _center_target_states_on_terrain(target_states, env)
             observation, _ = wrapped_env.reset(to_numpy=False, target_states=target_states)
             episode_len = int(z.shape[0])
             if max_steps is not None:
@@ -251,7 +281,6 @@ def run_tracking_inference(
                 dof_qpos_order_indices=dof_qpos_order_indices,
             )
             frames: list[np.ndarray] = []
-            use_env_render = True
 
             print(f"[INFO] Running policy rollout for motion_id={motion_id}, steps={episode_len}", flush=True)
             for step in range(episode_len):
@@ -259,11 +288,11 @@ def run_tracking_inference(
                 observation, _reward, terminated, truncated, _info = wrapped_env.step(action, to_numpy=False)
 
                 if save_mp4:
-                    policy_frame, use_env_render = render_policy_frame(
+                    policy_qpos = policy_qpos_from_env(
                         wrapped_env,
-                        expert_renderer,
-                        use_env_render=use_env_render,
+                        expected_qpos_size=policy_renderer.input_nq,
                     )
+                    policy_frame = policy_renderer.render_qpos(policy_qpos)
                     expert_frame = expert_renderer.render_qpos(expert_qpos[min(step + 1, len(expert_qpos) - 1)])
                     expert_frame = _resize_nearest(expert_frame, policy_frame.shape[0], policy_frame.shape[1])
                     frames.append(np.concatenate([expert_frame, policy_frame], axis=1))
@@ -284,6 +313,8 @@ def run_tracking_inference(
     finally:
         if expert_renderer is not None:
             expert_renderer.close()
+        if policy_renderer is not None:
+            policy_renderer.close()
         wrapped_env.close()
 
 

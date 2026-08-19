@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import sys
 from pathlib import Path
@@ -49,6 +50,7 @@ DEFAULT_ROBOT_CONFIG = "configs/robots/g1_29dof.yaml"
 
 AGENT_ALIASES = {
     "fb": "fb",
+    "fb_terrain": "fb_terrain",
     "tech": "tech",
     "tldr": "tech",
 }
@@ -57,6 +59,7 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConf
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import HumanoidVerseMjlabTrackingEvaluationConfig
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.training.workspace import TrainConfig
+from humanoidverse.terrains.coverage import validate_motion_terrain_coverage
 from humanoidverse.utils.motion_data import prepare_motion_manifest
 from humanoidverse.utils.robot_spec import assert_robot_configs_compatible, load_robot_training_spec, resolve_robot_config_path
 
@@ -96,6 +99,7 @@ def build_ufo_mjlab_config(
     seed: int,
     use_wandb: bool,
     wandb_run_name: str | None,
+    wandb_project: str = DEFAULT_WANDB_PROJECT,
     checkpoint_every_steps: int = 9600000,
     distributed_rank: int = 0,
     distributed_world_size: int = 1,
@@ -113,6 +117,7 @@ def build_ufo_mjlab_config(
     cartwheel_aux_safe: bool = False,
     num_agent_updates: int | None = None,
     robot_config: str | Path | None = None,
+    terrain_mode: str | None = None,
 ) -> TrainConfig:
     agent = canonical_agent_name(agent)
     robot_training = load_robot_training_spec(robot_config or DEFAULT_ROBOT_CONFIG)
@@ -155,12 +160,22 @@ def build_ufo_mjlab_config(
         lr_scale=lr_scale,
         clip_grad_norm=clip_grad_norm,
         cartwheel_aux_safe=cartwheel_aux_safe,
-        wandb_project=DEFAULT_WANDB_PROJECT,
+        wandb_project=wandb_project,
     )
     agent_cfg = selected["agent_cfg"]
     wandb_group = selected["wandb_group"]
     wandb_project = selected["wandb_project"]
     train_runtime = dict(selected["train_runtime"])
+    if smoke:
+        train_runtime.update(
+            {
+                "log_every_updates": 1024,
+                "update_agent_every": 1024,
+                "num_seed_steps": 1024,
+                "num_agent_updates": 1,
+                "checkpoint_buffer": False,
+            }
+        )
     if num_agent_updates is not None:
         if num_agent_updates <= 0:
             raise ValueError("num_agent_updates must be positive")
@@ -172,6 +187,17 @@ def build_ufo_mjlab_config(
         f"robot.control.normalize_action_to={robot_training.normalize_action_to}",
         *robot_training.hydra_overrides,
     ]
+    if agent == "fb_terrain":
+        terrain_mode = terrain_mode or "mixed"
+        hydra_overrides.extend(
+            [
+                "terrain=terrain_ufo_v0",
+                f"terrain.terrain_type={terrain_mode}",
+                f"terrain.seed={seed}",
+            ]
+        )
+    elif terrain_mode is not None:
+        raise ValueError("--terrain-mode is only valid with --agent fb_terrain")
     if cartwheel_aux_safe:
         hydra_overrides.extend(
             [
@@ -226,7 +252,7 @@ def build_ufo_mjlab_config(
         prioritization_scale=2.0,
         prioritization_mode="exp",
         use_trajectory_buffer=train_runtime["use_trajectory_buffer"],
-        buffer_size=int(buffer_size),
+        buffer_size=min(int(buffer_size), 4096) if smoke else int(buffer_size),
         use_wandb=use_wandb,
         wandb_ename=os.environ.get("WANDB_ENTITY"),
         wandb_gname=wandb_group,
@@ -249,6 +275,13 @@ def build_ufo_mjlab_config(
 
 
 def _select_device_and_rank(seed: int) -> tuple[str, int, int, int]:
+    if "LOCAL_RANK" in os.environ or int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        rank = int(os.environ.get("RANK", "0"))
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = str(local_rank)
+        return f"cuda:{local_rank}", local_rank, rank, world_size
+
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if cuda_visible == "":
         try:
@@ -260,9 +293,9 @@ def _select_device_and_rank(seed: int) -> tuple[str, int, int, int]:
         except Exception:
             pass
         return "cpu", 0, 0, 1
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    rank = int(os.environ.get("RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = 0
+    rank = 0
+    world_size = 1
     os.environ["MUJOCO_EGL_DEVICE_ID"] = str(local_rank)
     return f"cuda:{local_rank}", local_rank, rank, world_size
 
@@ -302,6 +335,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         seed=seed,
         use_wandb=bool(args.use_wandb and rank == 0),
         wandb_run_name=args.wandb_run_name,
+        wandb_project=args.wandb_project,
         checkpoint_every_steps=args.checkpoint_every_steps,
         distributed_rank=rank,
         distributed_world_size=world_size,
@@ -319,6 +353,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         cartwheel_aux_safe=bool(args.cartwheel_aux_safe),
         num_agent_updates=args.num_agent_updates,
         robot_config=args.robot_config,
+        terrain_mode=args.terrain_mode,
     )
     print(
         "[INFO] UFO train: "
@@ -330,7 +365,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
-        f"compile={cfg.agent.compile}",
+        f"terrain_mode={args.terrain_mode}, compile={cfg.agent.compile}",
         flush=True,
     )
     try:
@@ -348,6 +383,25 @@ def launch(args: argparse.Namespace) -> None:
     log_dir = Path(args.work_dir).expanduser().resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     _ensure_compile_cache()
+    if args.agent == "fb_terrain" and args.terrain_mode != "plane":
+        terrain_cfg = OmegaConf.load(Path(__file__).parent / "config/terrain/terrain_ufo_v0.yaml").terrain
+        sensor_radius = math.hypot(
+            max(abs(float(terrain_cfg.terrain_priv.x_min)), abs(float(terrain_cfg.terrain_priv.x_max))),
+            max(abs(float(terrain_cfg.terrain_priv.y_min)), abs(float(terrain_cfg.terrain_priv.y_max))),
+        )
+        report = validate_motion_terrain_coverage(
+            args.data_path or DEFAULT_DATA_PATH,
+            patch_size=tuple(float(value) for value in terrain_cfg.patch_size),
+            sensor_radius=sensor_radius,
+            policy_margin=float(terrain_cfg.coverage.policy_margin),
+        )
+        print(
+            "[INFO] terrain coverage preflight passed: "
+            f"max_excursion={report.max_excursion:.3f}m motion={report.motion_key!r}, "
+            f"sensor_radius={report.sensor_radius:.3f}m, policy_margin={report.policy_margin:.3f}m, "
+            f"required={report.required_radius:.3f}m < patch_safe_radius={report.patch_safe_radius:.3f}m",
+            flush=True,
+        )
     if args.gpu_ids in (None, "single"):
         run_train(args, log_dir)
         return
@@ -405,8 +459,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--agent",
         default=DEFAULT_AGENT,
-        choices=["fb", "tech", "tldr"],
-        help="Training agent preset: fb or tech. tldr is a deprecated alias for tech.",
+        choices=["fb", "fb_terrain", "tech", "tldr"],
+        help="Training agent preset. fb_terrain explicitly enables privileged terrain conditioning.",
+    )
+    parser.add_argument(
+        "--terrain-mode",
+        choices=["flat", "slope", "stairs", "rough", "mixed"],
+        default=None,
+        help="Physical terrain for --agent fb_terrain (default: mixed).",
     )
     parser.add_argument("--gpu-ids", default="single", help="'single', 'all', or a comma-separated GPU id list relative to CUDA_VISIBLE_DEVICES.")
     parser.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
@@ -473,6 +533,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=4728)
     parser.add_argument("--use-wandb", action="store_true")
+    parser.add_argument("--wandb-project", default=DEFAULT_WANDB_PROJECT)
     parser.add_argument("--wandb-run-name", default=None)
     parser.add_argument(
         "--disable-eval-prioritization",
@@ -526,8 +587,12 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--lr-scale must be positive")
     if args.clip_grad_norm < 0:
         raise ValueError("--clip-grad-norm must be non-negative")
-    if args.cartwheel_aux_safe and args.agent != "fb":
-        raise ValueError("--cartwheel-aux-safe is only supported with --agent fb")
+    if args.cartwheel_aux_safe and args.agent not in {"fb", "fb_terrain"}:
+        raise ValueError("--cartwheel-aux-safe is only supported with --agent fb or fb_terrain")
+    if args.agent == "fb_terrain" and args.terrain_mode is None:
+        args.terrain_mode = "mixed"
+    if args.agent != "fb_terrain" and args.terrain_mode is not None:
+        raise ValueError("--terrain-mode is only valid with --agent fb_terrain")
     return args
 
 

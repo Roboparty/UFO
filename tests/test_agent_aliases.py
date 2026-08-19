@@ -7,7 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from humanoidverse.agents.presets import build_agent_preset
-from humanoidverse.train import _default_update_z_every_step, build_ufo_mjlab_config, canonical_agent_name, parse_args
+from humanoidverse.train import (
+    _default_update_z_every_step,
+    _select_device_and_rank,
+    build_ufo_mjlab_config,
+    canonical_agent_name,
+    parse_args,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +76,28 @@ class AgentAliasesTest(unittest.TestCase):
         self.assertEqual(cfg.wandb_gname, "ufo_tech")
         self.assertEqual(cfg.wandb_run_name, "ufo_tech")
         self.assertEqual(cfg.tags["agent"], "tech")
+
+    def test_wandb_project_cli_reaches_training_config(self) -> None:
+        args, warning = self._parse("--agent", "fb_terrain", "--wandb-project", "PBFM")
+        self.assertEqual(warning, "")
+        cfg = build_ufo_mjlab_config(
+            device="cpu",
+            work_dir="/tmp/ufo_wandb_project_test",
+            num_envs=1,
+            num_env_steps=1,
+            seed=1,
+            use_wandb=True,
+            wandb_run_name="terrain-test",
+            wandb_project=args.wandb_project,
+            smoke=False,
+            agent=args.agent,
+        )
+        self.assertEqual(cfg.wandb_pname, "PBFM")
+
+    def test_distributed_rank_is_used_without_cuda_visible_devices(self) -> None:
+        env = {"LOCAL_RANK": "3", "RANK": "3", "WORLD_SIZE": "8"}
+        with patch.dict("os.environ", env, clear=True):
+            self.assertEqual(_select_device_and_rank(seed=1), ("cuda:3", 3, 3, 8))
 
     def test_readme_exposes_tech_training(self) -> None:
         readme = (ROOT / "README.md").read_text()

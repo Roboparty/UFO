@@ -35,7 +35,7 @@ class FBcprAuxModel(FBcprModel):
         #      can still be used to build the underlying models
         super().__init__(obs_space, action_dim, cfg)
         self.cfg = cfg
-        self._aux_critic = cfg.archi.critic.build(obs_space, cfg.archi.z_dim, action_dim, output_dim=1)
+        self._aux_critic = cfg.archi.aux_critic.build(obs_space, cfg.archi.z_dim, action_dim, output_dim=1)
         self._aux_reward_normalizer = cfg.norm_aux_reward.build()
 
         # make sure the model is in eval mode and never computes gradients

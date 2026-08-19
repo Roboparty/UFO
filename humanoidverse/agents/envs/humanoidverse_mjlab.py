@@ -11,11 +11,10 @@ import os
 import random
 import typing as tp
 from pathlib import Path
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Union
 
 import gymnasium
 import hydra
-import humanoidverse
 import numpy as np
 import pydantic
 import torch
@@ -24,19 +23,26 @@ from gymnasium.vector import VectorEnv
 from omegaconf import OmegaConf
 from torch.utils._pytree import tree_map
 
+import humanoidverse
 from humanoidverse.agents.base import BaseConfig
 from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHistoryHandler
 from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
+from humanoidverse.terrains import make_terrain_entity_cfg, terrain_component_names
+from humanoidverse.terrains.terrain_observation import (
+    RobotCentricGridPatternCfg,
+    flat_zero_observations,
+    observations_from_clearances,
+    reference_ray_index,
+)
 from humanoidverse.utils.helpers import pre_process_config
 from humanoidverse.utils.motion_lib.motion_lib_robot import MotionLibRobot
 from humanoidverse.utils.torch_utils import (
-    calc_heading_quat_inv,
     my_quat_rotate,
     quat_from_angle_axis,
     quat_mul,
     quat_rotate_inverse,
-    wxyz_to_xyzw,
     wrap_to_pi,
+    wxyz_to_xyzw,
     xyzw_to_wxyz,
 )
 
@@ -380,9 +386,9 @@ def make_mjlab_ufo_env_cfg(
     from mjlab.managers.scene_entity_config import SceneEntityCfg
     from mjlab.managers.termination_manager import TerminationTermCfg
     from mjlab.scene import SceneCfg
+    from mjlab.sensor import ObjRef, TerrainHeightSensorCfg
     from mjlab.sensor.contact_sensor import ContactMatch, ContactSensorCfg
     from mjlab.sim import MujocoCfg, SimulationCfg
-    from mjlab.terrains import TerrainEntityCfg
 
     dof_names = tuple(_to_list(config.robot.dof_names))
     body_names = tuple(_to_list(config.robot.body_names))
@@ -472,14 +478,49 @@ def make_mjlab_ufo_env_cfg(
         articulation=EntityArticulationInfoCfg(actuators=tuple(actuators), soft_joint_pos_limit_factor=1.0),
         sort_actuators=True,
     )
-    sensors = (
+    sensors = [
         ContactSensorCfg(
             name="body_contact",
             primary=ContactMatch(mode="body", pattern=body_names, entity="robot"),
             fields=("found", "force"),
             reduce="netforce",
             history_length=int(config.simulator.config.sim.control_decimation),
-        ),
+        )
+    ]
+    terrain_enabled = bool(config.terrain.get("enabled", False))
+    terrain_mode = str(config.terrain.get("terrain_type", "plane")) if terrain_enabled else "plane"
+    terrain_observation_mode = str(config.terrain.terrain_priv.get("mode", "raycast")) if terrain_enabled else "raycast"
+    if terrain_observation_mode not in {"raycast", "flat_zero"}:
+        raise ValueError(f"Unsupported terrain observation mode: {terrain_observation_mode!r}")
+    if terrain_observation_mode == "flat_zero" and terrain_mode not in {"flat", "plane"}:
+        raise ValueError("terrain_priv.mode=flat_zero is only valid with terrain.terrain_type=flat or plane")
+    if terrain_enabled:
+        terrain_priv_cfg = config.terrain.terrain_priv
+        grid_pattern = RobotCentricGridPatternCfg(
+            x_min=float(terrain_priv_cfg.x_min),
+            x_max=float(terrain_priv_cfg.x_max),
+            y_min=float(terrain_priv_cfg.y_min),
+            y_max=float(terrain_priv_cfg.y_max),
+            resolution=float(terrain_priv_cfg.resolution),
+        )
+        if terrain_observation_mode == "raycast":
+            sensors.append(
+                TerrainHeightSensorCfg(
+                    name="terrain_height",
+                    frame=ObjRef(type="body", name=str(config.robot.body_names[0]), entity="robot"),
+                    pattern=grid_pattern,
+                    ray_alignment="yaw",
+                    max_distance=float(terrain_priv_cfg.max_ray_distance),
+                    include_geom_groups=(5,),
+                    reduction="none",
+                    debug_vis=bool(terrain_priv_cfg.get("debug_vis", False)),
+                )
+            )
+
+    terrain_entity_cfg = (
+        make_terrain_entity_cfg(terrain_mode, env_spacing=float(config.env_spacing), config=config.terrain)
+        if terrain_enabled
+        else make_terrain_entity_cfg("plane", env_spacing=float(config.env_spacing))
     )
     observations = {
         "actor": ObservationGroupCfg(
@@ -567,9 +608,9 @@ def make_mjlab_ufo_env_cfg(
         scene=SceneCfg(
             num_envs=num_envs,
             env_spacing=float(config.env_spacing),
-            terrain=TerrainEntityCfg(terrain_type="plane", env_spacing=float(config.env_spacing)),
+            terrain=terrain_entity_cfg,
             entities={"robot": robot_cfg},
-            sensors=sensors,
+            sensors=tuple(sensors),
         ),
         observations=observations,
         actions=actions,
@@ -634,6 +675,56 @@ class HumanoidVerseMjlabCore:
         self.num_bodies = len(self.body_names)
         self.dim_actions = self.num_dof
         self.env_origins = mjlab_env.scene.env_origins
+        self.terrain_enabled = bool(hv_config.terrain.get("enabled", False))
+        self.terrain_mode = str(hv_config.terrain.get("terrain_type", "plane")) if self.terrain_enabled else "plane"
+        self.terrain_observation_mode = (
+            str(hv_config.terrain.terrain_priv.get("mode", "raycast")) if self.terrain_enabled else "raycast"
+        )
+        self.terrain_component_names = terrain_component_names(self.terrain_mode)
+        self._terrain_stats_logged = False
+        self._terrain_reference_index: int | None = None
+        self._latest_terrain_observations: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        self._terrain_priv_clip = (
+            float(hv_config.terrain.terrain_priv.clip) if self.terrain_enabled else 0.0
+        )
+        self._terrain_grid_cfg = (
+            RobotCentricGridPatternCfg(
+                x_min=float(hv_config.terrain.terrain_priv.x_min),
+                x_max=float(hv_config.terrain.terrain_priv.x_max),
+                y_min=float(hv_config.terrain.terrain_priv.y_min),
+                y_max=float(hv_config.terrain.terrain_priv.y_max),
+                resolution=float(hv_config.terrain.terrain_priv.resolution),
+            )
+            if self.terrain_enabled
+            else None
+        )
+        self._terrain_dimension = (
+            self._terrain_grid_cfg.dimension
+            if self.terrain_enabled
+            else 0
+        )
+        self._terrain_motion_offsets = torch.zeros(self.num_envs, 3, device=self.device)
+        self._terrain_patch_size = (
+            torch.tensor(_to_list(hv_config.terrain.patch_size), device=self.device, dtype=torch.float32)
+            if self.terrain_enabled and self.terrain_mode != "plane"
+            else None
+        )
+        self._terrain_boundary_min = torch.tensor(float("inf"), device=self.device)
+        self._terrain_boundary_violation_count = torch.zeros((), device=self.device, dtype=torch.long)
+        if self._terrain_grid_cfg is not None:
+            corners_x = max(abs(self._terrain_grid_cfg.x_min), abs(self._terrain_grid_cfg.x_max))
+            corners_y = max(abs(self._terrain_grid_cfg.y_min), abs(self._terrain_grid_cfg.y_max))
+            self._terrain_sensor_radius = float((corners_x**2 + corners_y**2) ** 0.5)
+        else:
+            self._terrain_sensor_radius = 0.0
+        self._terrain_boundary_required = self._terrain_sensor_radius + (
+            float(hv_config.terrain.coverage.get("boundary_safety_margin", 0.5))
+            if self.terrain_enabled
+            else 0.0
+        )
+        self._terrain_fail_on_boundary = bool(
+            self.terrain_enabled and hv_config.terrain.coverage.get("fail_on_boundary_violation", True)
+        )
 
         mjlab_joint_names = tuple(self.robot.joint_names)
         mjlab_body_names = tuple(self.robot.body_names)
@@ -905,7 +996,11 @@ class HumanoidVerseMjlabCore:
         self._rigid_body_ang_vel_extend = body_ang_vel
 
         motion_times = (self.episode_length_buf + 1) * self.dt + self.motion_start_times
-        motion_res = self._motion_lib.get_motion_state(self.motion_ids, motion_times, offset=self.env_origins)
+        motion_res = self._motion_lib.get_motion_state(
+            self.motion_ids,
+            motion_times,
+            offset=self.env_origins + self._terrain_motion_offsets,
+        )
         self.ref_body_pos_extend = motion_res["rg_pos_t"]
         self.ref_body_rot_extend = motion_res["rg_rot_t"]
         self.ref_body_vel_extend = motion_res["body_vel_t"]
@@ -921,6 +1016,10 @@ class HumanoidVerseMjlabCore:
             local_root_obs=True,
             root_height_obs=bool(self.config.obs.get("root_height_obs", True)),
         )
+        if self.terrain_enabled and "root_height" in obs_dict:
+            self._latest_terrain_observations = self._terrain_observations()
+            root_clearance, _terrain_actor, _terrain_priv = self._latest_terrain_observations
+            obs_dict["root_height"] = root_clearance
         self._max_local_self = torch.cat([v for v in obs_dict.values()], dim=-1)
 
     def _raw_actor_obs(self) -> dict[str, torch.Tensor]:
@@ -952,6 +1051,100 @@ class HumanoidVerseMjlabCore:
             self.history_handler.add(key, value)
         return raw
 
+    def _terrain_sensor_clearances(self) -> torch.Tensor:
+        """Return pelvis-to-terrain clearances and initialize the local origin ray."""
+        sensor = self.mjlab_env.scene.sensors.get("terrain_height")
+        if sensor is None:
+            raise RuntimeError("terrain-aware environment is missing terrain_height sensor")
+        clearances = sensor.data.heights
+        if clearances.ndim == 3:
+            clearances = clearances[:, 0]
+        if self._terrain_reference_index is None:
+            offsets = sensor._local_offsets  # MJLab exposes no public pattern-offset accessor.
+            if offsets is None:
+                raise RuntimeError("terrain_height sensor has not been initialized")
+            self._terrain_reference_index = reference_ray_index(offsets)
+        return clearances
+
+    def _terrain_patch_centers(self) -> torch.Tensor:
+        """Return geometric patch centers, which may differ from rough spawn origins."""
+        if self._terrain_patch_size is None:
+            raise RuntimeError("patch centers are undefined for infinite plane terrain")
+        terrain = self.mjlab_env.scene["terrain"]
+        levels = terrain.terrain_levels.to(dtype=torch.float32)
+        types = terrain.terrain_types.to(dtype=torch.float32)
+        terrain_origins = terrain.terrain_origins
+        num_rows, num_cols = terrain_origins.shape[:2]
+        centers = torch.empty((self.num_envs, 2), device=self.device, dtype=torch.float32)
+        centers[:, 0] = (levels + 0.5 - num_rows / 2.0) * self._terrain_patch_size[0]
+        centers[:, 1] = (types + 0.5 - num_cols / 2.0) * self._terrain_patch_size[1]
+        return centers
+
+    def _terrain_boundary_margin(self) -> torch.Tensor | None:
+        if self._terrain_patch_size is None:
+            return None
+        root_xy = self.robot_root_states[:, :2]
+        distance_to_center = torch.abs(root_xy - self._terrain_patch_centers())
+        return torch.min(self._terrain_patch_size / 2.0 - distance_to_center, dim=-1).values
+
+    def _check_terrain_boundary(self) -> torch.Tensor:
+        margin = self._terrain_boundary_margin()
+        if margin is None:
+            return torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self._terrain_boundary_min = torch.minimum(self._terrain_boundary_min, margin.min())
+        violations = margin < self._terrain_boundary_required
+        self._terrain_boundary_violation_count += torch.count_nonzero(violations)
+        if self._terrain_fail_on_boundary and torch.any(violations).item():
+            bad_margin = margin[violations].min().item()
+            raise RuntimeError(
+                "terrain boundary invariant failed: a robot or its sensing footprint left its assigned patch; "
+                f"minimum margin={bad_margin:.6f}m, required={self._terrain_boundary_required:.6f}m"
+            )
+        return violations
+
+    def _terrain_observations(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return root clearance, actor ranges, and privileged terrain geometry."""
+        if self.terrain_observation_mode == "flat_zero":
+            # The priority evaluator uses a true MuJoCo plane at world z=0.
+            pelvis_clearance = self.body_pos[:, 0, 2:3]
+            return flat_zero_observations(pelvis_clearance, self._terrain_dimension)
+        clearances = self._terrain_sensor_clearances()
+        return observations_from_clearances(clearances, self._terrain_reference_index, clip=self._terrain_priv_clip)
+
+    def _terrain_actor_obs(self) -> torch.Tensor:
+        """Return pelvis-to-terrain ranges for the terrain-conditioned actor."""
+        _root_clearance, terrain_actor, _terrain_priv = self._terrain_observations()
+        return terrain_actor
+
+    def _terrain_priv_obs(self) -> torch.Tensor:
+        """Return robot-heading-frame terrain height deltas from collision rays.
+
+        MJLab raycasts the same MuJoCo geoms used by physics. Values are
+        ``height(sample_xy) - height(root_xy)`` and are clipped in metric meters.
+        """
+        # Sensor clearances are pelvis_z - terrain_z, so ref - sample is
+        # terrain_z(sample) - terrain_z(root). The flat_zero path is analytic.
+        _root_clearance, _terrain_actor, terrain_priv = self._terrain_observations()
+        if not self._terrain_stats_logged:
+            self._log_terrain_priv_stats(terrain_priv)
+            self._terrain_stats_logged = True
+        return terrain_priv
+
+    def _log_terrain_priv_stats(self, terrain_priv: torch.Tensor) -> None:
+        terrain_entity = self.mjlab_env.scene["terrain"]
+        terrain_ids = getattr(terrain_entity, "terrain_types", torch.zeros(self.num_envs, device=self.device, dtype=torch.long))
+        for terrain_id, name in enumerate(self.terrain_component_names):
+            values = terrain_priv[terrain_ids == terrain_id]
+            if values.numel() == 0:
+                continue
+            print(
+                "[INFO] terrain_priv: "
+                f"terrain={name}, shape={tuple(terrain_priv.shape)}, count={values.shape[0]}, "
+                f"min={values.min().item():.4f}, max={values.max().item():.4f}, "
+                f"mean={values.mean().item():.4f}, std={values.std(unbiased=False).item():.4f}",
+                flush=True,
+            )
+
     def get_observation(self, *, to_numpy: bool = True, include_last_action: bool = True, include_history_actor: bool = True):
         raw_obs = self._raw_actor_obs()
         obs = {
@@ -963,6 +1156,14 @@ class HumanoidVerseMjlabCore:
         obs["time"] = self.episode_length_buf.unsqueeze(-1)
         if include_history_actor:
             obs["history_actor"] = raw_obs["history_actor"]
+        if self.terrain_enabled:
+            terrain_observations = self._latest_terrain_observations or self._terrain_observations()
+            _root_clearance, terrain_actor, terrain_priv = terrain_observations
+            obs["terrain_actor"] = terrain_actor
+            obs["terrain_priv"] = terrain_priv
+            if not self._terrain_stats_logged:
+                self._log_terrain_priv_stats(terrain_priv)
+                self._terrain_stats_logged = True
         if to_numpy:
             obs = tree_map(lambda x: x.detach().cpu().numpy(), obs)
         return obs
@@ -1034,7 +1235,13 @@ class HumanoidVerseMjlabCore:
         mjlab_actions = self._mjlab_action_input()
         _, _, terminated, time_outs, _ = self.mjlab_env.step(mjlab_actions)
         self._refresh_state()
+        boundary_resets = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        if self.terrain_enabled:
+            boundary_resets = self._check_terrain_boundary()
         reward, aux = self._compute_reward()
+        # Patch boundaries are an artificial domain limit, not a behavior failure.
+        # Truncate and reset before an invalid off-terrain transition can continue.
+        time_outs = torch.logical_or(time_outs.bool(), boundary_resets)
         reset = torch.logical_or(terminated.bool(), time_outs.bool())
         self.reset_buf = reset
         self.time_out_buf = time_outs.bool()
@@ -1056,12 +1263,58 @@ class HumanoidVerseMjlabCore:
             self.reset_idx(reset_ids)
         else:
             self.simulator.refresh()
-        return None, reward, reset, {"time_outs": time_outs.bool(), "aux_rewards": self.extras["aux_rewards"]}
+        return None, reward, reset, {
+            "time_outs": time_outs.bool(),
+            "boundary_resets": boundary_resets,
+            "aux_rewards": self.extras["aux_rewards"],
+        }
 
     def reset_all(self, target_states: dict[str, torch.Tensor] | None = None):
         env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
         self.reset_idx(env_ids, target_states=target_states)
         return None, {}
+
+    def _place_reset_on_local_ground(
+        self,
+        env_ids: torch.Tensor,
+        root_xyzw: torch.Tensor,
+        joint_pos: torch.Tensor,
+        joint_vel: torch.Tensor,
+        desired_clearance: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Query ground at final XY and return roots placed at desired clearance."""
+        root_xyzw = root_xyzw.clone()
+        desired_clearance = desired_clearance.reshape(-1)
+        if self.terrain_observation_mode == "flat_zero":
+            ground_z = torch.zeros_like(desired_clearance)
+            root_xyzw[:, 2] = ground_z + desired_clearance
+            return root_xyzw, ground_z
+
+        provisional = root_xyzw.clone()
+        provisional[:, 2] = self.env_origins[env_ids, 2] + desired_clearance
+        provisional_wxyz = torch.cat(
+            [provisional[:, :3], xyzw_to_wxyz(provisional[:, 3:7]), provisional[:, 7:13]], dim=-1
+        )
+        self.robot.write_root_state_to_sim(provisional_wxyz, env_ids=env_ids)
+        self.robot.write_joint_state_to_sim(joint_pos, joint_vel, joint_ids=self._joint_ids, env_ids=env_ids)
+        self.mjlab_env.scene.write_data_to_sim()
+        self.mjlab_env.sim.forward()
+        self.mjlab_env.sim.sense()
+
+        clearances = self._terrain_sensor_clearances()[env_ids]
+        center_clearance = clearances[:, self._terrain_reference_index]
+        max_distance = float(self.config.terrain.terrain_priv.max_ray_distance)
+        valid = torch.isfinite(center_clearance) & (center_clearance >= 0.0) & (center_clearance < max_distance * 0.999)
+        if not torch.all(valid).item():
+            bad_ids = env_ids[~valid].detach().cpu().tolist()
+            bad_values = center_clearance[~valid].detach().cpu().tolist()
+            raise RuntimeError(
+                "terrain reset ground query failed at final XY: "
+                f"env_ids={bad_ids[:16]}, center_clearances={bad_values[:16]}"
+            )
+        ground_z = provisional[:, 2] - center_clearance
+        root_xyzw[:, 2] = ground_z + desired_clearance
+        return root_xyzw, ground_z
 
     def reset_idx(self, env_ids: torch.Tensor, target_states: dict[str, torch.Tensor] | None = None) -> None:
         if len(env_ids) == 0:
@@ -1069,7 +1322,9 @@ class HumanoidVerseMjlabCore:
         self.mjlab_env.reset(env_ids=env_ids)
         self._randomize_default_dof_pos_offset(env_ids)
         if target_states is not None:
+            self._terrain_motion_offsets[env_ids] = 0.0
             root_xyzw = target_states["root_states"][env_ids].to(self.device, dtype=torch.float32)
+            desired_clearance = root_xyzw[:, 2] - self.env_origins[env_ids, 2]
             dof_state = target_states["dof_states"][env_ids].to(self.device, dtype=torch.float32)
             joint_pos = dof_state[..., 0]
             joint_vel = dof_state[..., 1]
@@ -1081,12 +1336,23 @@ class HumanoidVerseMjlabCore:
             root_rot = motion_res["root_rot"]
             root_vel = motion_res["root_vel"]
             root_ang_vel = motion_res["root_ang_vel"]
+            desired_clearance = root_pos[:, 2] - self.env_origins[env_ids, 2]
+            if self.terrain_enabled:
+                # LaFAN world XY is arbitrary. Remove only that global
+                # translation so resets use the terrain's safe origin, and
+                # apply the identical shift to future reference states.
+                terrain_shift_xy = self.env_origins[env_ids, :2] - root_pos[:, :2]
+                self._terrain_motion_offsets[env_ids] = 0.0
+                self._terrain_motion_offsets[env_ids, :2] = terrain_shift_xy
+                root_pos = root_pos.clone()
+                root_pos[:, :2] += terrain_shift_xy
             if self.config.get("lie_down_init", False):
                 mask = torch.rand(len(env_ids), device=self.device) < float(getattr(self.config, "lie_down_init_prob", 0.0))
                 if torch.any(mask):
                     root_pos = root_pos.clone()
                     root_rot = root_rot.clone()
-                    root_pos[mask, 2] = 0.5
+                    desired_clearance = desired_clearance.clone()
+                    desired_clearance[mask] = 0.5
                     sign = 1 if random.random() < 0.5 else -1
                     rot_quat = quat_from_angle_axis(
                         torch.tensor(sign * (-torch.pi / 2), device=self.device),
@@ -1095,6 +1361,9 @@ class HumanoidVerseMjlabCore:
                     )
                     root_rot[mask] = quat_mul(rot_quat.expand_as(root_rot[mask]), root_rot[mask], w_last=True)
             root_pos = root_pos + torch.randn_like(root_pos) * float(self.config.init_noise_scale.root_pos) * float(self.config.noise_to_initial_level)
+            desired_clearance = desired_clearance + (
+                root_pos[:, 2] - motion_res["root_pos"][:, 2]
+            )
             root_rot = quat_mul(
                 _small_random_quaternions(
                     len(env_ids),
@@ -1116,11 +1385,20 @@ class HumanoidVerseMjlabCore:
                 self.config.noise_to_initial_level
             )
 
+        if self.terrain_enabled:
+            root_xyzw, ground_z = self._place_reset_on_local_ground(
+                env_ids, root_xyzw, joint_pos, joint_vel, desired_clearance
+            )
+            if target_states is None:
+                self._terrain_motion_offsets[env_ids, 2] = ground_z - self.env_origins[env_ids, 2]
+
         root_wxyz = torch.cat([root_xyzw[:, :3], xyzw_to_wxyz(root_xyzw[:, 3:7]), root_xyzw[:, 7:13]], dim=-1)
         self.robot.write_root_state_to_sim(root_wxyz, env_ids=env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, joint_ids=self._joint_ids, env_ids=env_ids)
         self.mjlab_env.scene.write_data_to_sim()
         self.mjlab_env.sim.forward()
+        if self.terrain_enabled and self.terrain_observation_mode == "raycast":
+            self.mjlab_env.sim.sense()
         self.mjlab_env._manual_reset_pending[env_ids] = False
         self.actions[env_ids] = 0.0
         self.last_actions[env_ids] = 0.0
