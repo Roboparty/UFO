@@ -18,16 +18,15 @@ from humanoidverse.agents.buffers.transition import DictBuffer
 from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig, HumanoidVerseMjlabCore
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import _calc_metrics, emd_numpy
 from humanoidverse.agents.presets import build_agent_preset
+from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
 from humanoidverse.mjlab_inference_utils import (
     _camera_lookat_from_root,
     _inference_scene_option,
     _limit_absolute_near_clip,
     _style_untextured_terrain,
 )
-from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
 from humanoidverse.terrain_transfer import clone_same_z_for_terrains, tensor_checksum
-from humanoidverse.terrain_transfer_inference import _stairs_step_center_offset
-from humanoidverse.tracking_inference import _center_target_states_on_terrain
+from humanoidverse.terrain_transfer_inference import _course_completion_radius, _stairs_step_center_offset
 from humanoidverse.terrains import make_terrain_entity_cfg, terrain_component_names
 from humanoidverse.terrains.coverage import validate_motion_terrain_coverage
 from humanoidverse.terrains.rp1_simple import make_ufo_v0_generator_cfg
@@ -37,6 +36,7 @@ from humanoidverse.terrains.terrain_observation import (
     observations_from_clearances,
     reference_ray_index,
 )
+from humanoidverse.tracking_inference import _center_target_states_on_terrain
 from humanoidverse.training.workspace import Workspace, make_flat_terrain_priority_eval_config
 
 
@@ -77,6 +77,11 @@ def test_stairs_inference_start_uses_requested_step_center() -> None:
         _stairs_step_center_offset(-1, platform_width=1.5, step_depth=0.3)
 
 
+def test_course_completion_radius_is_inside_final_flat() -> None:
+    course = OmegaConf.load("humanoidverse/config/terrain/terrain_ufo_v0.yaml").terrain.course
+    assert math.isclose(_course_completion_radius(course), 9.4)
+
+
 def _physics_height_profile(mode: str) -> np.ndarray:
     config = OmegaConf.load("humanoidverse/config/terrain/terrain_ufo_v0.yaml").terrain
     config = OmegaConf.merge(config, {"num_rows": 1, "difficulty_range": [1.0, 1.0]})
@@ -106,6 +111,36 @@ def _physics_height_profile(mode: str) -> np.ndarray:
         heights.append(point[2] - distance)
     values = np.asarray(heights)
     return values - values[0]
+
+
+def _physics_heights_at_offsets(mode: str, offsets: list[float]) -> np.ndarray:
+    config = OmegaConf.load("humanoidverse/config/terrain/terrain_ufo_v0.yaml").terrain
+    config = OmegaConf.merge(config, {"num_rows": 1, "difficulty_range": [1.0, 1.0]})
+    generator = TerrainGenerator(make_ufo_v0_generator_cfg(mode, config))
+    spec = mujoco.MjSpec()
+    generator.compile(spec)
+    model = spec.compile()
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    origin = generator.terrain_origins[0, 0]
+    heights = []
+    terrain_group = np.array([0, 0, 0, 0, 0, 1], dtype=np.uint8)
+    for x_offset in offsets:
+        point = np.array([origin[0] + x_offset, origin[1], origin[2] + 3.0])
+        distance = mujoco.mj_ray(
+            model,
+            data,
+            point,
+            np.array([0.0, 0.0, -1.0]),
+            terrain_group,
+            1,
+            -1,
+            np.array([-1], dtype=np.int32),
+        )
+        if distance < 0:
+            raise AssertionError(f"ray missed {mode} collision geometry at x={x_offset}")
+        heights.append(point[2] - distance)
+    return np.asarray(heights)
 
 
 def _body_state(root_height: float) -> tuple[torch.Tensor, ...]:
@@ -276,6 +311,17 @@ class TerrainPhysicsObservationTest(unittest.TestCase):
         self.assertGreater(np.count_nonzero(np.isclose(np.diff(values), 0.0, atol=1e-5)), 5)
         positive_steps = np.diff(values)[np.diff(values) > 1e-5]
         np.testing.assert_allclose(positive_steps, 0.15, atol=1e-5)
+
+    def test_traversal_course_has_ordered_flat_stairs_ramp_flat_profile(self) -> None:
+        offsets = [0.0, 1.9, 3.4, 4.2, 5.8, 6.7, 8.8, 9.3]
+        values = _physics_heights_at_offsets("course", offsets)
+        self.assertAlmostEqual(values[0], 0.0, places=5)
+        self.assertAlmostEqual(values[1], 0.12, places=4)
+        self.assertAlmostEqual(values[2], 0.60, places=4)
+        self.assertAlmostEqual(values[3], 0.48, places=4)
+        self.assertAlmostEqual(values[4], 0.0, places=4)
+        self.assertGreater(values[6], values[5])
+        self.assertAlmostEqual(values[7], 2.5 * math.tan(math.radians(8.0)), places=4)
 
     def test_rough_collision_heights_vary_and_are_finite(self) -> None:
         values = _physics_height_profile("rough")

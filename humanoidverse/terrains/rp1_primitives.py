@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import uuid
 from dataclasses import dataclass
 
 import mujoco
@@ -139,6 +141,89 @@ class TerrainBoundedStairsCfg(SubTerrainCfg):
             TerrainOutput(
                 origin=np.array([center_x, center_y, 0.0]),
                 geometries=geometries,
+            )
+        )
+
+
+@dataclass(kw_only=True)
+class TerrainTraversalCourseCfg(SubTerrainCfg):
+    """A heading-agnostic radial route with a fixed obstacle sequence."""
+
+    flat_run: float = 1.80
+    step_height: float = 0.12
+    step_depth: float = 0.30
+    num_steps: int = 5
+    top_platform_length: float = 0.80
+    connector_length: float = 1.00
+    ramp_length: float = 2.50
+    ramp_angle_deg: float = 8.0
+    border_width: float = 0.50
+    base_thickness: float = 0.25
+    horizontal_scale: float = 0.10
+
+    def function(self, difficulty: float, spec: mujoco.MjSpec, rng: np.random.Generator) -> TerrainOutput:
+        del difficulty, rng
+        if self.num_steps <= 0:
+            raise ValueError("num_steps must be positive")
+        if min(self.step_height, self.step_depth, self.ramp_length, self.horizontal_scale) <= 0.0:
+            raise ValueError("course step, ramp, and heightfield dimensions must be positive")
+
+        stairs_start = self.flat_run
+        stairs_up_end = stairs_start + self.num_steps * self.step_depth
+        stairs_down_start = stairs_up_end + self.top_platform_length
+        stairs_down_end = stairs_down_start + self.num_steps * self.step_depth
+        ramp_start = stairs_down_end + self.connector_length
+        ramp_end = ramp_start + self.ramp_length
+        safe_radius = min(self.size) / 2.0 - self.border_width
+        if ramp_end >= safe_radius:
+            raise ValueError("course does not fit inside the terrain patch")
+
+        num_cols = int(round(self.size[0] / self.horizontal_scale)) + 1
+        num_rows = int(round(self.size[1] / self.horizontal_scale)) + 1
+        x_coords = np.linspace(0.0, self.size[0], num_cols)
+        y_coords = np.linspace(0.0, self.size[1], num_rows)
+        xx, yy = np.meshgrid(x_coords, y_coords)
+        center_x = self.size[0] / 2.0
+        center_y = self.size[1] / 2.0
+        radius = np.hypot(xx - center_x, yy - center_y)
+        heights = np.zeros_like(radius)
+
+        up = (radius >= stairs_start) & (radius < stairs_up_end)
+        up_levels = np.floor((radius[up] - stairs_start) / self.step_depth).astype(np.int32) + 1
+        heights[up] = up_levels * self.step_height
+
+        stair_peak = self.num_steps * self.step_height
+        top = (radius >= stairs_up_end) & (radius < stairs_down_start)
+        heights[top] = stair_peak
+
+        down = (radius >= stairs_down_start) & (radius < stairs_down_end)
+        down_levels = np.floor((radius[down] - stairs_down_start) / self.step_depth).astype(np.int32) + 1
+        heights[down] = np.maximum(stair_peak - down_levels * self.step_height, 0.0)
+
+        ramp = (radius >= ramp_start) & (radius < ramp_end)
+        ramp_slope = math.tan(math.radians(self.ramp_angle_deg))
+        heights[ramp] = (radius[ramp] - ramp_start) * ramp_slope
+        ramp_rise = self.ramp_length * ramp_slope
+        heights[radius >= ramp_end] = ramp_rise
+
+        max_height = float(np.max(heights))
+        normalized = heights / max_height
+        field = spec.add_hfield(
+            name=f"hfield_course_{uuid.uuid4().hex}",
+            size=(self.size[0] / 2.0, self.size[1] / 2.0, max_height, self.base_thickness),
+            nrow=num_rows,
+            ncol=num_cols,
+            userdata=normalized.astype(np.float32).ravel().tolist(),
+        )
+        geom = spec.body("terrain").add_geom(
+            type=mujoco.mjtGeom.mjGEOM_HFIELD,
+            hfieldname=field.name,
+            pos=(center_x, center_y, 0.0),
+        )
+        return _mark_as_terrain(
+            TerrainOutput(
+                origin=np.array([center_x, center_y, 0.0]),
+                geometries=[TerrainGeometry(geom=geom, hfield=field, color=(0.38, 0.44, 0.40, 1.0))],
             )
         )
 

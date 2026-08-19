@@ -28,7 +28,7 @@ from humanoidverse.tracking_inference import _target_states_from_obs, _tracking_
 from humanoidverse.utils.helpers import get_backward_observation
 from humanoidverse.utils.robot_spec import load_robot_training_spec
 
-SUPPORTED_TERRAINS = ("flat", "slope", "stairs", "rough")
+SUPPORTED_TERRAINS = ("flat", "slope", "stairs", "rough", "course")
 
 
 def _stairs_step_center_offset(step: int, *, platform_width: float, step_depth: float) -> float:
@@ -42,11 +42,25 @@ def _stairs_step_center_offset(step: int, *, platform_width: float, step_depth: 
     return platform_width / 2.0 + (step - 0.5) * step_depth
 
 
+def _course_completion_radius(course_cfg, *, final_flat_margin: float = 0.30) -> float:
+    """Return the radius just inside the final flat annulus."""
+    return (
+        float(course_cfg.flat_run)
+        + 2.0 * int(course_cfg.num_steps) * float(course_cfg.step_depth)
+        + float(course_cfg.top_platform_length)
+        + float(course_cfg.connector_length)
+        + float(course_cfg.ramp_length)
+        + final_flat_margin
+    )
+
+
 def _terrain_env_cfg(base_cfg, terrain: str, seed: int, *, dense_terrain: bool = False):
     overrides = list(base_cfg.hydra_overrides)
     overrides = replace_hydra_override(overrides, "terrain", "terrain_ufo_v0")
     overrides = replace_hydra_override(overrides, "terrain.terrain_type", terrain)
     overrides = replace_hydra_override(overrides, "terrain.seed", seed)
+    if terrain == "course":
+        overrides = replace_hydra_override(overrides, "terrain.num_rows", 1)
     if dense_terrain:
         # Evaluation-only presentation preset. The 30 m coverage invariant is
         # unchanged, but stairs span most of the patch instead of one small ring.
@@ -180,6 +194,14 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
             )
         observation, _ = wrapped_env.reset(to_numpy=False, target_states=target_states)
         initial_root = wrapped_env._env.robot_root_states[0, :3].clone()
+        max_forward_displacement = 0.0
+        max_planar_displacement = 0.0
+        course_completion_radius = (
+            _course_completion_radius(wrapped_env._env.config.terrain.course)
+            if terrain == "course"
+            else None
+        )
+        course_completed = False
         velocities: list[float] = []
         prompt_values: list[float] = []
         tracking_errors: list[float] = []
@@ -197,6 +219,8 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
                 expected_qpos_size=7 + wrapped_env._env.num_dof,
             )
         terminated_flag = False
+        truncated_flag = False
+        boundary_reset_flag = False
         steps = min(args.episode_length, int(z.shape[0])) if args.prompt_type == "tracking" else args.episode_length
         completed = 0
         for step in range(steps):
@@ -204,6 +228,17 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
             action = model.act(observation, z_step, mean=True)
             observation, _reward, terminated, truncated, _info = wrapped_env.step(action, to_numpy=False)
             completed = step + 1
+            forward_displacement = float(
+                (wrapped_env._env.robot_root_states[0, 0] - initial_root[0]).item()
+            )
+            max_forward_displacement = max(max_forward_displacement, forward_displacement)
+            planar_displacement = float(
+                torch.linalg.vector_norm(wrapped_env._env.robot_root_states[0, :2] - initial_root[:2]).item()
+            )
+            max_planar_displacement = max(max_planar_displacement, planar_displacement)
+            course_completed = bool(
+                course_completion_radius is not None and planar_displacement >= course_completion_radius
+            )
             velocities.append(float(torch.linalg.vector_norm(wrapped_env._env.robot_root_states[0, 7:9]).item()))
             prompt_values.append(_prompt_value(model, observation, z_step))
             if args.prompt_type == "tracking":
@@ -214,7 +249,9 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
                 if step == 0:
                     print(f"[INFO] terrain renderer state: {renderer.render_debug_state()}")
             terminated_flag = bool(torch.as_tensor(terminated).any().item())
-            if terminated_flag or bool(torch.as_tensor(truncated).any().item()):
+            truncated_flag = bool(torch.as_tensor(truncated).any().item())
+            boundary_reset_flag = bool(torch.as_tensor(_info.get("boundary_resets", False)).any().item())
+            if course_completed or terminated_flag or truncated_flag:
                 break
         final_root = wrapped_env._env.robot_root_states[0, :3].clone()
         final_ground_clearance = _root_ground_clearance(wrapped_env)
@@ -239,8 +276,15 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
             "z_checksum": checksum,
             "episode_length": completed,
             "terminated": terminated_flag,
+            "truncated": truncated_flag,
+            "boundary_reset": boundary_reset_flag,
             "fell": fell,
             "root_displacement": float(torch.linalg.vector_norm(final_root[:2] - initial_root[:2]).item()),
+            "forward_displacement": float((final_root[0] - initial_root[0]).item()),
+            "max_forward_displacement": max_forward_displacement,
+            "max_planar_displacement": max_planar_displacement,
+            "course_completion_radius": course_completion_radius,
+            "course_completed": course_completed if terrain == "course" else None,
             "mean_root_velocity": sum(velocities) / max(len(velocities), 1),
             "final_root_height": float(final_root[2].item()),
             "final_ground_clearance": final_ground_clearance,

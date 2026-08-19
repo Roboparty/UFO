@@ -11,12 +11,13 @@ from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 from humanoidverse.terrains.rp1_primitives import (
     NeutralHfPerlinNoiseTerrainCfg,
     NeutralHfPyramidSlopedTerrainCfg,
-    TerrainBoxFlatCfg,
     TerrainBoundedStairsCfg,
+    TerrainBoxFlatCfg,
+    TerrainTraversalCourseCfg,
     spawn_patch_sampling,
 )
 
-TerrainMode = Literal["plane", "flat", "slope", "stairs", "rough", "mixed", "rp1_simple"]
+TerrainMode = Literal["plane", "flat", "slope", "stairs", "rough", "mixed", "rp1_simple", "course"]
 SUPPORTED_TERRAINS: tuple[TerrainMode, ...] = (
     "plane",
     "flat",
@@ -25,6 +26,7 @@ SUPPORTED_TERRAINS: tuple[TerrainMode, ...] = (
     "rough",
     "mixed",
     "rp1_simple",
+    "course",
 )
 TERRAIN_COMPONENT_NAMES = ("flat", "slope", "stairs", "rough")
 
@@ -45,6 +47,8 @@ def terrain_component_names(mode: TerrainMode) -> tuple[str, ...]:
         return TERRAIN_COMPONENT_NAMES
     if mode == "plane":
         return ("flat",)
+    if mode == "course":
+        return ("course",)
     return (mode,)
 
 
@@ -109,6 +113,19 @@ def make_ufo_v0_generator_cfg(mode: TerrainMode, config: Any) -> TerrainGenerato
                 patch_center_range=spawn_center_range,
                 patch_size=size,
             ),
+        ),
+        "course": TerrainTraversalCourseCfg(
+            proportion=1.0,
+            flat_run=float(_get(config, "course.flat_run", 1.80)),
+            step_height=float(_get(config, "course.step_height", 0.12)),
+            step_depth=float(_get(config, "course.step_depth", 0.30)),
+            num_steps=int(_get(config, "course.num_steps", 5)),
+            top_platform_length=float(_get(config, "course.top_platform_length", 0.80)),
+            connector_length=float(_get(config, "course.connector_length", 1.00)),
+            ramp_length=float(_get(config, "course.ramp_length", 2.50)),
+            ramp_angle_deg=float(_get(config, "course.ramp_angle_deg", 8.0)),
+            border_width=float(_get(config, "course.border_width", 0.50)),
+            horizontal_scale=float(_get(config, "heightfield.horizontal_scale", 0.10)),
         ),
     }
     sub_terrains = {name: all_sub_terrains[name] for name in selected}

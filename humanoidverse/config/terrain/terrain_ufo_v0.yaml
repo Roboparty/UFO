@@ -39,6 +39,19 @@ terrain:
     lacunarity: 2.0
     border_width: 0.5
 
+  # Inference-only, deterministic +x traversal route. It is not part of the
+  # mixed training distribution.
+  course:
+    flat_run: 1.80
+    step_height: 0.12
+    step_depth: 0.30
+    num_steps: 5
+    top_platform_length: 0.80
+    connector_length: 1.00
+    ramp_length: 2.50
+    ramp_angle_deg: 8.0
+    border_width: 0.5
+
   terrain_priv:
     # One scan produces raw pelvis clearances for Actor and relative geometry
     # for F/Critic. flat_zero is the fixed-flat evaluation optimization.

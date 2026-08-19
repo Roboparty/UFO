@@ -21,6 +21,67 @@ from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
 from humanoidverse.envs.g1_env_helper import rewards as g1_rewards
 from humanoidverse.envs.g1_env_helper.rewards import RewardFunction
 
+TERRAIN_REFERENCE_RAY_INDEX = 58
+
+
+def _detached_numpy(value: np.ndarray | torch.Tensor) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def canonicalize_terrain_relabel_qpos(
+    qpos: np.ndarray,
+    next_obs: Any,
+    *,
+    reference_ray_index: int = TERRAIN_REFERENCE_RAY_INDEX,
+    atol: float = 1e-5,
+) -> np.ndarray:
+    """Translate terrain rollouts to the flat-ground height convention used by rewards."""
+    if not isinstance(next_obs, dict) or not ({"terrain_actor", "terrain_priv"} & next_obs.keys()):
+        return qpos
+    if "privileged_state" not in next_obs:
+        raise RuntimeError("terrain reward relabeling requires next privileged_state")
+
+    qpos_array = np.asarray(qpos)
+    privileged_state = _detached_numpy(next_obs["privileged_state"])
+    if qpos_array.ndim != 2 or qpos_array.shape[1] < 3:
+        raise ValueError(f"terrain reward relabeling expects qpos shape [N, >=3], got {qpos_array.shape}")
+    if privileged_state.ndim != 2 or privileged_state.shape[0] != qpos_array.shape[0] or privileged_state.shape[1] < 1:
+        raise ValueError(
+            "terrain reward relabeling expects privileged_state shape [N, >=1] matching qpos; "
+            f"got qpos={qpos_array.shape}, privileged_state={privileged_state.shape}"
+        )
+
+    root_clearance = privileged_state[:, 0]
+    if not np.isfinite(qpos_array).all() or not np.isfinite(root_clearance).all():
+        raise RuntimeError("terrain reward relabeling received non-finite qpos or root clearance")
+
+    if "terrain_actor" in next_obs:
+        terrain_actor = _detached_numpy(next_obs["terrain_actor"])
+        if terrain_actor.ndim != 2 or terrain_actor.shape[0] != qpos_array.shape[0]:
+            raise ValueError(
+                "terrain reward relabeling expects terrain_actor shape [N, rays] matching qpos; "
+                f"got qpos={qpos_array.shape}, terrain_actor={terrain_actor.shape}"
+            )
+        if not 0 <= reference_ray_index < terrain_actor.shape[1]:
+            raise IndexError(
+                f"terrain reference ray index {reference_ray_index} is invalid for {terrain_actor.shape[1]} rays"
+            )
+        center_clearance = terrain_actor[:, reference_ray_index]
+        if not np.isfinite(center_clearance).all():
+            raise RuntimeError("terrain reward relabeling received non-finite terrain_actor clearances")
+        if not np.allclose(center_clearance, root_clearance, atol=atol, rtol=0.0):
+            max_error = float(np.max(np.abs(center_clearance - root_clearance)))
+            raise RuntimeError(
+                "terrain reward relabeling found inconsistent root clearances between privileged_state and "
+                f"terrain_actor center ray; max_error={max_error:.6g}"
+            )
+
+    canonical_qpos = qpos_array.copy()
+    canonical_qpos[:, 2] = root_clearance
+    return canonical_qpos
+
 
 def get_next(field: str, data: Any):
     if "next" in data and field in data["next"]:
@@ -122,11 +183,13 @@ class RewardWrapperHV(BaseMjlabRewardWrapper):
 
         qpos = get_next("qpos", data)
         qvel = get_next("qvel", data)
+        next_obs = get_next("observation", data)
         action = data["action"]
         if isinstance(qpos, torch.Tensor):
             qpos = qpos.cpu().detach().numpy()
             qvel = qvel.cpu().detach().numpy()
             action = action.cpu().detach().numpy()
+        qpos = canonicalize_terrain_relabel_qpos(qpos, next_obs)
 
         rewards = relabel(
             self.env_model,
@@ -143,7 +206,7 @@ class RewardWrapperHV(BaseMjlabRewardWrapper):
         if "B" in data:
             td["B_vect"] = data["B"]
         else:
-            td["next_obs"] = get_next("observation", data)
+            td["next_obs"] = next_obs
         inference_fn = getattr(self.model, self.inference_function, None)
         if inference_fn is None:
             raise AttributeError(f"Model does not define {self.inference_function!r}")
