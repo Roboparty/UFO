@@ -7,10 +7,12 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
+from humanoidverse.envs.g1_env_helper.rewards import LocomotionReward
 from humanoidverse.mjlab_reward_relabel import (
     TERRAIN_REFERENCE_RAY_INDEX,
     RewardWrapperHV,
     canonicalize_terrain_relabel_qpos,
+    make_reward_from_name,
 )
 
 
@@ -28,6 +30,37 @@ def _terrain_observation(clearance: np.ndarray) -> dict[str, torch.Tensor]:
 
 
 class TerrainRewardRelabelCanonicalizationTest(unittest.TestCase):
+    def test_strict_locomotion_reward_parses_and_prefers_straight_motion(self) -> None:
+        reward = make_reward_from_name("move-ego-strict-0-0.7-0")
+        self.assertIsInstance(reward, LocomotionReward)
+        self.assertTrue(reward.strict_velocity)
+        self.assertEqual(reward.move_speed, 0.7)
+        self.assertEqual(reward.target_yaw_velocity, 0.0)
+
+        def score(velocity, yaw_velocity):
+            def sensor(_model, _data, name):
+                if name == "upvector_torso":
+                    return np.array([0.073, 0.0, 1.0])
+                if name == "imu-angular-velocity":
+                    return np.array([0.0, 0.0, yaw_velocity])
+                raise AssertionError(name)
+
+            with (
+                patch("humanoidverse.envs.g1_env_helper.rewards.get_xpos", return_value=np.array([0.0, 0.0, 0.82])),
+                patch("humanoidverse.envs.g1_env_helper.rewards.get_xmat", return_value=np.eye(3)),
+                patch(
+                    "humanoidverse.envs.g1_env_helper.rewards.get_center_of_mass_linvel",
+                    return_value=np.array([velocity[0], velocity[1], 0.0]),
+                ),
+                patch("humanoidverse.envs.g1_env_helper.rewards.get_sensor_data", side_effect=sensor),
+            ):
+                return reward.compute(object(), object())
+
+        target = score((0.7, 0.0), 0.0)
+        self.assertGreater(target, score((0.7, 0.4), 0.0))
+        self.assertGreater(target, score((0.7, 0.0), 0.5))
+        self.assertGreater(target, score((-0.7, 0.0), 0.0))
+
     def test_terrain_qpos_uses_ground_relative_root_height_without_mutation(self) -> None:
         qpos = np.zeros((3, 36), dtype=np.float32)
         qpos[:, 2] = np.array([0.82, -0.75, 2.8], dtype=np.float32)

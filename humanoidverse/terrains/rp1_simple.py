@@ -99,7 +99,7 @@ def make_ufo_v0_generator_cfg(mode: TerrainMode, config: Any) -> TerrainGenerato
             step_width=float(_get(config, "stairs.step_depth", 0.30)),
             platform_width=float(_get(config, "stairs.platform_width", 1.5)),
             num_steps=int(_get(config, "stairs.num_steps", 6)),
-            plateau_width=float(_get(config, "stairs.plateau_width", 1.2)),
+            plateau_width=float(_get(config, "stairs.plateau_width", 0.8)),
             border_width=float(_get(config, "stairs.border_width", 0.5)),
         ),
         "rough": NeutralHfPerlinNoiseTerrainCfg(

@@ -124,6 +124,102 @@ def tangential_contact_speed(
     return (torch.linalg.vector_norm(tangent_velocity, dim=-1) * loaded).sum(dim=1)
 
 
+def select_pre_descent_directions(
+    root_velocity: torch.Tensor,
+    root_rotation: torch.Tensor,
+    *,
+    speed_threshold: float = 0.10,
+    fallback_side_indices: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Select the cardinal descent side nearest the unmodified motion state."""
+    if root_velocity.ndim != 2 or root_velocity.shape[1] < 2:
+        raise ValueError("root_velocity must have shape [B, >=2]")
+    if root_rotation.shape != (root_velocity.shape[0], 4):
+        raise ValueError("root_rotation must have shape [B, 4]")
+    if speed_threshold < 0.0:
+        raise ValueError("speed_threshold must be non-negative")
+
+    batch_size = root_velocity.shape[0]
+    device = root_velocity.device
+    dtype = root_velocity.dtype
+    velocity_xy = root_velocity[:, :2]
+    speed = torch.linalg.vector_norm(velocity_xy, dim=-1)
+    local_forward = torch.zeros((batch_size, 3), device=device, dtype=dtype)
+    local_forward[:, 0] = 1.0
+    heading_xy = my_quat_rotate(root_rotation, local_forward)[:, :2]
+    heading_norm = torch.linalg.vector_norm(heading_xy, dim=-1)
+    direction_hint = torch.where((speed >= speed_threshold).unsqueeze(-1), velocity_xy, heading_xy)
+    reliable = (speed >= speed_threshold) | (heading_norm > 1.0e-6)
+
+    cardinal = torch.tensor(
+        [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]],
+        device=device,
+        dtype=dtype,
+    )
+    side_indices = torch.matmul(direction_hint, cardinal.T).argmax(dim=-1)
+    if not torch.all(reliable):
+        if fallback_side_indices is None:
+            fallback_side_indices = torch.randint(0, 4, (batch_size,), device=device)
+        else:
+            fallback_side_indices = fallback_side_indices.to(device=device, dtype=torch.long)
+            if fallback_side_indices.shape != (batch_size,):
+                raise ValueError("fallback_side_indices must have shape [B]")
+            if torch.any((fallback_side_indices < 0) | (fallback_side_indices > 3)):
+                raise ValueError("fallback_side_indices must be in [0, 3]")
+        side_indices = torch.where(reliable, side_indices, fallback_side_indices)
+    return cardinal[side_indices]
+
+
+def pre_descent_reset_positions(
+    patch_centers: torch.Tensor,
+    directions: torch.Tensor,
+    *,
+    platform_width: float,
+    step_depth: float,
+    num_steps: int,
+    plateau_width: float,
+    edge_margin: float,
+) -> torch.Tensor:
+    """Place pelvis XY inside the first high plateau, facing its descent edge."""
+    if patch_centers.shape != directions.shape or patch_centers.ndim != 2 or patch_centers.shape[1] != 2:
+        raise ValueError("patch_centers and directions must have matching [B, 2] shapes")
+    if min(platform_width, step_depth, plateau_width) <= 0.0 or num_steps <= 0:
+        raise ValueError("stairs dimensions and num_steps must be positive")
+    if not 0.0 < edge_margin < plateau_width:
+        raise ValueError("edge_margin must lie inside the high plateau")
+    descent_edge = platform_width / 2.0 + num_steps * step_depth + plateau_width
+    return patch_centers + directions * (descent_edge - edge_margin)
+
+
+def sample_pre_descent_reset_mask(
+    terrain_ids: torch.Tensor,
+    *,
+    stairs_id: int,
+    probability: float,
+    samples: torch.Tensor,
+) -> torch.Tensor:
+    """Sample a fixed fraction of stairs resets without affecting other terrains."""
+    if terrain_ids.shape != samples.shape:
+        raise ValueError("terrain_ids and samples must have matching shapes")
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("probability must be in [0, 1]")
+    return (terrain_ids == int(stairs_id)) & (samples < probability)
+
+
+def sample_lie_down_reset_mask(
+    samples: torch.Tensor,
+    *,
+    probability: float,
+    excluded: torch.Tensor,
+) -> torch.Tensor:
+    """Sample lie-down resets while preserving explicit safe-reset exclusions."""
+    if samples.shape != excluded.shape:
+        raise ValueError("samples and excluded must have matching shapes")
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("probability must be in [0, 1]")
+    return (samples < probability) & ~excluded
+
+
 def _resolve_humanoidverse_path(path_value: str | os.PathLike[str]) -> str:
     path = Path(path_value).expanduser()
     if path.is_absolute():
@@ -1181,6 +1277,49 @@ class HumanoidVerseMjlabCore:
         centers[:, 1] = (types + 0.5 - num_cols / 2.0) * self._terrain_patch_size[1]
         return centers
 
+    def _sample_pre_descent_resets(
+        self,
+        env_ids: torch.Tensor,
+        root_rotation: torch.Tensor,
+        root_velocity: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample training-only stairs resets just inside the first descent edge."""
+        mask = torch.zeros(len(env_ids), device=self.device, dtype=torch.bool)
+        positions = torch.zeros((len(env_ids), 2), device=self.device, dtype=torch.float32)
+        if self.is_evaluating or "stairs" not in self.terrain_component_names:
+            return mask, positions
+
+        stairs_cfg = self.config.terrain.stairs
+        probability = float(stairs_cfg.get("pre_descent_reset_prob", 0.0))
+        if probability <= 0.0:
+            return mask, positions
+        terrain_ids = self.mjlab_env.scene["terrain"].terrain_types[env_ids]
+        stairs_id = self.terrain_component_names.index("stairs")
+        mask = sample_pre_descent_reset_mask(
+            terrain_ids,
+            stairs_id=stairs_id,
+            probability=probability,
+            samples=torch.rand(len(env_ids), device=self.device),
+        )
+        if not torch.any(mask):
+            return mask, positions
+
+        directions = select_pre_descent_directions(
+            root_velocity[mask],
+            root_rotation[mask],
+            speed_threshold=float(stairs_cfg.get("pre_descent_speed_threshold", 0.10)),
+        )
+        positions[mask] = pre_descent_reset_positions(
+            self._terrain_patch_centers()[env_ids[mask]],
+            directions,
+            platform_width=float(stairs_cfg.platform_width),
+            step_depth=float(stairs_cfg.step_depth),
+            num_steps=int(stairs_cfg.num_steps),
+            plateau_width=float(stairs_cfg.plateau_width),
+            edge_margin=float(stairs_cfg.get("pre_descent_edge_margin", 0.35)),
+        )
+        return mask, positions
+
     def _terrain_boundary_margin(self) -> torch.Tensor | None:
         if self._terrain_patch_size is None:
             return None
@@ -1458,6 +1597,8 @@ class HumanoidVerseMjlabCore:
             root_vel = motion_res["root_vel"]
             root_ang_vel = motion_res["root_ang_vel"]
             desired_clearance = root_pos[:, 2] - self.env_origins[env_ids, 2]
+            pre_descent_mask = torch.zeros(len(env_ids), device=self.device, dtype=torch.bool)
+            pre_descent_xy = torch.zeros((len(env_ids), 2), device=self.device, dtype=torch.float32)
             if self.terrain_enabled:
                 # LaFAN world XY is arbitrary. Remove only that global
                 # translation so resets use the terrain's safe origin, and
@@ -1467,8 +1608,17 @@ class HumanoidVerseMjlabCore:
                 self._terrain_motion_offsets[env_ids, :2] = terrain_shift_xy
                 root_pos = root_pos.clone()
                 root_pos[:, :2] += terrain_shift_xy
+                pre_descent_mask, pre_descent_xy = self._sample_pre_descent_resets(
+                    env_ids,
+                    root_rot,
+                    root_vel,
+                )
             if self.config.get("lie_down_init", False):
-                mask = torch.rand(len(env_ids), device=self.device) < float(getattr(self.config, "lie_down_init_prob", 0.0))
+                mask = sample_lie_down_reset_mask(
+                    torch.rand(len(env_ids), device=self.device),
+                    probability=float(getattr(self.config, "lie_down_init_prob", 0.0)),
+                    excluded=pre_descent_mask,
+                )
                 if torch.any(mask):
                     root_pos = root_pos.clone()
                     root_rot = root_rot.clone()
@@ -1485,6 +1635,12 @@ class HumanoidVerseMjlabCore:
             desired_clearance = desired_clearance + (
                 root_pos[:, 2] - motion_res["root_pos"][:, 2]
             )
+            if torch.any(pre_descent_mask):
+                root_pos[pre_descent_mask, :2] = pre_descent_xy[pre_descent_mask]
+                selected_env_ids = env_ids[pre_descent_mask]
+                self._terrain_motion_offsets[selected_env_ids, :2] = (
+                    pre_descent_xy[pre_descent_mask] - motion_res["root_pos"][pre_descent_mask, :2]
+                )
             root_rot = quat_mul(
                 _small_random_quaternions(
                     len(env_ids),

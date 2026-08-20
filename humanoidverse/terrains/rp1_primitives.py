@@ -116,7 +116,7 @@ class TerrainBoundedStairsCfg(SubTerrainCfg):
     step_width: float = 0.30
     platform_width: float = 1.5
     num_steps: int = 6
-    plateau_width: float = 1.2
+    plateau_width: float = 0.8
     border_width: float = 0.5
     base_thickness: float = 0.25
 

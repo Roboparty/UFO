@@ -42,6 +42,23 @@ def _stairs_step_center_offset(step: int, *, platform_width: float, step_depth: 
     return platform_width / 2.0 + (step - 0.5) * step_depth
 
 
+def _stairs_down_edge_offset(
+    *,
+    platform_width: float,
+    step_depth: float,
+    num_steps: int,
+    plateau_width: float,
+    edge_margin: float,
+) -> float:
+    """Return a point on the high plateau facing its first descending step."""
+    if min(platform_width, step_depth, plateau_width) <= 0.0 or num_steps <= 0:
+        raise ValueError("stairs dimensions and num_steps must be positive")
+    if not 0.0 < edge_margin < plateau_width:
+        raise ValueError("stairs down-edge margin must lie inside the high plateau")
+    down_edge = platform_width / 2.0 + num_steps * step_depth + plateau_width
+    return down_edge - edge_margin
+
+
 def _course_completion_radius(course_cfg, *, final_flat_margin: float = 0.30) -> float:
     """Return the radius just inside the final flat annulus."""
     return (
@@ -54,11 +71,20 @@ def _course_completion_radius(course_cfg, *, final_flat_margin: float = 0.30) ->
     )
 
 
-def _terrain_env_cfg(base_cfg, terrain: str, seed: int, *, dense_terrain: bool = False):
+def _terrain_env_cfg(
+    base_cfg,
+    terrain: str,
+    seed: int,
+    *,
+    dense_terrain: bool = False,
+    patch_size: float | None = None,
+):
     overrides = list(base_cfg.hydra_overrides)
     overrides = replace_hydra_override(overrides, "terrain", "terrain_ufo_v0")
     overrides = replace_hydra_override(overrides, "terrain.terrain_type", terrain)
     overrides = replace_hydra_override(overrides, "terrain.seed", seed)
+    if patch_size is not None:
+        overrides = replace_hydra_override(overrides, "terrain.patch_size", [patch_size, patch_size])
     if terrain == "course":
         overrides = replace_hydra_override(overrides, "terrain.num_rows", 1)
     if dense_terrain:
@@ -67,7 +93,7 @@ def _terrain_env_cfg(base_cfg, terrain: str, seed: int, *, dense_terrain: bool =
         overrides = replace_hydra_override(overrides, "terrain.stairs.num_steps", 6)
         overrides = replace_hydra_override(overrides, "terrain.stairs.step_depth", 0.30)
         overrides = replace_hydra_override(overrides, "terrain.stairs.platform_width", 1.0)
-        overrides = replace_hydra_override(overrides, "terrain.stairs.plateau_width", 1.2)
+        overrides = replace_hydra_override(overrides, "terrain.stairs.plateau_width", 0.8)
     return base_cfg.model_copy(update={"hydra_overrides": overrides, "seed": seed})
 
 
@@ -83,7 +109,13 @@ def _default_target_states(env) -> dict[str, torch.Tensor]:
 
 
 def _compute_goal_or_tracking_z(args, model, base_cfg):
-    encoding_cfg = _terrain_env_cfg(base_cfg, "flat", args.seed, dense_terrain=args.dense_terrain)
+    encoding_cfg = _terrain_env_cfg(
+        base_cfg,
+        "flat",
+        args.seed,
+        dense_terrain=args.dense_terrain,
+        patch_size=args.patch_size,
+    )
     wrapped_env, _ = encoding_cfg.build(num_envs=1)
     env = wrapped_env._env
     try:
@@ -150,6 +182,44 @@ def _compute_reward_z(args, model):
     return wrapper.reward_inference(task=args.reward_task).detach(), args.reward_task, None
 
 
+def _save_prompt_latent(path: Path, z: torch.Tensor, *, prompt_type: str, identifier: str) -> None:
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "z": z.detach().cpu(),
+        "prompt_type": prompt_type,
+        "prompt_identifier": identifier,
+        "z_checksum": tensor_checksum(z),
+    }
+    torch.save(payload, path)
+    print(f"[INFO] saved prompt latent {path} z_checksum={payload['z_checksum']}")
+
+
+def _load_prompt_latent(path: Path, *, prompt_type: str, identifier: str, device: str) -> torch.Tensor:
+    path = path.expanduser().resolve()
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(payload, dict) or "z" not in payload:
+        raise ValueError(f"Invalid prompt latent payload: {path}")
+    if payload.get("prompt_type") != prompt_type:
+        raise ValueError(
+            f"Prompt latent type mismatch: expected {prompt_type!r}, got {payload.get('prompt_type')!r}"
+        )
+    if payload.get("prompt_identifier") != identifier:
+        raise ValueError(
+            f"Prompt latent identifier mismatch: expected {identifier!r}, got {payload.get('prompt_identifier')!r}"
+        )
+    z = payload["z"]
+    if not isinstance(z, torch.Tensor) or z.ndim != 2 or z.shape[0] < 1 or not torch.isfinite(z).all():
+        raise ValueError(f"Prompt latent must be a finite rank-2 tensor, got {type(z)!r} shape={getattr(z, 'shape', None)}")
+    checksum = tensor_checksum(z)
+    if payload.get("z_checksum") != checksum:
+        raise ValueError(
+            f"Prompt latent checksum mismatch: stored={payload.get('z_checksum')!r}, computed={checksum!r}"
+        )
+    print(f"[INFO] loaded prompt latent {path} z_checksum={checksum}")
+    return z.to(device)
+
+
 def _prompt_value(model, observation, z: torch.Tensor) -> float:
     discriminator = getattr(model, "_discriminator", None)
     if discriminator is None:
@@ -171,7 +241,13 @@ def _root_ground_clearance(env) -> float:
 
 
 def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_states) -> dict[str, Any]:
-    env_cfg = _terrain_env_cfg(base_cfg, terrain, args.seed, dense_terrain=args.dense_terrain)
+    env_cfg = _terrain_env_cfg(
+        base_cfg,
+        terrain,
+        args.seed,
+        dense_terrain=args.dense_terrain,
+        patch_size=args.patch_size,
+    )
     wrapped_env, _ = env_cfg.build(num_envs=1)
     checksum = tensor_checksum(z)
     renderer = None
@@ -181,7 +257,23 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
         else:
             target_states = {key: value.clone() for key, value in target_states.items()}
             target_states["root_states"][:, :3] += wrapped_env._env.env_origins[:1].to(args.device)
-        if terrain == "stairs" and args.stairs_start_step > 0:
+        if terrain == "stairs" and args.stairs_down_edge_margin is not None:
+            if args.stairs_start_step > 0:
+                raise ValueError("--stairs-start-step and --stairs-down-edge-margin are mutually exclusive")
+            stairs_cfg = wrapped_env._env.config.terrain.stairs
+            start_offset = _stairs_down_edge_offset(
+                platform_width=float(stairs_cfg.platform_width),
+                step_depth=float(stairs_cfg.step_depth),
+                num_steps=int(stairs_cfg.num_steps),
+                plateau_width=float(stairs_cfg.plateau_width),
+                edge_margin=float(args.stairs_down_edge_margin),
+            )
+            target_states["root_states"][:, 0] += start_offset
+            print(
+                f"[INFO] stairs down-edge start: margin={args.stairs_down_edge_margin:.3f}, "
+                f"local_xy=({start_offset:.3f}, 0.000)"
+            )
+        elif terrain == "stairs" and args.stairs_start_step > 0:
             stairs_cfg = wrapped_env._env.config.terrain.stairs
             start_offset = _stairs_step_center_offset(
                 args.stairs_start_step,
@@ -307,6 +399,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-type", choices=["reward", "goal", "tracking"], required=True)
     parser.add_argument("--terrains", default="flat,slope,stairs,rough")
     parser.add_argument(
+        "--patch-size",
+        type=float,
+        default=None,
+        help="Optional square terrain patch size in meters for long inference rollouts.",
+    )
+    parser.add_argument(
         "--dense-terrain",
         action="store_true",
         help="Evaluation-only preset using the bounded six-step stair presentation.",
@@ -319,6 +417,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fall-clearance", type=float, default=0.45)
     parser.add_argument("--output", type=Path, default=Path("terrain_transfer_results.json"))
     parser.add_argument("--reward-task", default="move-ego-0-0.7")
+    parser.add_argument("--save-latent", type=Path, default=None)
+    parser.add_argument("--load-latent", type=Path, default=None)
     parser.add_argument("--buffer-path", type=Path, default=None)
     parser.add_argument("--buffer-rank", type=int, default=0)
     parser.add_argument("--num-samples", type=int, default=100000)
@@ -333,6 +433,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Start stairs rollout at the center of this one-indexed stair band; 0 keeps the center platform.",
+    )
+    parser.add_argument(
+        "--stairs-down-edge-margin",
+        type=float,
+        default=None,
+        help="Start this many meters inside the high plateau's first descending edge, facing outward.",
     )
     parser.add_argument("--save-mp4", action="store_true")
     parser.add_argument("--render-size", type=int, default=480)
@@ -364,9 +470,28 @@ def main() -> None:
         max_episode_length_s=max(10.0, args.episode_length / 50.0 + 1.0),
     )
     if args.prompt_type == "reward":
-        z, identifier, target_states = _compute_reward_z(args, model)
+        identifier = args.reward_task
+        target_states = None
+        if args.load_latent is not None:
+            z = _load_prompt_latent(
+                args.load_latent,
+                prompt_type=args.prompt_type,
+                identifier=identifier,
+                device=args.device,
+            )
+        else:
+            z, identifier, target_states = _compute_reward_z(args, model)
     else:
+        if args.load_latent is not None:
+            raise ValueError("--load-latent currently supports reward prompts only")
         z, identifier, target_states = _compute_goal_or_tracking_z(args, model, base_cfg)
+    if args.save_latent is not None:
+        _save_prompt_latent(
+            args.save_latent,
+            z,
+            prompt_type=args.prompt_type,
+            identifier=identifier,
+        )
     args.prompt_identifier = identifier
     terrains = [value.strip() for value in args.terrains.split(",") if value.strip()]
     unknown = sorted(set(terrains) - set(SUPPORTED_TERRAINS))

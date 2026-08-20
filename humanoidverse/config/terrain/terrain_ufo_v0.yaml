@@ -29,7 +29,12 @@ terrain:
     step_depth: 0.30
     platform_width: 1.0
     num_steps: 6
-    plateau_width: 1.2
+    plateau_width: 0.8
+    # Training-only coverage intervention: place a subset of resets near the
+    # high-platform descent edge and exclude them from synthetic lie-down init.
+    pre_descent_reset_prob: 0.20
+    pre_descent_edge_margin: 0.35
+    pre_descent_speed_threshold: 0.10
     border_width: 0.5
 
   platforms:

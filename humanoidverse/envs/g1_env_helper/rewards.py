@@ -253,6 +253,8 @@ class LocomotionReward(RewardFunction):
     move_angle: float = 0
     egocentric_target: bool = True
     stay_low: bool = False
+    strict_velocity: bool = False
+    target_yaw_velocity: float = 0.0
 
     def compute(
         self,
@@ -323,6 +325,37 @@ class LocomotionReward(RewardFunction):
             return small_control * stand_reward * dont_move * dont_rotate
         else:
             vel = center_of_mass_velocity[[0, 1]]
+            if self.strict_velocity:
+                target_direction = np.array([np.cos(move_angle), np.sin(move_angle)])
+                lateral_direction = np.array([-target_direction[1], target_direction[0]])
+                forward_velocity = target_direction.dot(vel)
+                lateral_velocity = lateral_direction.dot(vel)
+                forward_reward = rewards.tolerance(
+                    forward_velocity,
+                    bounds=(
+                        self.move_speed - 0.1 * self.move_speed,
+                        self.move_speed + 0.1 * self.move_speed,
+                    ),
+                    margin=self.move_speed / 2,
+                    value_at_margin=0.5,
+                    sigmoid="gaussian",
+                )
+                lateral_reward = rewards.tolerance(
+                    lateral_velocity,
+                    bounds=(-0.05, 0.05),
+                    margin=0.5,
+                    value_at_margin=0.1,
+                    sigmoid="gaussian",
+                )
+                yaw_velocity = get_sensor_data(model, data, "imu-angular-velocity")[2]
+                yaw_reward = rewards.tolerance(
+                    yaw_velocity,
+                    bounds=(self.target_yaw_velocity - 0.1, self.target_yaw_velocity + 0.1),
+                    margin=0.5,
+                    value_at_margin=0.1,
+                    sigmoid="gaussian",
+                )
+                return small_control * stand_reward * forward_reward * lateral_reward * yaw_reward
             com_velocity = np.linalg.norm(vel)
             move = rewards.tolerance(
                 com_velocity,
@@ -369,6 +402,20 @@ class LocomotionReward(RewardFunction):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RewardFunction"]:
+        pattern = r"^move-ego-strict-(-?\d+\.*\d*)-(-?\d+\.*\d*)-(-?\d+\.*\d*)$"
+        match = re.search(pattern, name)
+        if match:
+            move_angle, move_speed, target_yaw_velocity = (
+                float(match.group(1)),
+                float(match.group(2)),
+                float(match.group(3)),
+            )
+            return LocomotionReward(
+                move_angle=move_angle,
+                move_speed=move_speed,
+                strict_velocity=True,
+                target_yaw_velocity=target_yaw_velocity,
+            )
         pattern = r"^move-ego-(-?\d+\.*\d*)-(-?\d+\.*\d*)$"
         match = re.search(pattern, name)
         if match:
