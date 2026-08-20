@@ -35,6 +35,9 @@ terrain:
     pre_descent_reset_prob: 0.20
     pre_descent_edge_margin: 0.35
     pre_descent_speed_threshold: 0.10
+    # Query ground from above the tallest possible plateau. The normal reset
+    # probe can otherwise begin inside an elevated stair collision box.
+    pre_descent_ground_probe_clearance: 1.5
     border_width: 0.5
 
   platforms:

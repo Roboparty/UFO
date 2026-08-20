@@ -20,6 +20,7 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     HumanoidVerseMjlabCore,
     body_contact_severity,
     peak_contact_force,
+    pre_descent_ground_probe_z,
     pre_descent_reset_positions,
     sample_lie_down_reset_mask,
     sample_pre_descent_reset_mask,
@@ -160,6 +161,26 @@ def test_pre_descent_position_is_inside_short_high_plateau() -> None:
         edge_margin=0.35,
     )
     torch.testing.assert_close(positions, torch.tensor([[12.75, 20.0], [-5.0, 4.25]]))
+
+
+def test_pre_descent_ground_probe_is_above_stairs_and_inside_ray_range() -> None:
+    origins = torch.tensor([0.0, -2.0])
+    probe_z = pre_descent_ground_probe_z(
+        origins,
+        num_steps=6,
+        max_step_height=0.18,
+        probe_clearance=1.5,
+        max_ray_distance=3.0,
+    )
+    torch.testing.assert_close(probe_z, torch.tensor([2.58, 0.58]))
+    with np.testing.assert_raises_regex(ValueError, "ray range"):
+        pre_descent_ground_probe_z(
+            origins,
+            num_steps=6,
+            max_step_height=0.25,
+            probe_clearance=1.5,
+            max_ray_distance=3.0,
+        )
 
 
 def test_pre_descent_mask_only_selects_stairs_resets() -> None:
@@ -695,6 +716,7 @@ class TerrainNetworkRoutingTest(unittest.TestCase):
         self.assertEqual(float(terrain.stairs.plateau_width), 0.8)
         self.assertEqual(float(terrain.stairs.pre_descent_reset_prob), 0.20)
         self.assertEqual(float(terrain.stairs.pre_descent_edge_margin), 0.35)
+        self.assertEqual(float(terrain.stairs.pre_descent_ground_probe_clearance), 1.5)
         cycle_radius = (
             2 * int(terrain.stairs.num_steps) * float(terrain.stairs.step_depth)
             + 2 * float(terrain.stairs.plateau_width)

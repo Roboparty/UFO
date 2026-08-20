@@ -191,6 +191,23 @@ def pre_descent_reset_positions(
     return patch_centers + directions * (descent_edge - edge_margin)
 
 
+def pre_descent_ground_probe_z(
+    env_origin_z: torch.Tensor,
+    *,
+    num_steps: int,
+    max_step_height: float,
+    probe_clearance: float,
+    max_ray_distance: float,
+) -> torch.Tensor:
+    """Return a collision-free ray origin above the tallest stair plateau."""
+    if num_steps <= 0 or min(max_step_height, probe_clearance, max_ray_distance) <= 0.0:
+        raise ValueError("stairs probe dimensions must be positive")
+    probe_offset = num_steps * max_step_height + probe_clearance
+    if probe_offset >= max_ray_distance:
+        raise ValueError("stairs ground probe must remain within the terrain ray range")
+    return env_origin_z + probe_offset
+
+
 def sample_pre_descent_reset_mask(
     terrain_ids: torch.Tensor,
     *,
@@ -1541,6 +1558,7 @@ class HumanoidVerseMjlabCore:
         joint_pos: torch.Tensor,
         joint_vel: torch.Tensor,
         desired_clearance: torch.Tensor,
+        probe_world_z: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Query ground at final XY and return roots placed at desired clearance."""
         root_xyzw = root_xyzw.clone()
@@ -1552,6 +1570,12 @@ class HumanoidVerseMjlabCore:
 
         provisional = root_xyzw.clone()
         provisional[:, 2] = self.env_origins[env_ids, 2] + desired_clearance
+        if probe_world_z is not None:
+            probe_world_z = probe_world_z.reshape(-1).to(device=provisional.device, dtype=provisional.dtype)
+            if probe_world_z.shape != desired_clearance.shape:
+                raise ValueError("probe_world_z must match desired_clearance")
+            use_probe = torch.isfinite(probe_world_z)
+            provisional[:, 2] = torch.where(use_probe, probe_world_z, provisional[:, 2])
         provisional_wxyz = torch.cat(
             [provisional[:, :3], xyzw_to_wxyz(provisional[:, 3:7]), provisional[:, 7:13]], dim=-1
         )
@@ -1581,6 +1605,7 @@ class HumanoidVerseMjlabCore:
             return
         self.mjlab_env.reset(env_ids=env_ids)
         self._randomize_default_dof_pos_offset(env_ids)
+        ground_probe_z = None
         if target_states is not None:
             self._terrain_motion_offsets[env_ids] = 0.0
             root_xyzw = target_states["root_states"][env_ids].to(self.device, dtype=torch.float32)
@@ -1641,6 +1666,16 @@ class HumanoidVerseMjlabCore:
                 self._terrain_motion_offsets[selected_env_ids, :2] = (
                     pre_descent_xy[pre_descent_mask] - motion_res["root_pos"][pre_descent_mask, :2]
                 )
+                stairs_cfg = self.config.terrain.stairs
+                terrain_priv_cfg = self.config.terrain.terrain_priv
+                ground_probe_z = torch.full_like(desired_clearance, float("nan"))
+                ground_probe_z[pre_descent_mask] = pre_descent_ground_probe_z(
+                    self.env_origins[selected_env_ids, 2],
+                    num_steps=int(stairs_cfg.num_steps),
+                    max_step_height=max(float(value) for value in stairs_cfg.step_height_range),
+                    probe_clearance=float(stairs_cfg.get("pre_descent_ground_probe_clearance", 1.5)),
+                    max_ray_distance=float(terrain_priv_cfg.max_ray_distance),
+                )
             root_rot = quat_mul(
                 _small_random_quaternions(
                     len(env_ids),
@@ -1664,7 +1699,12 @@ class HumanoidVerseMjlabCore:
 
         if self.terrain_enabled:
             root_xyzw, ground_z = self._place_reset_on_local_ground(
-                env_ids, root_xyzw, joint_pos, joint_vel, desired_clearance
+                env_ids,
+                root_xyzw,
+                joint_pos,
+                joint_vel,
+                desired_clearance,
+                probe_world_z=ground_probe_z,
             )
             if target_states is None:
                 self._terrain_motion_offsets[env_ids, 2] = ground_z - self.env_origins[env_ids, 2]
