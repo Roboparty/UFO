@@ -93,6 +93,12 @@ def test_tracking_target_reset_is_centered_only_for_terrain() -> None:
     assert _center_target_states_on_terrain(target_states, plain_env) is target_states
 
 
+def test_fixed_plane_skips_tile_transition_accounting() -> None:
+    plane_core = SimpleNamespace(_terrain_patch_size=None)
+
+    HumanoidVerseMjlabCore._update_terrain_tile_transitions(plane_core)
+
+
 def test_stairs_inference_start_uses_requested_step_center() -> None:
     assert _stairs_step_center_offset(0, platform_width=1.5, step_depth=0.3) == 0.0
     assert math.isclose(

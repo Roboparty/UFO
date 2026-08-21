@@ -1655,6 +1655,8 @@ class HumanoidVerseMjlabCore:
         return torch.where(inside, cols, torch.full_like(cols, -1))
 
     def _update_terrain_tile_transitions(self) -> None:
+        if self._terrain_patch_size is None:
+            return
         rows, cols, inside = self._current_terrain_tiles()
         current = rows * self._terrain_grid_cols + cols
         changed = inside & (self._last_terrain_tile >= 0) & (current != self._last_terrain_tile)
