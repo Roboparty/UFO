@@ -397,12 +397,18 @@ def launch(args: argparse.Namespace) -> None:
             patch_size=tuple(float(value) for value in terrain_cfg.patch_size),
             sensor_radius=sensor_radius,
             policy_margin=float(terrain_cfg.coverage.policy_margin),
+            # Tiles are traversable. The worst assigned origin is at the
+            # center of an outer tile, with the global border beyond it.
+            safe_radius=(
+                min(float(value) for value in terrain_cfg.patch_size) / 2.0
+                + float(terrain_cfg.border_width)
+            ),
         )
         print(
             "[INFO] terrain coverage preflight passed: "
             f"max_excursion={report.max_excursion:.3f}m motion={report.motion_key!r}, "
             f"sensor_radius={report.sensor_radius:.3f}m, policy_margin={report.policy_margin:.3f}m, "
-            f"required={report.required_radius:.3f}m < patch_safe_radius={report.patch_safe_radius:.3f}m",
+            f"required={report.required_radius:.3f}m < connected_safe_radius={report.patch_safe_radius:.3f}m",
             flush=True,
         )
     if args.gpu_ids in (None, "single"):

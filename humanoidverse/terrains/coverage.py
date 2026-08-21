@@ -1,4 +1,4 @@
-"""Preflight checks for keeping complete motion clips inside one terrain patch."""
+"""Preflight checks for keeping complete motion clips inside terrain coverage."""
 
 from __future__ import annotations
 
@@ -28,8 +28,14 @@ def validate_motion_terrain_coverage(
     patch_size: tuple[float, float],
     sensor_radius: float,
     policy_margin: float,
+    safe_radius: float | None = None,
 ) -> TerrainCoverageReport:
-    """Assert that every reference clip plus sensing margin fits one patch."""
+    """Assert that every reference clip plus sensing margin fits the terrain.
+
+    ``safe_radius`` defaults to half of one tile for backward compatibility.
+    Connected grids pass the minimum distance from an assigned outer-tile
+    origin to the complete map boundary instead.
+    """
     paths = [data_paths] if isinstance(data_paths, (str, Path)) else list(data_paths)
     if not paths:
         raise ValueError("at least one motion data path is required for terrain coverage validation")
@@ -49,16 +55,23 @@ def validate_motion_terrain_coverage(
                 max_excursion = excursion
                 max_key = str(key)
 
+    resolved_safe_radius = (
+        min(float(patch_size[0]), float(patch_size[1])) / 2.0
+        if safe_radius is None
+        else float(safe_radius)
+    )
+    if resolved_safe_radius <= 0.0:
+        raise ValueError("safe_radius must be positive")
     report = TerrainCoverageReport(
         max_excursion=max_excursion,
         sensor_radius=float(sensor_radius),
         policy_margin=float(policy_margin),
-        patch_safe_radius=min(float(patch_size[0]), float(patch_size[1])) / 2.0,
+        patch_safe_radius=resolved_safe_radius,
         motion_key=max_key,
     )
     if report.required_radius >= report.patch_safe_radius:
         raise RuntimeError(
-            "terrain patch coverage invariant failed: "
+            "terrain coverage invariant failed: "
             f"max_excursion={report.max_excursion:.3f}m motion={report.motion_key!r}, "
             f"sensor_radius={report.sensor_radius:.3f}m, policy_margin={report.policy_margin:.3f}m, "
             f"required={report.required_radius:.3f}m >= patch_safe_radius={report.patch_safe_radius:.3f}m"

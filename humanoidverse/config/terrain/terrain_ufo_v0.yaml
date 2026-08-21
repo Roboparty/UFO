@@ -11,12 +11,41 @@ terrain:
   # Harder phase-2 fixed distribution, used after global step 99,295,232.
   # This is an explicit distribution shift, not a time-varying curriculum.
   terrain_mix: {flat: 0.15, slope: 0.15, stairs: 0.30, rough: 0.20, platforms: 0.20}
-  patch_size: [30.0, 30.0]
-  border_width: 1.0
+  # Tiles form one connected global map. A 14 m tile is the smallest rounded
+  # size that retains one complete 6-up/platform/6-down stairs cycle.
+  patch_size: [14.0, 14.0]
+  # Shared flat border around the complete grid. Combined with half a tile,
+  # this leaves 21 m from every outer spawn origin to the world boundary.
+  border_width: 14.0
   num_rows: 10
   difficulty_range: [0.0, 1.0]
   heightfield: {horizontal_scale: 0.1, vertical_scale: 0.005}
   spawn: {patch_radius: 0.45, center_range: 1.25}
+
+  # Training-only upright reset coverage. Regions are sampled per terrain;
+  # Actor/F/B/Critic never receive the region identifier.
+  reset:
+    seam_reset_prob: 0.20
+    seam_inset: 0.35
+    slope_random_prob: 0.30
+    slope_radius_range: [1.25, 3.0]
+    stairs_probabilities:
+      center: 0.35
+      pre_descent: 0.20
+      pre_ascent: 0.15
+      intercycle: 0.15
+      tread: 0.15
+    stairs_edge_margin: 0.35
+    rough_random_prob: 0.50
+    platforms_random_prob: 0.30
+    platforms_edge_margin: 0.25
+    adaptive_lift_footprint_radius: 0.65
+    adaptive_lift_extra_clearance: 0.05
+    # Generic reset queries start this far above the assigned tile origin.
+    # This avoids casting from inside raised terrain after random XY sampling.
+    ground_probe_clearance: 1.5
+    # Upright and lie-down resets share this same position distribution.
+    lie_down_uses_same_regions: true
 
   slope:
     min_angle_deg: 5.0
@@ -30,9 +59,7 @@ terrain:
     platform_width: 1.0
     num_steps: 6
     plateau_width: 0.8
-    # Training-only coverage intervention: place a subset of resets near the
-    # high-platform descent edge and exclude them from synthetic lie-down init.
-    pre_descent_reset_prob: 0.20
+    # Elevated-region reset probes start above the collision geometry.
     pre_descent_edge_margin: 0.35
     pre_descent_speed_threshold: 0.10
     # Query ground from above the tallest possible plateau. The normal reset
@@ -57,6 +84,7 @@ terrain:
   # Inference-only, deterministic +x traversal route. It is not part of the
   # mixed training distribution.
   course:
+    patch_size: [22.0, 22.0]
     flat_run: 1.80
     step_height: 0.12
     step_depth: 0.30
@@ -84,6 +112,6 @@ terrain:
   coverage:
     policy_margin: 2.0
     boundary_safety_margin: 0.5
-    # Formal training truncates and resets only the affected env. Enable this
-    # fail-fast switch in dedicated debug runs, where stopping is intentional.
+    # Internal tile seams are traversable. This guard applies only to the
+    # outside edge of the complete 10x5 terrain grid.
     fail_on_boundary_violation: false

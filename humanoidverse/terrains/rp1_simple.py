@@ -73,7 +73,8 @@ def make_ufo_v0_generator_cfg(mode: TerrainMode, config: Any) -> TerrainGenerato
     if mode != "mixed":
         weights = {name: float(name == mode) for name in TERRAIN_COMPONENT_NAMES}
 
-    size = tuple(float(x) for x in _get(config, "patch_size", (8.0, 8.0)))
+    size_path = "course.patch_size" if mode == "course" else "patch_size"
+    size = tuple(float(x) for x in _get(config, size_path, (8.0, 8.0)))
     slope_min_deg = float(_get(config, "slope.min_angle_deg", 5.0))
     slope_max_deg = float(_get(config, "slope.max_angle_deg", 12.0))
     step_height = tuple(float(x) for x in _get(config, "stairs.step_height_range", (0.10, 0.18)))

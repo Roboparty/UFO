@@ -10,7 +10,10 @@ from humanoidverse.agents.evaluations.humanoidverse_mjlab import (
     HumanoidVerseMjlabTrackingEvaluationConfig,
 )
 from humanoidverse.agents.envs.expert_motion_loader import load_expert_trajectories_from_motion_lib
-from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
+from humanoidverse.agents.envs.humanoidverse_mjlab import (
+    RESET_REGION_NAMES,
+    HumanoidVerseMjlabConfig,
+)
 
 os.environ["OMP_NUM_THREADS"] = "1"
 
@@ -614,12 +617,9 @@ class Workspace:
             pelvis_world_z = raw_env.body_pos[:, 0, 2]
             root_clearance = root_clearance[:, 0]
             local_ground_z = pelvis_world_z - root_clearance
-            terrain_entity = raw_env.mjlab_env.scene["terrain"]
-            terrain_ids = getattr(
-                terrain_entity,
-                "terrain_types",
-                torch.zeros(raw_env.num_envs, device=raw_env.device, dtype=torch.long),
-            )
+            # Once tiles are connected, the assigned spawn column no longer
+            # describes the physical terrain currently under the robot.
+            terrain_ids = raw_env._current_terrain_type_ids()
             metrics: dict[str, float] = {}
             for terrain_id, name in enumerate(raw_env.terrain_component_names):
                 mask = terrain_ids == terrain_id
@@ -654,6 +654,25 @@ class Workspace:
                     raw_env._terrain_boundary_required, 6
                 )
                 metrics["terrain/boundary_violation_count"] = int(boundary_violation_count.item())
+
+            tile_crossings = raw_env._terrain_tile_crossing_count.clone()
+            transition_counts = raw_env._terrain_transition_counts.clone()
+            reset_region_counts = raw_env._reset_region_counts.clone()
+            lie_down_resets = raw_env._lie_down_reset_count.clone()
+            if self.cfg.distributed_sync and self.distributed_world_size > 1:
+                torch.distributed.all_reduce(tile_crossings, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(transition_counts, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(reset_region_counts, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(lie_down_resets, op=torch.distributed.ReduceOp.SUM)
+            metrics["terrain/tile_crossing_count"] = int(tile_crossings.item())
+            for source_id, source_name in enumerate(raw_env.terrain_component_names):
+                for target_id, target_name in enumerate(raw_env.terrain_component_names):
+                    count = int(transition_counts[source_id, target_id].item())
+                    if count:
+                        metrics[f"terrain/transition/{source_name}_to_{target_name}"] = count
+            for region_id, region_name in enumerate(RESET_REGION_NAMES):
+                metrics[f"reset/{region_name}"] = int(reset_region_counts[region_id].item())
+            metrics["reset/lie_down"] = int(lie_down_resets.item())
             return metrics
 
     def train_online(self) -> None:
