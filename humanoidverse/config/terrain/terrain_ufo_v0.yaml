@@ -44,9 +44,6 @@ terrain:
     # Generic reset queries start this far above the assigned tile origin.
     # This avoids casting from inside raised terrain after random XY sampling.
     ground_probe_clearance: 1.5
-    # Upright and lie-down resets share this same position distribution.
-    lie_down_uses_same_regions: true
-
   slope:
     min_angle_deg: 5.0
     max_angle_deg: 8.0

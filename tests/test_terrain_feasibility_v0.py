@@ -58,6 +58,10 @@ from humanoidverse.terrains.terrain_observation import (
     observations_from_clearances,
     reference_ray_index,
 )
+from humanoidverse.terrains.terrain_height_sensor import (
+    mark_terrain_padding_ray_group,
+    repair_padding_ray_misses,
+)
 from humanoidverse.tracking_inference import _center_target_states_on_terrain
 from humanoidverse.training.workspace import Workspace, make_flat_terrain_priority_eval_config
 
@@ -237,20 +241,20 @@ def test_connected_grid_internal_seams_are_not_boundaries() -> None:
     patch = torch.tensor([14.0, 14.0])
     points = torch.tensor(
         [
-            [0.0, -14.01],
-            [0.0, -13.99],
+            [0.0, -21.01],
+            [0.0, -20.99],
             [69.0, 34.0],
             [84.01, 0.0],
         ]
     )
     rows, cols, inside = terrain_grid_coordinates(points, patch, num_rows=10, num_cols=5)
     assert inside.tolist() == [True, True, True, False]
-    assert cols[:2].tolist() == [1, 1]
+    assert cols[:2].tolist() == [0, 1]
     margins = terrain_grid_boundary_margin(
         points, patch, num_rows=10, num_cols=5, border_width=14.0
     )
     torch.testing.assert_close(
-        margins, torch.tensor([34.99, 35.01, 15.0, -0.01]), atol=1e-5, rtol=0.0
+        margins, torch.tensor([27.99, 28.01, 15.0, -0.01]), atol=1e-5, rtol=0.0
     )
 
 
@@ -680,6 +684,58 @@ class TerrainPhysicsObservationTest(unittest.TestCase):
                 points.extend([(x, y - epsilon), (x, y), (x, y + epsilon)])
         np.testing.assert_allclose(_mixed_terrain_heights(points), 0.0, atol=0.011)
 
+    def test_global_padding_is_visible_to_group_five_height_rays(self) -> None:
+        config = OmegaConf.load("humanoidverse/config/terrain/terrain_ufo_v0.yaml").terrain
+        config = OmegaConf.merge(config, {"num_rows": 2, "difficulty_range": [1.0, 1.0]})
+        generator = TerrainGenerator(make_ufo_v0_generator_cfg("mixed", config))
+        spec = mujoco.MjSpec()
+        generator.compile(spec)
+        padding_names = [geom.name for geom in spec.body("terrain").geoms if int(geom.group) == 0]
+        self.assertEqual(len(padding_names), 4)
+        self.assertEqual(mark_terrain_padding_ray_group(spec), 4)
+        model = spec.compile()
+        padding_ids = [model.geom(name).id for name in padding_names]
+        self.assertTrue(np.all(model.geom_group[padding_ids] == 5))
+        data = mujoco.MjData(model)
+        mujoco.mj_forward(model, data)
+        terrain_group = np.array([0, 0, 0, 0, 0, 1], dtype=np.uint8)
+        core_edge = 2 * float(config.patch_size[0]) / 2.0
+        heights = []
+        for offset in (-0.1, 0.0, 0.1, 1.0):
+            point = np.array([core_edge + offset, 0.0, 2.0])
+            distance = mujoco.mj_ray(
+                model,
+                data,
+                point,
+                np.array([0.0, 0.0, -1.0]),
+                terrain_group,
+                1,
+                -1,
+                np.array([-1], dtype=np.int32),
+            )
+            self.assertGreaterEqual(distance, 0.0)
+            heights.append(point[2] - distance)
+        np.testing.assert_allclose(heights, 0.0, atol=1.0e-6)
+
+    def test_padding_miss_repair_does_not_hide_core_or_out_of_bounds_misses(self) -> None:
+        origins = torch.tensor(
+            [[[0.0, 0.0, 0.8], [15.0, 0.0, 0.8], [30.0, 0.0, 0.8], [15.0, 0.0, 4.0]]]
+        )
+        distances = torch.full((1, 4), -1.0)
+        hit_positions = origins.clone()
+        normals = torch.zeros_like(origins)
+        repair_padding_ray_misses(
+            distances,
+            hit_positions,
+            normals,
+            origins,
+            ((14.0, 28.0, -7.0, 7.0, 0.0),),
+            max_distance=3.0,
+        )
+        torch.testing.assert_close(distances, torch.tensor([[-1.0, 0.8, -1.0, -1.0]]))
+        torch.testing.assert_close(hit_positions[0, 1], torch.tensor([15.0, 0.0, 0.0]))
+        torch.testing.assert_close(normals[0, 1], torch.tensor([0.0, 0.0, 1.0]))
+
     def test_traversal_course_has_ordered_flat_stairs_ramp_flat_profile(self) -> None:
         offsets = [0.0, 1.9, 3.4, 4.2, 5.8, 6.7, 8.8, 9.3]
         values = _physics_heights_at_offsets("course", offsets)
@@ -862,7 +918,7 @@ class TerrainNetworkRoutingTest(unittest.TestCase):
     def test_all_lafan_clips_fit_patch_with_sensor_and_policy_margin(self) -> None:
         report = validate_motion_terrain_coverage(
             "humanoidverse/data/lafan_29dof_10s-clipped.pkl",
-            patch_size=(30.0, 30.0),
+            patch_size=(14.0, 14.0),
             sensor_radius=math.hypot(1.6, 0.6),
             policy_margin=2.0,
             safe_radius=21.0,

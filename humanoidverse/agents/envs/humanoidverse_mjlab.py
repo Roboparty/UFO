@@ -35,6 +35,7 @@ from humanoidverse.terrains.terrain_observation import (
     observations_from_clearances,
     reference_ray_index,
 )
+from humanoidverse.terrains.terrain_height_sensor import PbfmTerrainHeightSensorCfg
 from humanoidverse.utils.helpers import pre_process_config
 from humanoidverse.utils.motion_lib.motion_lib_robot import MotionLibRobot
 from humanoidverse.utils.torch_utils import (
@@ -728,7 +729,7 @@ def make_mjlab_ufo_env_cfg(
     from mjlab.managers.scene_entity_config import SceneEntityCfg
     from mjlab.managers.termination_manager import TerminationTermCfg
     from mjlab.scene import SceneCfg
-    from mjlab.sensor import ObjRef, TerrainHeightSensorCfg
+    from mjlab.sensor import ObjRef
     from mjlab.sensor.contact_sensor import ContactMatch, ContactSensorCfg
     from mjlab.sim import MujocoCfg, SimulationCfg
 
@@ -847,7 +848,7 @@ def make_mjlab_ufo_env_cfg(
         )
         if terrain_observation_mode == "raycast":
             sensors.append(
-                TerrainHeightSensorCfg(
+                PbfmTerrainHeightSensorCfg(
                     name="terrain_height",
                     frame=ObjRef(type="body", name=str(config.robot.body_names[0]), entity="robot"),
                     pattern=grid_pattern,
@@ -1975,6 +1976,14 @@ class HumanoidVerseMjlabCore:
         self._randomize_default_dof_pos_offset(env_ids)
         ground_probe_z = None
         adaptive_lift_mask = None
+        if self.terrain_enabled:
+            generic_probe_clearance = float(self.config.terrain.reset.ground_probe_clearance)
+            max_ray_distance = float(self.config.terrain.terrain_priv.max_ray_distance)
+            if not 0.0 < generic_probe_clearance < max_ray_distance:
+                raise ValueError(
+                    "terrain.reset.ground_probe_clearance must be positive and below max_ray_distance"
+                )
+            ground_probe_z = self.env_origins[env_ids, 2] + generic_probe_clearance
         if target_states is not None:
             self._terrain_motion_offsets[env_ids] = 0.0
             root_xyzw = target_states["root_states"][env_ids].to(self.device, dtype=torch.float32)
@@ -2010,13 +2019,6 @@ class HumanoidVerseMjlabCore:
                 )
                 root_pos[:, :2] = reset_xy
                 self._reset_region_ids[env_ids] = reset_region_ids
-                generic_probe_clearance = float(self.config.terrain.reset.ground_probe_clearance)
-                max_ray_distance = float(self.config.terrain.terrain_priv.max_ray_distance)
-                if not 0.0 < generic_probe_clearance < max_ray_distance:
-                    raise ValueError(
-                        "terrain.reset.ground_probe_clearance must be positive and below max_ray_distance"
-                    )
-                ground_probe_z = self.env_origins[env_ids, 2] + generic_probe_clearance
                 if not self.is_evaluating:
                     self._reset_region_counts += torch.bincount(
                         reset_region_ids, minlength=len(RESET_REGION_NAMES)
@@ -2105,6 +2107,9 @@ class HumanoidVerseMjlabCore:
         self.mjlab_env.scene.write_data_to_sim()
         self.mjlab_env.sim.forward()
         if self.terrain_enabled and self.terrain_observation_mode == "raycast":
+            # The ground probe above populated Sensor.data's per-step cache.
+            # Invalidate it before sensing the final reset pose.
+            self.mjlab_env.scene.sensors["terrain_height"].update(0.0)
             self.mjlab_env.sim.sense()
         self.mjlab_env._manual_reset_pending[env_ids] = False
         self.actions[env_ids] = 0.0
