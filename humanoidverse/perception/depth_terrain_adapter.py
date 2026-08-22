@@ -15,6 +15,11 @@ class DepthTerrainAdapter(nn.Module):
     is distance along that optical +z axis, in meters.
     """
 
+    X_MIN = -0.4
+    X_MAX = 1.6
+    Y_MIN = -0.6
+    Y_MAX = 0.6
+    RESOLUTION = 0.1
     GRID_SHAPE = (21, 13)
     GRID_DIMENSION = 273
     CENTER_INDEX = 58
@@ -24,12 +29,6 @@ class DepthTerrainAdapter(nn.Module):
         intrinsic_matrix: torch.Tensor,
         image_height: int,
         image_width: int,
-        *,
-        x_min: float = -0.4,
-        x_max: float = 1.6,
-        y_min: float = -0.6,
-        y_max: float = 0.6,
-        resolution: float = 0.1,
     ) -> None:
         super().__init__()
         intrinsic_matrix = torch.as_tensor(intrinsic_matrix)
@@ -47,11 +46,6 @@ class DepthTerrainAdapter(nn.Module):
         except RuntimeError as error:
             raise ValueError("intrinsic_matrix must be invertible") from error
 
-        nx = int(round((x_max - x_min) / resolution)) + 1
-        ny = int(round((y_max - y_min) / resolution)) + 1
-        if (nx, ny) != self.GRID_SHAPE:
-            raise ValueError(f"PBFM grid must have shape {self.GRID_SHAPE}, got {(nx, ny)}")
-
         rows, columns = torch.meshgrid(
             torch.arange(image_height, dtype=intrinsic_matrix.dtype, device=intrinsic_matrix.device),
             torch.arange(image_width, dtype=intrinsic_matrix.dtype, device=intrinsic_matrix.device),
@@ -63,17 +57,25 @@ class DepthTerrainAdapter(nn.Module):
         if not torch.isfinite(rays).all() or torch.any(ray_z.abs() <= 1e-12):
             raise ValueError("intrinsic_matrix produces invalid optical rays")
         rays = rays / ray_z
+
+        grid_x, grid_y = torch.meshgrid(
+            torch.linspace(self.X_MIN, self.X_MAX, self.GRID_SHAPE[0], dtype=intrinsic_matrix.dtype, device=intrinsic_matrix.device),
+            torch.linspace(self.Y_MIN, self.Y_MAX, self.GRID_SHAPE[1], dtype=intrinsic_matrix.dtype, device=intrinsic_matrix.device),
+            indexing="ij",
+        )
+        grid_offsets = torch.stack(
+            (
+                grid_x.reshape(-1),
+                grid_y.reshape(-1),
+                torch.zeros(self.GRID_DIMENSION, dtype=intrinsic_matrix.dtype, device=intrinsic_matrix.device),
+            ),
+            dim=-1,
+        )
         self.register_buffer("intrinsic_matrix", intrinsic_matrix.clone())
         self.register_buffer("pixel_ray_lut", rays)
+        self.register_buffer("grid_offsets", grid_offsets)
         self.image_height = image_height
         self.image_width = image_width
-        self.x_min = float(x_min)
-        self.x_max = float(x_max)
-        self.y_min = float(y_min)
-        self.y_max = float(y_max)
-        self.resolution = float(resolution)
-        self.nx = nx
-        self.ny = ny
 
     @staticmethod
     def _rotate_xyzw(quaternion: torch.Tensor, vectors: torch.Tensor) -> torch.Tensor:
@@ -138,18 +140,18 @@ class DepthTerrainAdapter(nn.Module):
         points_world = self._rotate_xyzw(camera_optical_quat_w, flat_camera) + camera_pos_w[:, None, :]
         points_heading = self._rotate_inverse_xyzw(pelvis_heading_quat_w, points_world - pelvis_pos_w[:, None, :])
 
-        ix = torch.floor((points_heading[..., 0] - self.x_min) / self.resolution + 0.5).long()
-        iy = torch.floor((points_heading[..., 1] - self.y_min) / self.resolution + 0.5).long()
+        ix = torch.floor((points_heading[..., 0] - self.X_MIN) / self.RESOLUTION + 0.5).long()
+        iy = torch.floor((points_heading[..., 1] - self.Y_MIN) / self.RESOLUTION + 0.5).long()
         valid = (
             torch.isfinite(depth_z.reshape(batch_size, -1))
             & (depth_z.reshape(batch_size, -1) > 0.0)
             & torch.isfinite(points_heading).all(dim=-1)
             & (ix >= 0)
-            & (ix < self.nx)
+            & (ix < self.GRID_SHAPE[0])
             & (iy >= 0)
-            & (iy < self.ny)
+            & (iy < self.GRID_SHAPE[1])
         )
-        indices = (ix * self.ny + iy).clamp(0, self.GRID_DIMENSION - 1)
+        indices = (ix * self.GRID_SHAPE[1] + iy).clamp(0, self.GRID_DIMENSION - 1)
         clearances = (pelvis_pos_w[:, None, 2] - points_world[..., 2]).clamp_min(0.0)
         clearances = torch.where(valid, clearances, torch.full_like(clearances, float("inf")))
 

@@ -66,16 +66,17 @@ class DepthTerrainAdapterTest(unittest.TestCase):
 
     def test_grid_shape_center_and_flatten_order_match_pbfm(self):
         expected, _ = RobotCentricGridPatternCfg().generate_rays(None, "cpu")
+        self.assertEqual(self.adapter.X_MIN, -0.4)
+        self.assertEqual(self.adapter.X_MAX, 1.6)
+        self.assertEqual(self.adapter.Y_MIN, -0.6)
+        self.assertEqual(self.adapter.Y_MAX, 0.6)
+        self.assertEqual(self.adapter.RESOLUTION, 0.1)
         self.assertEqual(self.adapter.GRID_SHAPE, (21, 13))
         self.assertEqual(self.adapter.GRID_DIMENSION, 273)
         self.assertEqual(self.adapter.CENTER_INDEX, 4 * 13 + 6)
         self.assertEqual(self.adapter.CENTER_INDEX, 58)
-        x = torch.linspace(-0.4, 1.6, 21)
-        y = torch.linspace(-0.6, 0.6, 13)
-        grid_x, grid_y = torch.meshgrid(x, y, indexing="ij")
-        actual = torch.stack((grid_x.reshape(-1), grid_y.reshape(-1), torch.zeros(273)), dim=-1)
-        torch.testing.assert_close(actual, expected)
-        torch.testing.assert_close(actual[58], torch.zeros(3))
+        torch.testing.assert_close(self.adapter.grid_offsets, expected.double())
+        torch.testing.assert_close(self.adapter.grid_offsets[58], torch.zeros(3, dtype=torch.float64))
 
     def test_flat_and_elevated_flat(self):
         for ground_z, expected_clearance in ((0.0, 1.0), (0.35, 0.65)):
