@@ -105,9 +105,7 @@ def elevated_platform_probe_xy(core) -> tuple[float, float]:
     center_x = (row + 0.5 - core._terrain_grid_rows / 2.0) * patch_x
     center_y = (column + 0.5 - core._terrain_grid_cols / 2.0) * patch_y
     platforms_cfg = core.config.terrain.platforms
-    raised_band_center = 0.5 * (
-        float(platforms_cfg.center_width) + float(platforms_cfg.band_width)
-    )
+    raised_band_center = 0.5 * (float(platforms_cfg.center_width) + float(platforms_cfg.band_width))
     return center_x + raised_band_center, center_y
 
 
@@ -186,9 +184,7 @@ class MetricAccumulator:
             "visible_mae_m": mae,
             "visible_rmse_m": rmse,
             "center_visibility": float(self.visible_count[58].item() / max(self.samples, 1)),
-            "center_mae_m": (
-                float(self.abs_error_sum[58].item() / center_count) if center_count else None
-            ),
+            "center_mae_m": (float(self.abs_error_sum[58].item() / center_count) if center_count else None),
         }
 
     def per_cell(self) -> dict[str, np.ndarray]:
@@ -214,9 +210,7 @@ class MetricAccumulator:
 
 
 def region_metrics(predicted: torch.Tensor, visible: torch.Tensor, gt: torch.Tensor) -> dict[str, dict[str, float | None]]:
-    grid_offsets = DepthTerrainAdapter(
-        torch.eye(3, device=predicted.device, dtype=predicted.dtype), 1, 1
-    ).grid_offsets
+    grid_offsets = DepthTerrainAdapter(torch.eye(3, device=predicted.device, dtype=predicted.dtype), 1, 1).grid_offsets
     x, y = grid_offsets[:, 0], grid_offsets[:, 1]
     masks = {
         "rear": x < 0.0,
@@ -235,6 +229,35 @@ def region_metrics(predicted: torch.Tensor, visible: torch.Tensor, gt: torch.Ten
             "mae_m": float(error.abs().mean().item()) if error.numel() else None,
         }
     return output
+
+
+def benchmark_environment_steps(
+    wrapped_env,
+    core,
+    *,
+    num_envs: int,
+    num_steps: int,
+    device: str,
+) -> dict[str, float | int]:
+    """Measure environment steps with identical warmup and CUDA synchronization."""
+    actions = torch.zeros((num_envs, core.num_dof), device=device)
+    for _ in range(min(2, num_steps)):
+        wrapped_env.step(actions, to_numpy=False)
+    if device.startswith("cuda"):
+        torch.cuda.synchronize(device)
+    start = time.perf_counter()
+    for _ in range(num_steps):
+        wrapped_env.step(actions, to_numpy=False)
+    if device.startswith("cuda"):
+        torch.cuda.synchronize(device)
+    elapsed = time.perf_counter() - start
+    return {
+        "num_envs": num_envs,
+        "num_steps": num_steps,
+        "elapsed_step_seconds": elapsed,
+        "policy_steps_per_second": num_steps / elapsed,
+        "environment_transitions_per_second": num_envs * num_steps / elapsed,
+    }
 
 
 def save_snapshot(
@@ -304,13 +327,9 @@ def evaluate_explicit_probe(
     env_ids = torch.zeros(1, device=core.device, dtype=torch.long)
     root_xyzw = core.robot_root_states[0:1].clone()
     root_xyzw[:, :3] = torch.tensor([[xy[0], xy[1], 0.80]], device=core.device)
-    root_xyzw[:, 3:7] = torch.tensor(
-        [[0.0, 0.0, np.sin(yaw / 2.0), np.cos(yaw / 2.0)]], device=core.device
-    )
+    root_xyzw[:, 3:7] = torch.tensor([[0.0, 0.0, np.sin(yaw / 2.0), np.cos(yaw / 2.0)]], device=core.device)
     root_xyzw[:, 7:13] = 0.0
-    root_wxyz = torch.cat(
-        (root_xyzw[:, :3], xyzw_to_wxyz(root_xyzw[:, 3:7]), root_xyzw[:, 7:13]), dim=-1
-    )
+    root_wxyz = torch.cat((root_xyzw[:, :3], xyzw_to_wxyz(root_xyzw[:, 3:7]), root_xyzw[:, 7:13]), dim=-1)
     core.robot.write_root_state_to_sim(root_wxyz, env_ids=env_ids)
     core.robot.write_joint_state_to_sim(
         core.default_dof_pos[0:1],
@@ -349,9 +368,7 @@ def evaluate_explicit_probe(
     root_world_z = float(core.robot_root_states[0, 2].item())
     ground_height = root_world_z - center_clearance
     if require_elevated_ground and ground_height <= 0.01:
-        raise RuntimeError(
-            f"{label} did not land on elevated terrain: ground_height={ground_height:.6f} m"
-        )
+        raise RuntimeError(f"{label} did not land on elevated terrain: ground_height={ground_height:.6f} m")
     return {
         "visible_fraction": float(visible[0].float().mean().item()),
         "gt_valid_fraction": float(torch.isfinite(gt[0]).float().mean().item()),
@@ -389,9 +406,7 @@ def evaluate_depth_terrain(
     )
     env_updates: dict[str, Any] = {"seed": seed}
     if terrain != "mixed":
-        env_updates["hydra_overrides"] = replace_hydra_override(
-            list(env_config.hydra_overrides), "terrain.terrain_type", terrain
-        )
+        env_updates["hydra_overrides"] = replace_hydra_override(list(env_config.hydra_overrides), "terrain.terrain_type", terrain)
     env_config = env_config.model_copy(update=env_updates)
 
     if device.startswith("cuda"):
@@ -409,7 +424,6 @@ def evaluate_depth_terrain(
     nonedge_abs_sum = nonedge_sq_sum = nonedge_count = 0.0
     region_buffers: dict[str, list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = defaultdict(list)
     snapshots_saved: set[str] = set()
-    elapsed_step_seconds = 0.0
     partial_reset_exercised = False
 
     try:
@@ -446,9 +460,7 @@ def evaluate_depth_terrain(
             accumulators["overall"].update(predicted, visible, gt)
             for name in sorted(set(names)):
                 mask = torch.tensor([item == name for item in names], device=device)
-                accumulators.setdefault(name, MetricAccumulator(torch.device(device))).update(
-                    predicted[mask], visible[mask], gt[mask]
-                )
+                accumulators.setdefault(name, MetricAccumulator(torch.device(device))).update(predicted[mask], visible[mask], gt[mask])
                 region_buffers[name].append((predicted[mask], visible[mask], gt[mask]))
 
             stairs_mask = torch.tensor([item == "stairs" for item in names], device=device)
@@ -493,9 +505,7 @@ def evaluate_depth_terrain(
                     snapshots_saved.add(label)
 
             if step + 1 < num_steps:
-                step_start = time.perf_counter()
                 wrapped_env.step(zero_actions, to_numpy=False)
-                elapsed_step_seconds += time.perf_counter() - step_start
 
         explicit_probes: dict[str, dict[str, float | None]] = {}
         if core._terrain_patch_size is not None:
@@ -562,6 +572,22 @@ def evaluate_depth_terrain(
             visible = torch.cat([batch[1] for batch in batches], dim=0)
             gt = torch.cat([batch[2] for batch in batches], dim=0)
             region_summary[name] = region_metrics(predicted, visible, gt)
+        performance = benchmark_environment_steps(
+            wrapped_env,
+            core,
+            num_envs=num_envs,
+            num_steps=num_steps,
+            device=device,
+        )
+        performance.update(
+            {
+                "build_seconds": build_seconds,
+                "allocated_vram_delta_bytes": (
+                    torch.cuda.memory_allocated(device) - before_allocated if device.startswith("cuda") else None
+                ),
+                "peak_vram_bytes": (torch.cuda.max_memory_allocated(device) if device.startswith("cuda") else None),
+            }
+        )
         report = {
             "model_folder": str(model_folder.resolve()),
             "terrain": terrain,
@@ -581,30 +607,43 @@ def evaluate_depth_terrain(
                 "nonedge_count": nonedge_count,
             },
             "explicit_probes": explicit_probes,
-            "performance": {
-                "build_seconds": build_seconds,
-                "policy_steps_per_second": (
-                    (num_steps - 1) / elapsed_step_seconds if elapsed_step_seconds > 0.0 else None
-                ),
-                "environment_transitions_per_second": (
-                    num_envs * (num_steps - 1) / elapsed_step_seconds
-                    if elapsed_step_seconds > 0.0
-                    else None
-                ),
-                "allocated_vram_delta_bytes": (
-                    torch.cuda.memory_allocated(device) - before_allocated if device.startswith("cuda") else None
-                ),
-                "peak_vram_bytes": torch.cuda.max_memory_allocated(device) if device.startswith("cuda") else None,
-            },
+            "performance": performance,
             "snapshots": sorted(snapshots_saved),
             "partial_reset_exercised": partial_reset_exercised,
         }
         (output_dir / "summary.json").write_text(json.dumps(report, indent=2, allow_nan=False))
         with (output_dir / "metrics.csv").open("w", newline="") as file:
             writer = csv.writer(file)
-            writer.writerow(("terrain", "samples", "visible_fraction", "gt_valid_fraction", "visible_mae_m", "visible_rmse_m", "center_visibility", "center_mae_m"))
+            writer.writerow(
+                (
+                    "terrain",
+                    "samples",
+                    "visible_fraction",
+                    "gt_valid_fraction",
+                    "visible_mae_m",
+                    "visible_rmse_m",
+                    "center_visibility",
+                    "center_mae_m",
+                )
+            )
             for name, summary in summaries.items():
-                writer.writerow((name, *(summary[key] for key in ("samples", "visible_fraction", "gt_valid_fraction", "visible_mae_m", "visible_rmse_m", "center_visibility", "center_mae_m"))))
+                writer.writerow(
+                    (
+                        name,
+                        *(
+                            summary[key]
+                            for key in (
+                                "samples",
+                                "visible_fraction",
+                                "gt_valid_fraction",
+                                "visible_mae_m",
+                                "visible_rmse_m",
+                                "center_visibility",
+                                "center_mae_m",
+                            )
+                        ),
+                    )
+                )
         return report
     finally:
         wrapped_env.close()
@@ -632,9 +671,7 @@ def benchmark_baseline_environment(
     )
     updates: dict[str, Any] = {"seed": seed}
     if terrain != "mixed":
-        updates["hydra_overrides"] = replace_hydra_override(
-            list(env_config.hydra_overrides), "terrain.terrain_type", terrain
-        )
+        updates["hydra_overrides"] = replace_hydra_override(list(env_config.hydra_overrides), "terrain.terrain_type", terrain)
     env_config = env_config.model_copy(update=updates)
     if device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats(device)
@@ -647,28 +684,21 @@ def benchmark_baseline_environment(
     core = wrapped_env._env
     try:
         wrapped_env.reset(to_numpy=False)
-        actions = torch.zeros((num_envs, core.num_dof), device=device)
-        for _ in range(min(2, num_steps)):
-            wrapped_env.step(actions, to_numpy=False)
-        if device.startswith("cuda"):
-            torch.cuda.synchronize(device)
-        start = time.perf_counter()
-        for _ in range(num_steps):
-            wrapped_env.step(actions, to_numpy=False)
-        if device.startswith("cuda"):
-            torch.cuda.synchronize(device)
-        elapsed = time.perf_counter() - start
-        return {
-            "num_envs": num_envs,
-            "num_steps": num_steps,
-            "build_seconds": build_seconds,
-            "policy_steps_per_second": num_steps / elapsed,
-            "environment_transitions_per_second": num_envs * num_steps / elapsed,
-            "allocated_vram_delta_bytes": (
-                torch.cuda.memory_allocated(device) - before if device.startswith("cuda") else None
-            ),
-            "peak_vram_bytes": torch.cuda.max_memory_allocated(device) if device.startswith("cuda") else None,
-        }
+        performance = benchmark_environment_steps(
+            wrapped_env,
+            core,
+            num_envs=num_envs,
+            num_steps=num_steps,
+            device=device,
+        )
+        performance.update(
+            {
+                "build_seconds": build_seconds,
+                "allocated_vram_delta_bytes": (torch.cuda.memory_allocated(device) - before if device.startswith("cuda") else None),
+                "peak_vram_bytes": torch.cuda.max_memory_allocated(device) if device.startswith("cuda") else None,
+            }
+        )
+        return performance
     finally:
         wrapped_env.close()
 
@@ -745,9 +775,7 @@ def main() -> None:
         camera_rate = report["performance"]["policy_steps_per_second"]
         baseline_rate = baseline["policy_steps_per_second"]
         report["performance"]["baseline"] = baseline
-        report["performance"]["camera_slowdown_fraction"] = (
-            1.0 - camera_rate / baseline_rate if camera_rate is not None else None
-        )
+        report["performance"]["camera_slowdown_fraction"] = 1.0 - camera_rate / baseline_rate if camera_rate is not None else None
         (args.output_dir / "summary.json").write_text(json.dumps(report, indent=2, allow_nan=False))
     print(json.dumps(report["metrics"], indent=2))
 
