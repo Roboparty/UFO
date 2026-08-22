@@ -24,6 +24,7 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     pre_descent_reset_positions,
     sample_lie_down_reset_mask,
     sample_pre_descent_reset_mask,
+    sample_terrain_seam_reset_mask,
     sample_terrain_reset_regions,
     select_pre_descent_directions,
     stairs_transition_reset_positions,
@@ -222,14 +223,14 @@ def test_pre_descent_resets_are_excluded_from_lie_down() -> None:
 
 
 def test_stairs_reset_regions_follow_configured_distribution_bins() -> None:
-    terrain_ids = torch.full((6,), 2, dtype=torch.long)
-    samples = torch.tensor([0.0, 0.349, 0.35, 0.55, 0.70, 0.86])
+    terrain_ids = torch.full((8,), 2, dtype=torch.long)
+    samples = torch.tensor([0.0, 0.499, 0.50, 0.699, 0.70, 0.899, 0.90, 0.999])
     regions = sample_terrain_reset_regions(
         terrain_ids,
         samples,
         component_names=("flat", "slope", "stairs", "rough", "platforms"),
         slope_random_prob=0.30,
-        stairs_probabilities=(0.35, 0.20, 0.15, 0.15, 0.15),
+        stairs_probabilities=(0.50, 0.20, 0.20, 0.10, 0.00),
         rough_random_prob=0.50,
         platforms_random_prob=0.30,
     )
@@ -237,10 +238,34 @@ def test_stairs_reset_regions_follow_configured_distribution_bins() -> None:
         RESET_REGION_ID["stairs_center"],
         RESET_REGION_ID["stairs_center"],
         RESET_REGION_ID["stairs_pre_descent"],
+        RESET_REGION_ID["stairs_pre_descent"],
+        RESET_REGION_ID["stairs_pre_ascent"],
         RESET_REGION_ID["stairs_pre_ascent"],
         RESET_REGION_ID["stairs_intercycle"],
-        RESET_REGION_ID["stairs_tread"],
+        RESET_REGION_ID["stairs_intercycle"],
     ]
+    assert not torch.any(regions == RESET_REGION_ID["stairs_tread"])
+
+
+def test_stairs_are_excluded_without_disabling_other_seam_resets() -> None:
+    terrain_ids = torch.tensor([0, 1, 2, 2, 3, 4])
+    mask = sample_terrain_seam_reset_mask(
+        terrain_ids,
+        torch.zeros_like(terrain_ids, dtype=torch.float32),
+        component_names=("flat", "slope", "stairs", "rough", "platforms"),
+        probability=0.20,
+        excluded_components=("stairs",),
+    )
+    assert mask.tolist() == [True, True, False, False, True, True]
+
+    flat_only = sample_terrain_seam_reset_mask(
+        torch.zeros(2, dtype=torch.long),
+        torch.tensor([0.19, 0.20]),
+        component_names=("flat",),
+        probability=0.20,
+        excluded_components=("stairs",),
+    )
+    assert flat_only.tolist() == [True, False]
 
 
 def test_connected_grid_internal_seams_are_not_boundaries() -> None:
@@ -895,9 +920,10 @@ class TerrainNetworkRoutingTest(unittest.TestCase):
         self.assertEqual(float(terrain.stairs.pre_descent_ground_probe_clearance), 1.5)
         self.assertEqual(
             dict(terrain.reset.stairs_probabilities),
-            {"center": 0.35, "pre_descent": 0.2, "pre_ascent": 0.15, "intercycle": 0.15, "tread": 0.15},
+            {"center": 0.5, "pre_descent": 0.2, "pre_ascent": 0.2, "intercycle": 0.1, "tread": 0.0},
         )
         self.assertEqual(float(terrain.reset.seam_reset_prob), 0.20)
+        self.assertEqual(list(terrain.reset.seam_excluded_terrains), ["stairs"])
         cycle_radius = (
             2 * int(terrain.stairs.num_steps) * float(terrain.stairs.step_depth)
             + 2 * float(terrain.stairs.plateau_width)

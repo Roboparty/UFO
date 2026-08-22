@@ -26,15 +26,20 @@ terrain:
   # Actor/F/B/Critic never receive the region identifier.
   reset:
     seam_reset_prob: 0.20
+    # Preserve complete ascent/descent trajectories inside stairs tiles.
+    # Seam coverage remains enabled for every other terrain family.
+    seam_excluded_terrains: [stairs]
     seam_inset: 0.35
     slope_random_prob: 0.30
     slope_radius_range: [1.25, 3.0]
     stairs_probabilities:
-      center: 0.35
+      # 70% ascent-oriented coverage (center + pre-ascent), while retaining
+      # explicit high-plateau descent starts. Avoid unstable mid-tread resets.
+      center: 0.50
       pre_descent: 0.20
-      pre_ascent: 0.15
-      intercycle: 0.15
-      tread: 0.15
+      pre_ascent: 0.20
+      intercycle: 0.10
+      tread: 0.00
     stairs_edge_margin: 0.35
     rough_random_prob: 0.50
     platforms_random_prob: 0.30

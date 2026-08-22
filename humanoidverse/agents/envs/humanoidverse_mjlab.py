@@ -318,6 +318,27 @@ def sample_terrain_reset_regions(
     return region_ids
 
 
+def sample_terrain_seam_reset_mask(
+    terrain_ids: torch.Tensor,
+    samples: torch.Tensor,
+    *,
+    component_names: tuple[str, ...],
+    probability: float,
+    excluded_components: tuple[str, ...] = (),
+) -> torch.Tensor:
+    """Sample seam resets without diluting excluded terrain distributions."""
+    if terrain_ids.shape != samples.shape:
+        raise ValueError("terrain_ids and samples must have matching shapes")
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("seam reset probability must be in [0, 1]")
+    names = tuple(component_names)
+    mask = samples < probability
+    for name in excluded_components:
+        if name in names:
+            mask &= terrain_ids != names.index(name)
+    return mask
+
+
 def stairs_transition_reset_positions(
     patch_centers: torch.Tensor,
     directions: torch.Tensor,
@@ -1617,7 +1638,13 @@ class HumanoidVerseMjlabCore:
                 patch_centers[platforms_band], angles, radii
             )
 
-        seam_mask = torch.rand(len(env_ids), device=self.device) < float(reset_cfg.seam_reset_prob)
+        seam_mask = sample_terrain_seam_reset_mask(
+            terrain_ids,
+            torch.rand(len(env_ids), device=self.device),
+            component_names=self.terrain_component_names,
+            probability=float(reset_cfg.seam_reset_prob),
+            excluded_components=tuple(str(name) for name in reset_cfg.get("seam_excluded_terrains", ())),
+        )
         if torch.any(seam_mask):
             cols = terrain_entity.terrain_types[env_ids[seam_mask]]
             velocity_y = root_velocity[seam_mask, 1]
