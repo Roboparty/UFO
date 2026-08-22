@@ -1,0 +1,219 @@
+"""Supervised training for temporal completion of projected terrain maps."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import torch
+from torch.utils.data import DataLoader, Dataset, random_split
+
+from humanoidverse.perception.temporal_terrain import (
+    TemporalTerrainCompletion,
+    terrain_completion_loss,
+    terrain_completion_metrics,
+    warp_terrain_history_to_current,
+)
+from humanoidverse.perception.terrain_dataset import TerrainPerceptionSequenceDataset
+
+
+def _run_epoch(
+    model: TemporalTerrainCompletion,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+    history_seconds: float,
+    optimizer: torch.optim.Optimizer | None,
+    stairs_terrain_id: int,
+) -> dict[str, float]:
+    training = optimizer is not None
+    model.train(training)
+    totals: dict[str, float] = {}
+    batches = 0
+    for batch in loader:
+        partial = batch["partial_map"].to(device)
+        visible = batch["visible_mask"].to(device)
+        pelvis = batch["pelvis_pos_w"].to(device)
+        yaw = batch["heading_yaw_w"].to(device)
+        timestamps = batch["timestamp_s"].to(device)
+        proprio = batch["proprio"].to(device)
+        target = batch["gt_terrain_actor"].to(device)
+        history = warp_terrain_history_to_current(
+            partial,
+            visible,
+            pelvis,
+            yaw,
+            timestamps_s=timestamps,
+            history_seconds=history_seconds,
+            interpolation="bilinear",
+        )
+        with torch.set_grad_enabled(training):
+            output = model(history, proprio=proprio)
+            loss = terrain_completion_loss(output.predicted_clearance, target)
+            if training:
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                optimizer.step()
+        metrics = terrain_completion_metrics(
+            output.completed_clearance.detach(),
+            target,
+            current_visible=output.current_visible,
+        )
+        values = {"loss": float(loss.detach().item())}
+        values.update({name: float(value.item()) for name, value in metrics.items()})
+        stairs = batch["terrain_type"].to(device) == stairs_terrain_id
+        if torch.any(stairs):
+            stair_metrics = terrain_completion_metrics(
+                output.completed_clearance.detach()[stairs],
+                target[stairs],
+                current_visible=output.current_visible[stairs],
+            )
+            values.update({f"stairs_{name}": float(value.item()) for name, value in stair_metrics.items()})
+        for name, value in values.items():
+            totals[name] = totals.get(name, 0.0) + value
+        batches += 1
+    if batches == 0:
+        raise ValueError("terrain perception data loader contains no batches")
+    return {name: value / batches for name, value in totals.items()}
+
+
+def train_terrain_perception(
+    *,
+    dataset_dir: Path,
+    output_dir: Path,
+    validation_dataset_dir: Path | None,
+    sequence_steps: int,
+    history_seconds: float,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    hidden_channels: int,
+    device: str,
+    seed: int,
+    stairs_terrain_id: int = 2,
+) -> dict[str, object]:
+    torch.manual_seed(seed)
+    full_dataset = TerrainPerceptionSequenceDataset(
+        dataset_dir,
+        sequence_steps=sequence_steps,
+        history_seconds=history_seconds,
+    )
+    if validation_dataset_dir is not None:
+        train_dataset: Dataset = full_dataset
+        validation_dataset: Dataset = TerrainPerceptionSequenceDataset(
+            validation_dataset_dir,
+            sequence_steps=sequence_steps,
+            history_seconds=history_seconds,
+        )
+        validation_source = "independent_dataset"
+    else:
+        if len(full_dataset) < 10:
+            raise ValueError("at least 10 sequences are required for an internal train/validation split")
+        validation_size = max(1, round(len(full_dataset) * 0.1))
+        train_dataset, validation_dataset = random_split(
+            full_dataset,
+            [len(full_dataset) - validation_size, validation_size],
+            generator=torch.Generator().manual_seed(seed),
+        )
+        validation_source = "deterministic_10_percent_sample_split"
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
+    torch_device = torch.device(device)
+    model = TemporalTerrainCompletion(
+        hidden_channels=hidden_channels,
+        proprio_dim=full_dataset.proprio_dim,
+    ).to(torch_device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    history: list[dict[str, object]] = []
+    best_validation = float("inf")
+    for epoch in range(1, epochs + 1):
+        train_metrics = _run_epoch(
+            model,
+            train_loader,
+            device=torch_device,
+            history_seconds=history_seconds,
+            optimizer=optimizer,
+            stairs_terrain_id=stairs_terrain_id,
+        )
+        with torch.no_grad():
+            validation_metrics = _run_epoch(
+                model,
+                validation_loader,
+                device=torch_device,
+                history_seconds=history_seconds,
+                optimizer=None,
+                stairs_terrain_id=stairs_terrain_id,
+            )
+        record = {"epoch": epoch, "train": train_metrics, "validation": validation_metrics}
+        history.append(record)
+        print(json.dumps(record, sort_keys=True), flush=True)
+        checkpoint = {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch,
+            "config": {
+                "hidden_channels": hidden_channels,
+                "proprio_dim": full_dataset.proprio_dim,
+                "sequence_steps": sequence_steps,
+                "history_seconds": history_seconds,
+            },
+        }
+        torch.save(checkpoint, output_dir / "latest.pt")
+        if validation_metrics["loss"] < best_validation:
+            best_validation = validation_metrics["loss"]
+            torch.save(checkpoint, output_dir / "best.pt")
+
+    summary = {
+        "dataset_dir": str(dataset_dir.resolve()),
+        "validation_dataset_dir": (str(validation_dataset_dir.resolve()) if validation_dataset_dir is not None else None),
+        "validation_source": validation_source,
+        "train_sequences": len(train_dataset),
+        "validation_sequences": len(validation_dataset),
+        "history": history,
+        "best_validation_loss": best_validation,
+    }
+    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return summary
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset-dir", type=Path, required=True)
+    parser.add_argument("--validation-dataset-dir", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--sequence-steps", type=int, default=31)
+    parser.add_argument("--history-seconds", type=float, default=0.6)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--learning-rate", type=float, default=3.0e-4)
+    parser.add_argument("--hidden-channels", type=int, default=16)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--stairs-terrain-id", type=int, default=2)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    train_terrain_perception(
+        dataset_dir=args.dataset_dir,
+        output_dir=args.output_dir,
+        validation_dataset_dir=args.validation_dataset_dir,
+        sequence_steps=args.sequence_steps,
+        history_seconds=args.history_seconds,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        hidden_channels=args.hidden_channels,
+        device=args.device,
+        seed=args.seed,
+        stairs_terrain_id=args.stairs_terrain_id,
+    )
+
+
+if __name__ == "__main__":
+    main()
