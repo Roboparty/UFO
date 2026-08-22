@@ -139,7 +139,11 @@ class DepthCameraConfig:
     vertical_fov_deg: float = 58.0
     intrinsic_matrix: tuple[float, ...] | None = None
     mount_body: str = "torso_link"
-    mount_pos_torso: tuple[float, float, float] = (0.10, 0.0, 0.40)
+    mount_pos_torso: tuple[float, float, float] = (
+        0.0487988662332928,
+        0.01,
+        0.4378029937970051,
+    )
     optical_quat_torso_xyzw: tuple[float, float, float, float] | None = None
     down_pitch_deg: float = 48.0
     min_range: float = 0.10

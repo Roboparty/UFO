@@ -95,6 +95,34 @@ def terrain_names_for_envs(core) -> list[str]:
     return [names[index] if 0 <= index < len(names) else f"terrain_{index}" for index in ids]
 
 
+def validate_geometry_sample(
+    *,
+    frame,
+    predicted: torch.Tensor,
+    visible: torch.Tensor,
+    gt: torch.Tensor,
+    root_state: torch.Tensor,
+) -> None:
+    """Fail fast on depth, pose, mask, and output contract violations."""
+    if predicted.shape != gt.shape or predicted.shape[-1] != 273:
+        raise RuntimeError(f"camera and GT terrain shapes differ: predicted={predicted.shape}, gt={gt.shape}")
+    if visible.shape != predicted.shape or visible.dtype != torch.bool:
+        raise RuntimeError("visible mask must be bool and match C_geo")
+    if not torch.equal(visible, torch.isfinite(predicted)):
+        raise RuntimeError("visible mask must equal isfinite(C_geo)")
+    if not torch.equal(frame.valid, torch.isfinite(frame.depth_z)):
+        raise RuntimeError("valid depth mask must equal isfinite(depth_z)")
+    if torch.any(frame.depth_z[frame.valid] <= 0.0):
+        raise RuntimeError("valid optical-Z depth must be positive")
+    for name, value in (
+        ("camera_pos_w", frame.camera_pos_w),
+        ("camera_optical_quat_w", frame.camera_optical_quat_w),
+        ("root_state", root_state),
+    ):
+        if not torch.isfinite(value).all():
+            raise RuntimeError(f"{name} contains non-finite values")
+
+
 def stair_edge_mask(gt: torch.Tensor, *, threshold: float = 0.05) -> torch.Tensor:
     """Mark GT cells adjacent to a terrain discontinuity."""
     grid = gt.reshape(-1, 21, 13)
@@ -355,11 +383,15 @@ def evaluate_depth_terrain(
     region_buffers: dict[str, list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = defaultdict(list)
     snapshots_saved: set[str] = set()
     elapsed_step_seconds = 0.0
+    partial_reset_exercised = False
 
     try:
         wrapped_env.reset(to_numpy=False)
         zero_actions = torch.zeros((num_envs, core.num_dof), device=device)
         for step in range(num_steps):
+            if num_envs > 1 and num_steps > 1 and step == num_steps // 2:
+                core.reset_idx(torch.zeros(1, device=device, dtype=torch.long))
+                partial_reset_exercised = True
             synchronize_depth_and_gt(core, camera.name)
             frame = depth_frame_from_raycast(core.mjlab_env.scene.sensors[camera.name], camera)
             gt = core._terrain_actor_obs().clone()
@@ -375,6 +407,13 @@ def evaluate_depth_terrain(
                 frame.camera_optical_quat_w,
                 core.robot_root_states[:, :3],
                 heading,
+            )
+            validate_geometry_sample(
+                frame=frame,
+                predicted=predicted,
+                visible=visible,
+                gt=gt,
+                root_state=core.robot_root_states,
             )
             names = terrain_names_for_envs(core)
             accumulators["overall"].update(predicted, visible, gt)
@@ -519,6 +558,7 @@ def evaluate_depth_terrain(
                 "peak_vram_bytes": torch.cuda.max_memory_allocated(device) if device.startswith("cuda") else None,
             },
             "snapshots": sorted(snapshots_saved),
+            "partial_reset_exercised": partial_reset_exercised,
         }
         (output_dir / "summary.json").write_text(json.dumps(report, indent=2, allow_nan=False))
         with (output_dir / "metrics.csv").open("w", newline="") as file:
@@ -609,7 +649,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vertical-fov", type=float, default=58.0)
     parser.add_argument("--intrinsic-matrix", type=float, nargs=9, default=None)
     parser.add_argument("--mount-body", default="torso_link")
-    parser.add_argument("--mount-pos", type=float, nargs=3, default=(0.10, 0.0, 0.40))
+    parser.add_argument(
+        "--mount-pos",
+        type=float,
+        nargs=3,
+        default=(0.0487988662332928, 0.01, 0.4378029937970051),
+    )
     parser.add_argument("--down-pitch", type=float, default=48.0)
     parser.add_argument("--min-range", type=float, default=0.10)
     parser.add_argument("--max-range", type=float, default=2.50)

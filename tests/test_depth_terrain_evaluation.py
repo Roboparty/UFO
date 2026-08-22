@@ -2,7 +2,12 @@ import unittest
 
 import torch
 
-from humanoidverse.depth_terrain_evaluation import MetricAccumulator, region_metrics, stair_edge_mask
+from humanoidverse.depth_terrain_evaluation import (
+    MetricAccumulator,
+    region_metrics,
+    stair_edge_mask,
+    validate_geometry_sample,
+)
 
 
 class DepthTerrainEvaluationTest(unittest.TestCase):
@@ -39,6 +44,26 @@ class DepthTerrainEvaluationTest(unittest.TestCase):
         for values in metrics.values():
             self.assertEqual(values["visible_fraction"], 1.0)
             self.assertEqual(values["mae_m"], 0.0)
+
+    def test_geometry_contract_rejects_mask_mismatch(self):
+        class Frame:
+            valid = torch.ones((1, 1, 1), dtype=torch.bool)
+            depth_z = torch.ones((1, 1, 1))
+            camera_pos_w = torch.zeros((1, 3))
+            camera_optical_quat_w = torch.tensor([[0.0, 0.0, 0.0, 1.0]])
+
+        predicted = torch.ones((1, 273))
+        gt = torch.ones((1, 273))
+        visible = torch.ones((1, 273), dtype=torch.bool)
+        visible[0, 0] = False
+        with self.assertRaises(RuntimeError):
+            validate_geometry_sample(
+                frame=Frame(),
+                predicted=predicted,
+                visible=visible,
+                gt=gt,
+                root_state=torch.zeros((1, 13)),
+            )
 
 
 if __name__ == "__main__":
