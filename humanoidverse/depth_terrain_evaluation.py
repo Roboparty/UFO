@@ -95,6 +95,22 @@ def terrain_names_for_envs(core) -> list[str]:
     return [names[index] if 0 <= index < len(names) else f"terrain_{index}" for index in ids]
 
 
+def elevated_platform_probe_xy(core) -> tuple[float, float]:
+    """Return a deterministic point inside the first raised platforms band."""
+    if core._terrain_patch_size is None or "platforms" not in core.terrain_component_names:
+        raise RuntimeError("elevated-platform probe requires the connected platforms terrain")
+    row = core._terrain_grid_rows // 2
+    column = core.terrain_component_names.index("platforms")
+    patch_x, patch_y = (float(value) for value in core._terrain_patch_size.tolist())
+    center_x = (row + 0.5 - core._terrain_grid_rows / 2.0) * patch_x
+    center_y = (column + 0.5 - core._terrain_grid_cols / 2.0) * patch_y
+    platforms_cfg = core.config.terrain.platforms
+    raised_band_center = 0.5 * (
+        float(platforms_cfg.center_width) + float(platforms_cfg.band_width)
+    )
+    return center_x + raised_band_center, center_y
+
+
 def validate_geometry_sample(
     *,
     frame,
@@ -282,6 +298,7 @@ def evaluate_explicit_probe(
     yaw: float,
     output_path: Path,
     label: str,
+    require_elevated_ground: bool = False,
 ) -> dict[str, float | None]:
     """Place env zero at a diagnostic XY and compare camera and GT rays."""
     env_ids = torch.zeros(1, device=core.device, dtype=torch.long)
@@ -328,11 +345,21 @@ def evaluate_explicit_probe(
     )
     valid = visible[0] & torch.isfinite(gt[0])
     error = (predicted[0] - gt[0])[valid]
+    center_clearance = float(gt[0, DepthTerrainAdapter.CENTER_INDEX].item())
+    root_world_z = float(core.robot_root_states[0, 2].item())
+    ground_height = root_world_z - center_clearance
+    if require_elevated_ground and ground_height <= 0.01:
+        raise RuntimeError(
+            f"{label} did not land on elevated terrain: ground_height={ground_height:.6f} m"
+        )
     return {
         "visible_fraction": float(visible[0].float().mean().item()),
         "gt_valid_fraction": float(torch.isfinite(gt[0]).float().mean().item()),
         "mae_m": float(error.abs().mean().item()) if error.numel() else None,
         "rmse_m": float(error.square().mean().sqrt().item()) if error.numel() else None,
+        "root_world_z_m": root_world_z,
+        "gt_center_clearance_m": center_clearance,
+        "ground_height_m": ground_height,
     }
 
 
@@ -496,6 +523,18 @@ def evaluate_depth_terrain(
                     label="internal connected-tile seam",
                 )
                 snapshots_saved.add("tile_seam")
+            if "platforms" in core.terrain_component_names:
+                explicit_probes["elevated_flat"] = evaluate_explicit_probe(
+                    core,
+                    adapter,
+                    camera,
+                    xy=elevated_platform_probe_xy(core),
+                    yaw=0.0,
+                    output_path=output_dir / "snapshot_elevated_flat.png",
+                    label="known elevated flat platform band",
+                    require_elevated_ground=True,
+                )
+                snapshots_saved.add("elevated_flat")
 
         overall_cells = accumulators["overall"].per_cell()
         save_heatmaps(output_dir / "terrain_camera_heatmaps.png", overall_cells)

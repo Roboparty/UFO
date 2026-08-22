@@ -1,9 +1,11 @@
 import unittest
+from types import SimpleNamespace
 
 import torch
 
 from humanoidverse.depth_terrain_evaluation import (
     MetricAccumulator,
+    elevated_platform_probe_xy,
     region_metrics,
     stair_edge_mask,
     validate_geometry_sample,
@@ -11,6 +13,24 @@ from humanoidverse.depth_terrain_evaluation import (
 
 
 class DepthTerrainEvaluationTest(unittest.TestCase):
+    def test_elevated_platform_probe_is_inside_first_raised_band(self):
+        core = SimpleNamespace(
+            _terrain_patch_size=torch.tensor([14.0, 14.0]),
+            _terrain_grid_rows=10,
+            _terrain_grid_cols=5,
+            terrain_component_names=("flat", "slope", "stairs", "rough", "platforms"),
+            config=SimpleNamespace(
+                terrain=SimpleNamespace(
+                    platforms=SimpleNamespace(center_width=1.5, band_width=0.8)
+                )
+            ),
+        )
+
+        x, y = elevated_platform_probe_xy(core)
+
+        self.assertAlmostEqual(x, 8.15)
+        self.assertAlmostEqual(y, 28.0)
+
     def test_stair_edge_marks_both_sides_of_discontinuity(self):
         gt = torch.ones((1, 21, 13))
         gt[:, 10:, :] = 0.82
