@@ -154,6 +154,56 @@ class DepthTerrainAdapterTest(unittest.TestCase):
         )
         torch.testing.assert_close(clearance[visible], torch.ones_like(clearance[visible]))
 
+    def test_skew_intrinsics_use_full_inverse_matrix(self):
+        K = torch.tensor([[13.0, 2.5, 7.3], [0.0, 8.0, 4.2], [0.0, 0.0, 1.0]], dtype=torch.float64)
+        adapter = DepthTerrainAdapter(K, 11, 17)
+        pixel = torch.tensor([7.0, 4.0, 1.0], dtype=torch.float64)
+        expected = torch.linalg.solve(K, pixel)
+        expected = expected / expected[2]
+        torch.testing.assert_close(adapter.pixel_ray_lut[4, 7], expected)
+        naive_x = (pixel[0] - K[0, 2]) / K[0, 0]
+        self.assertNotAlmostEqual(float(expected[0]), float(naive_x), places=6)
+
+    def test_surface_above_pelvis_clamps_clearance_to_zero(self):
+        adapter = DepthTerrainAdapter(torch.eye(3), 1, 1).double()
+        clearance, visible = adapter(
+            torch.tensor([[[0.5]]], dtype=torch.float64),
+            torch.tensor([[0.0, 0.0, 2.0]], dtype=torch.float64),
+            self.camera_down.unsqueeze(0),
+            torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float64),
+            self.identity.unsqueeze(0),
+        )
+        self.assertTrue(visible[0, 58])
+        self.assertEqual(float(clearance[0, 58]), 0.0)
+
+    def test_invalid_live_poses_fail_fast(self):
+        depth = torch.ones((1, self.height, self.width), dtype=torch.float64)
+        valid_position = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float64)
+        valid_quaternion = self.identity.unsqueeze(0)
+        cases = {
+            "zero optical quaternion": (
+                valid_position,
+                torch.zeros((1, 4), dtype=torch.float64),
+                valid_position,
+                valid_quaternion,
+            ),
+            "non-finite heading quaternion": (
+                valid_position,
+                valid_quaternion,
+                valid_position,
+                torch.tensor([[0.0, 0.0, float("nan"), 1.0]], dtype=torch.float64),
+            ),
+            "non-finite camera position": (
+                torch.tensor([[0.0, float("inf"), 1.0]], dtype=torch.float64),
+                valid_quaternion,
+                valid_position,
+                valid_quaternion,
+            ),
+        }
+        for name, poses in cases.items():
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.adapter(depth, *poses)
+
     def test_out_of_grid_is_rejected_and_invisible_is_nan(self):
         adapter = DepthTerrainAdapter(torch.eye(3), 1, 1).double()
         clearance, visible = adapter(
