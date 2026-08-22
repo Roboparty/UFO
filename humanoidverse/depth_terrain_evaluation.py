@@ -8,6 +8,7 @@ import json
 import os
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -287,16 +288,22 @@ def benchmark_environment_steps(
     num_envs: int,
     num_steps: int,
     device: str,
-) -> dict[str, float | int]:
+    after_step: Callable[[], None] | None = None,
+    timed_scope: str = "environment_step",
+) -> dict[str, float | int | str]:
     """Measure environment steps with identical warmup and CUDA synchronization."""
     actions = torch.zeros((num_envs, core.num_dof), device=device)
     for _ in range(min(2, num_steps)):
         wrapped_env.step(actions, to_numpy=False)
+        if after_step is not None:
+            after_step()
     if device.startswith("cuda"):
         torch.cuda.synchronize(device)
     start = time.perf_counter()
     for _ in range(num_steps):
         wrapped_env.step(actions, to_numpy=False)
+        if after_step is not None:
+            after_step()
     if device.startswith("cuda"):
         torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - start
@@ -306,6 +313,7 @@ def benchmark_environment_steps(
         "elapsed_step_seconds": elapsed,
         "policy_steps_per_second": num_steps / elapsed,
         "environment_transitions_per_second": num_envs * num_steps / elapsed,
+        "timed_scope": timed_scope,
     }
 
 
@@ -625,13 +633,48 @@ def evaluate_depth_terrain(
             visible = torch.cat([batch[1] for batch in batches], dim=0)
             gt = torch.cat([batch[2] for batch in batches], dim=0)
             region_summary[name] = region_metrics(predicted, visible, gt)
+        latest_pipeline: dict[str, Any] = {}
+
+        def run_camera_pipeline() -> None:
+            frame = depth_frame_from_raycast(
+                core.mjlab_env.scene.sensors[camera.name],
+                camera,
+            )
+            heading = calc_heading_quat(core.base_quat, w_last=True)
+            predicted, visible = adapter(
+                frame.depth_z,
+                frame.camera_pos_w,
+                frame.camera_optical_quat_w,
+                core.robot_root_states[:, :3],
+                heading,
+            )
+            latest_pipeline.update(
+                frame=frame,
+                predicted=predicted,
+                visible=visible,
+                heading=heading,
+            )
+
         performance = benchmark_environment_steps(
             wrapped_env,
             core,
             num_envs=num_envs,
             num_steps=num_steps,
             device=device,
+            after_step=run_camera_pipeline,
+            timed_scope=("environment_step+range_to_optical_z+camera_pose+pelvis_heading+depth_terrain_adapter"),
         )
+        if not latest_pipeline:
+            raise RuntimeError("full camera pipeline benchmark produced no sample")
+        benchmark_frame = latest_pipeline["frame"]
+        benchmark_predicted = latest_pipeline["predicted"]
+        benchmark_visible = latest_pipeline["visible"]
+        if not torch.equal(benchmark_frame.valid, torch.isfinite(benchmark_frame.depth_z)):
+            raise RuntimeError("benchmark depth valid mask does not match finite optical-Z")
+        if not torch.equal(benchmark_visible, torch.isfinite(benchmark_predicted)):
+            raise RuntimeError("benchmark visible mask does not match finite C_geo")
+        if not torch.isfinite(latest_pipeline["heading"]).all():
+            raise RuntimeError("benchmark pelvis heading contains non-finite values")
         performance.update(
             {
                 "build_seconds": build_seconds,
@@ -711,7 +754,7 @@ def benchmark_baseline_environment(
     terrain: str,
     device: str,
     seed: int,
-) -> dict[str, float | int | None]:
+) -> dict[str, float | int | str | None]:
     """Benchmark the unchanged environment without the side-channel camera."""
     env_config, _ = load_mjlab_env_cfg(
         model_folder,
@@ -744,6 +787,7 @@ def benchmark_baseline_environment(
             num_envs=num_envs,
             num_steps=num_steps,
             device=device,
+            timed_scope="environment_step_without_camera",
         )
         performance.update(
             {

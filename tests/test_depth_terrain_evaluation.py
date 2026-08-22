@@ -39,6 +39,7 @@ class DepthTerrainEvaluationTest(unittest.TestCase):
         class WrappedEnv:
             def __init__(self):
                 self.calls = 0
+                self.callback_calls = 0
 
             def step(self, actions, *, to_numpy):
                 self.calls += 1
@@ -46,18 +47,26 @@ class DepthTerrainEvaluationTest(unittest.TestCase):
                 self.last_to_numpy = to_numpy
 
         wrapped = WrappedEnv()
+
+        def after_step():
+            wrapped.callback_calls += 1
+
         result = benchmark_environment_steps(
             wrapped,
             SimpleNamespace(num_dof=29),
             num_envs=4,
             num_steps=3,
             device="cpu",
+            after_step=after_step,
+            timed_scope="test_full_pipeline",
         )
 
         self.assertEqual(wrapped.calls, 5)
+        self.assertEqual(wrapped.callback_calls, 5)
         self.assertEqual(tuple(wrapped.last_actions.shape), (4, 29))
         self.assertFalse(wrapped.last_to_numpy)
         self.assertEqual(result["num_steps"], 3)
+        self.assertEqual(result["timed_scope"], "test_full_pipeline")
         self.assertGreater(result["policy_steps_per_second"], 0.0)
 
     def test_elevated_platform_probe_is_inside_first_raised_band(self):
