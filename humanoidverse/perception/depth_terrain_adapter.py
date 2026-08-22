@@ -1,0 +1,156 @@
+"""Project optical-axis depth into the PBFM robot-centric terrain grid."""
+
+from __future__ import annotations
+
+import torch
+from torch import nn
+
+
+class DepthTerrainAdapter(nn.Module):
+    """Convert calibrated depth images to pelvis-to-terrain clearances.
+
+    Camera and pelvis quaternions use the repository's ``xyzw`` convention and
+    map vectors from their local frame to the world frame. Camera coordinates
+    follow the optical convention: +x right, +y down, +z forward. ``depth_z``
+    is distance along that optical +z axis, in meters.
+    """
+
+    GRID_SHAPE = (21, 13)
+    GRID_DIMENSION = 273
+    CENTER_INDEX = 58
+
+    def __init__(
+        self,
+        intrinsic_matrix: torch.Tensor,
+        image_height: int,
+        image_width: int,
+        *,
+        x_min: float = -0.4,
+        x_max: float = 1.6,
+        y_min: float = -0.6,
+        y_max: float = 0.6,
+        resolution: float = 0.1,
+    ) -> None:
+        super().__init__()
+        intrinsic_matrix = torch.as_tensor(intrinsic_matrix, dtype=torch.float32)
+        if intrinsic_matrix.shape != (3, 3):
+            raise ValueError(f"intrinsic_matrix must have shape [3, 3], got {tuple(intrinsic_matrix.shape)}")
+        if image_height <= 0 or image_width <= 0:
+            raise ValueError("image dimensions must be positive")
+        if not torch.isfinite(intrinsic_matrix).all():
+            raise ValueError("intrinsic_matrix must contain only finite values")
+
+        fx = intrinsic_matrix[0, 0]
+        fy = intrinsic_matrix[1, 1]
+        if fx <= 0 or fy <= 0:
+            raise ValueError("intrinsic_matrix focal lengths must be positive")
+
+        nx = int(round((x_max - x_min) / resolution)) + 1
+        ny = int(round((y_max - y_min) / resolution)) + 1
+        if (nx, ny) != self.GRID_SHAPE:
+            raise ValueError(f"PBFM grid must have shape {self.GRID_SHAPE}, got {(nx, ny)}")
+
+        rows, columns = torch.meshgrid(
+            torch.arange(image_height, dtype=torch.float32),
+            torch.arange(image_width, dtype=torch.float32),
+            indexing="ij",
+        )
+        rays = torch.stack(
+            (
+                (columns - intrinsic_matrix[0, 2]) / fx,
+                (rows - intrinsic_matrix[1, 2]) / fy,
+                torch.ones_like(columns),
+            ),
+            dim=-1,
+        )
+        self.register_buffer("intrinsic_matrix", intrinsic_matrix.clone())
+        self.register_buffer("pixel_ray_lut", rays)
+        self.image_height = image_height
+        self.image_width = image_width
+        self.x_min = float(x_min)
+        self.x_max = float(x_max)
+        self.y_min = float(y_min)
+        self.y_max = float(y_max)
+        self.resolution = float(resolution)
+        self.nx = nx
+        self.ny = ny
+
+    @staticmethod
+    def _rotate_xyzw(quaternion: torch.Tensor, vectors: torch.Tensor) -> torch.Tensor:
+        quaternion = quaternion / torch.linalg.vector_norm(quaternion, dim=-1, keepdim=True).clamp_min(1e-12)
+        xyz = quaternion[..., :3]
+        w = quaternion[..., 3:4]
+        while xyz.ndim < vectors.ndim:
+            xyz = xyz.unsqueeze(-2)
+            w = w.unsqueeze(-2)
+        cross = 2.0 * torch.cross(xyz.expand_as(vectors), vectors, dim=-1)
+        return vectors + w * cross + torch.cross(xyz.expand_as(vectors), cross, dim=-1)
+
+    @classmethod
+    def _rotate_inverse_xyzw(cls, quaternion: torch.Tensor, vectors: torch.Tensor) -> torch.Tensor:
+        conjugate = torch.cat((-quaternion[..., :3], quaternion[..., 3:4]), dim=-1)
+        return cls._rotate_xyzw(conjugate, vectors)
+
+    def forward(
+        self,
+        depth_z: torch.Tensor,
+        camera_pos_w: torch.Tensor,
+        camera_quat_w: torch.Tensor,
+        pelvis_pos_w: torch.Tensor,
+        pelvis_heading_quat_w: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(clearance, visible)`` tensors with shape ``[B, 273]``.
+
+        Invisible cells contain ``NaN`` clearance and ``False`` in the mask.
+        If several depth pixels enter one cell, the highest surface wins.
+        """
+        if depth_z.ndim != 3 or tuple(depth_z.shape[1:]) != (self.image_height, self.image_width):
+            raise ValueError(f"depth_z must have shape [B, {self.image_height}, {self.image_width}], got {tuple(depth_z.shape)}")
+        batch_size = depth_z.shape[0]
+        expected_shapes = {
+            "camera_pos_w": (batch_size, 3),
+            "camera_quat_w": (batch_size, 4),
+            "pelvis_pos_w": (batch_size, 3),
+            "pelvis_heading_quat_w": (batch_size, 4),
+        }
+        inputs = {
+            "camera_pos_w": camera_pos_w,
+            "camera_quat_w": camera_quat_w,
+            "pelvis_pos_w": pelvis_pos_w,
+            "pelvis_heading_quat_w": pelvis_heading_quat_w,
+        }
+        for name, expected in expected_shapes.items():
+            if tuple(inputs[name].shape) != expected:
+                raise ValueError(f"{name} must have shape {expected}, got {tuple(inputs[name].shape)}")
+
+        rays = self.pixel_ray_lut.to(device=depth_z.device, dtype=depth_z.dtype)
+        points_camera = rays.unsqueeze(0) * depth_z.unsqueeze(-1)
+        flat_camera = points_camera.reshape(batch_size, -1, 3)
+        points_world = self._rotate_xyzw(camera_quat_w, flat_camera) + camera_pos_w[:, None, :]
+        points_heading = self._rotate_inverse_xyzw(pelvis_heading_quat_w, points_world - pelvis_pos_w[:, None, :])
+
+        ix = torch.floor((points_heading[..., 0] - self.x_min) / self.resolution + 0.5).long()
+        iy = torch.floor((points_heading[..., 1] - self.y_min) / self.resolution + 0.5).long()
+        valid = (
+            torch.isfinite(depth_z.reshape(batch_size, -1))
+            & (depth_z.reshape(batch_size, -1) > 0.0)
+            & torch.isfinite(points_heading).all(dim=-1)
+            & (ix >= 0)
+            & (ix < self.nx)
+            & (iy >= 0)
+            & (iy < self.ny)
+        )
+        indices = (ix * self.ny + iy).clamp(0, self.GRID_DIMENSION - 1)
+        clearances = pelvis_pos_w[:, None, 2] - points_world[..., 2]
+        clearances = torch.where(valid, clearances, torch.full_like(clearances, float("inf")))
+
+        projected = torch.full(
+            (batch_size, self.GRID_DIMENSION),
+            float("inf"),
+            device=depth_z.device,
+            dtype=depth_z.dtype,
+        )
+        projected.scatter_reduce_(1, indices, clearances, reduce="amin", include_self=True)
+        visible = torch.isfinite(projected)
+        projected = torch.where(visible, projected, torch.full_like(projected, float("nan")))
+        return projected, visible
