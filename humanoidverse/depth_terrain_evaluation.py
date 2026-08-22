@@ -137,6 +137,55 @@ def validate_geometry_sample(
             raise RuntimeError(f"{name} contains non-finite values")
 
 
+def camera_frame_diagnostics(
+    frame,
+    camera: DepthCameraConfig,
+    *,
+    env_index: int = 0,
+) -> dict[str, Any]:
+    """Return directly auditable optical-axis and range-to-Z diagnostics."""
+    intrinsic = camera.intrinsics().to(
+        device=frame.depth_z.device,
+        dtype=frame.depth_z.dtype,
+    )
+    principal_x = float(intrinsic[0, 2].item())
+    principal_y = float(intrinsic[1, 2].item())
+    column = min(max(int(round(principal_x)), 0), camera.width - 1)
+    row = min(max(int(round(principal_y)), 0), camera.height - 1)
+    pixel = torch.tensor(
+        [float(column), float(row), 1.0],
+        device=frame.depth_z.device,
+        dtype=frame.depth_z.dtype,
+    )
+    optical_ray = torch.linalg.solve(intrinsic, pixel)
+    optical_unit = optical_ray / torch.linalg.vector_norm(optical_ray)
+    torso_from_optical = camera.torso_from_optical().to(
+        device=frame.depth_z.device,
+        dtype=frame.depth_z.dtype,
+    )
+    center_ray_torso = torso_from_optical @ optical_unit
+    optical_axis_torso = torso_from_optical[:, 2]
+    if optical_axis_torso[0] <= 0.0 or optical_axis_torso[2] >= 0.0:
+        raise RuntimeError("camera optical axis must point forward and downward in the torso frame")
+
+    depth = frame.depth_z[env_index, row, column]
+    ray_range = frame.range_image[env_index, row, column]
+    valid = bool(torch.isfinite(depth).item())
+    expected_depth = ray_range * optical_unit[2]
+    residual = (depth - expected_depth).abs()
+    return {
+        "principal_point_px": [principal_x, principal_y],
+        "sample_pixel_row_col": [row, column],
+        "sample_optical_unit_ray": optical_unit.detach().cpu().tolist(),
+        "sample_ray_torso": center_ray_torso.detach().cpu().tolist(),
+        "optical_axis_torso": optical_axis_torso.detach().cpu().tolist(),
+        "sample_valid": valid,
+        "sample_range_m": float(ray_range.item()) if valid else None,
+        "sample_optical_z_m": float(depth.item()) if valid else None,
+        "range_to_optical_z_residual_m": float(residual.item()) if valid else None,
+    }
+
+
 def stair_edge_mask(gt: torch.Tensor, *, threshold: float = 0.05) -> torch.Tensor:
     """Mark GT cells adjacent to a terrain discontinuity."""
     grid = gt.reshape(-1, 21, 13)
@@ -377,6 +426,7 @@ def evaluate_explicit_probe(
         "root_world_z_m": root_world_z,
         "gt_center_clearance_m": center_clearance,
         "ground_height_m": ground_height,
+        "camera_diagnostics": camera_frame_diagnostics(frame, camera),
     }
 
 
@@ -425,6 +475,7 @@ def evaluate_depth_terrain(
     region_buffers: dict[str, list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = defaultdict(list)
     snapshots_saved: set[str] = set()
     partial_reset_exercised = False
+    camera_diagnostics: dict[str, Any] | None = None
 
     try:
         wrapped_env.reset(to_numpy=False)
@@ -456,6 +507,8 @@ def evaluate_depth_terrain(
                 gt=gt,
                 root_state=core.robot_root_states,
             )
+            if camera_diagnostics is None:
+                camera_diagnostics = camera_frame_diagnostics(frame, camera)
             names = terrain_names_for_envs(core)
             accumulators["overall"].update(predicted, visible, gt)
             for name in sorted(set(names)):
@@ -596,6 +649,7 @@ def evaluate_depth_terrain(
             "seed": seed,
             "camera": asdict(camera),
             "intrinsic_matrix": camera.intrinsics().tolist(),
+            "camera_diagnostics": camera_diagnostics,
             "metrics": summaries,
             "regions": region_summary,
             "stairs": {

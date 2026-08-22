@@ -6,14 +6,35 @@ import torch
 from humanoidverse.depth_terrain_evaluation import (
     MetricAccumulator,
     benchmark_environment_steps,
+    camera_frame_diagnostics,
     elevated_platform_probe_xy,
     region_metrics,
     stair_edge_mask,
     validate_geometry_sample,
 )
+from humanoidverse.perception.depth_camera import DepthCameraConfig
 
 
 class DepthTerrainEvaluationTest(unittest.TestCase):
+    def test_camera_diagnostics_prove_downward_axis_and_range_to_optical_z(self):
+        camera = DepthCameraConfig(width=3, height=3, down_pitch_deg=48.0)
+        intrinsic = camera.intrinsics().float()
+        pixel = torch.tensor([1.0, 1.0, 1.0])
+        optical_unit = torch.linalg.solve(intrinsic, pixel)
+        optical_unit /= torch.linalg.vector_norm(optical_unit)
+        ray_range = torch.tensor([[[2.0] * 3] * 3])
+        frame = SimpleNamespace(
+            range_image=ray_range,
+            depth_z=ray_range * optical_unit[2],
+        )
+
+        diagnostics = camera_frame_diagnostics(frame, camera)
+
+        self.assertTrue(diagnostics["sample_valid"])
+        self.assertGreater(diagnostics["optical_axis_torso"][0], 0.0)
+        self.assertLess(diagnostics["optical_axis_torso"][2], 0.0)
+        self.assertAlmostEqual(diagnostics["range_to_optical_z_residual_m"], 0.0)
+
     def test_benchmark_uses_two_warmup_steps_and_requested_timed_steps(self):
         class WrappedEnv:
             def __init__(self):
