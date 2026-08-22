@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Sampler, Subset, random_split
 
 from humanoidverse.perception.temporal_terrain import (
     TemporalTerrainCompletion,
@@ -16,6 +16,41 @@ from humanoidverse.perception.temporal_terrain import (
     warp_terrain_history_to_current,
 )
 from humanoidverse.perception.terrain_dataset import TerrainPerceptionSequenceDataset
+
+
+class ChunkGroupedShuffleSampler(Sampler[int]):
+    """Shuffle samples without repeatedly reloading large on-disk chunks."""
+
+    def __init__(self, dataset: Dataset, *, seed: int) -> None:
+        self.dataset = dataset
+        self.seed = seed
+        self.epoch = 0
+        if isinstance(dataset, Subset):
+            base = dataset.dataset
+            if not isinstance(base, TerrainPerceptionSequenceDataset):
+                raise TypeError("subset must wrap TerrainPerceptionSequenceDataset")
+            source_indices = list(dataset.indices)
+        elif isinstance(dataset, TerrainPerceptionSequenceDataset):
+            base = dataset
+            source_indices = list(range(len(dataset)))
+        else:
+            raise TypeError("ChunkGroupedShuffleSampler requires TerrainPerceptionSequenceDataset")
+        self._groups: dict[int, list[int]] = {}
+        for local_index, source_index in enumerate(source_indices):
+            chunk_index = base.chunk_index_for_sample(int(source_index))
+            self._groups.setdefault(chunk_index, []).append(local_index)
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __iter__(self):
+        generator = torch.Generator().manual_seed(self.seed + self.epoch)
+        self.epoch += 1
+        chunk_ids = list(self._groups)
+        for group_position in torch.randperm(len(chunk_ids), generator=generator).tolist():
+            group = self._groups[chunk_ids[group_position]]
+            for sample_position in torch.randperm(len(group), generator=generator).tolist():
+                yield group[sample_position]
 
 
 def _run_epoch(
@@ -119,7 +154,11 @@ def train_terrain_perception(
         )
         validation_source = "deterministic_10_percent_sample_split"
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=ChunkGroupedShuffleSampler(train_dataset, seed=seed),
+    )
     validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
     torch_device = torch.device(device)
     model = TemporalTerrainCompletion(

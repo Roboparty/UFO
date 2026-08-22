@@ -207,6 +207,9 @@ class TerrainPerceptionSequenceDataset(Dataset):
     def __len__(self) -> int:
         return len(self._samples)
 
+    def chunk_index_for_sample(self, index: int) -> int:
+        return self._samples[index][0]
+
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         chunk_index, env_id, end = self._samples[index]
         start = end - self.sequence_steps + 1

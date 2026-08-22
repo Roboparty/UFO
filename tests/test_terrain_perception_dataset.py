@@ -10,7 +10,10 @@ from humanoidverse.perception.terrain_dataset import (
     TerrainPerceptionFrameBatch,
     TerrainPerceptionSequenceDataset,
 )
-from humanoidverse.train_terrain_perception import train_terrain_perception
+from humanoidverse.train_terrain_perception import (
+    ChunkGroupedShuffleSampler,
+    train_terrain_perception,
+)
 
 
 def make_frame(step: int, episode_ids: tuple[int, ...] = (0, 0)) -> TerrainPerceptionFrameBatch:
@@ -110,6 +113,25 @@ class TerrainPerceptionDatasetTest(unittest.TestCase):
             self.assertEqual(len(summary["history"]), 1)
             self.assertTrue((root / "model" / "latest.pt").is_file())
             self.assertTrue((root / "model" / "best.pt").is_file())
+
+    def test_training_sampler_does_not_interleave_chunks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            writer = TerrainPerceptionChunkWriter(directory, chunk_steps=4)
+            for step in range(8):
+                writer.append(make_frame(step))
+            writer.close()
+            dataset = TerrainPerceptionSequenceDataset(
+                directory,
+                sequence_steps=2,
+                history_seconds=0.6,
+            )
+
+            order = list(ChunkGroupedShuffleSampler(dataset, seed=7))
+            chunk_order = [dataset.chunk_index_for_sample(index) for index in order]
+            transitions = sum(left != right for left, right in zip(chunk_order, chunk_order[1:]))
+
+            self.assertEqual(sorted(order), list(range(len(dataset))))
+            self.assertLessEqual(transitions, 1)
 
 
 if __name__ == "__main__":
