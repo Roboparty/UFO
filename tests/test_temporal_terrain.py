@@ -5,6 +5,7 @@ import torch
 
 from humanoidverse.perception.depth_terrain_adapter import DepthTerrainAdapter
 from humanoidverse.perception.temporal_terrain import (
+    TerrainHistoryBuffer,
     TemporalTerrainCompletion,
     WarpedTerrainHistory,
     terrain_completion_loss,
@@ -20,6 +21,63 @@ def grid_index(x: float, y: float) -> int:
 
 
 class TemporalTerrainWarpTest(unittest.TestCase):
+    def test_history_reset_removes_all_previous_episode_frames(self):
+        history = TerrainHistoryBuffer(
+            batch_size=2,
+            time_steps=3,
+            proprio_dim=4,
+            device="cpu",
+        )
+        for timestamp in (0.0, 0.02):
+            history.append(
+                partial_map=torch.full((2, 273), 0.8),
+                visible_mask=torch.ones((2, 273), dtype=torch.bool),
+                pelvis_pos_w=torch.zeros((2, 3)),
+                heading_yaw_w=torch.zeros(2),
+                timestamp_s=torch.full((2,), timestamp),
+                proprio=torch.ones((2, 4)),
+            )
+
+        history.reset(torch.tensor([False, True]))
+        history.append(
+            partial_map=torch.full((2, 273), 0.7),
+            visible_mask=torch.ones((2, 273), dtype=torch.bool),
+            pelvis_pos_w=torch.ones((2, 3)),
+            heading_yaw_w=torch.ones(2),
+            timestamp_s=torch.tensor([0.04, 0.0]),
+            proprio=torch.full((2, 4), 2.0),
+        )
+
+        self.assertEqual(int(history.frame_valid[0].sum()), 3)
+        self.assertEqual(int(history.frame_valid[1].sum()), 1)
+        self.assertFalse(history.visible_masks[1, :-1].any())
+        self.assertTrue(torch.isnan(history.partial_maps[1, :-1]).all())
+        self.assertTrue(torch.all(history.proprio[1, :-1] == 0.0))
+
+    def test_single_frame_view_invalidates_all_past_frames(self):
+        history = TerrainHistoryBuffer(
+            batch_size=1,
+            time_steps=3,
+            proprio_dim=2,
+            device="cpu",
+        )
+        for timestamp in (0.0, 0.02, 0.04):
+            history.append(
+                partial_map=torch.full((1, 273), 0.8),
+                visible_mask=torch.ones((1, 273), dtype=torch.bool),
+                pelvis_pos_w=torch.zeros((1, 3)),
+                heading_yaw_w=torch.zeros(1),
+                timestamp_s=torch.tensor([timestamp]),
+                proprio=torch.ones((1, 2)),
+            )
+
+        single = history.single_frame_view()
+
+        self.assertEqual(int(single.frame_valid.sum()), 1)
+        self.assertFalse(single.visible_masks[:, :-1].any())
+        self.assertTrue(single.visible_masks[:, -1].all())
+        torch.testing.assert_close(single.partial_maps[:, -1], history.partial_maps[:, -1])
+
     def test_identity_warp_preserves_map_and_mask(self):
         values = torch.linspace(0.2, 1.0, 273).reshape(1, 1, 273)
         mask = torch.ones_like(values, dtype=torch.bool)
@@ -155,12 +213,36 @@ class TemporalTerrainCompletionTest(unittest.TestCase):
             prediction,
             target,
             current_visible=current_visible,
+            history_visible=current_visible,
         )
 
         self.assertGreater(float(metrics["missing_mae"]), 0.09)
         self.assertEqual(float(metrics["visible_mae"]), 0.0)
         self.assertGreater(float(metrics["underfoot_mae"]), 0.0)
         self.assertIn("edge_mae", metrics)
+        self.assertEqual(float(metrics["history_visible_fraction"]), float(metrics["current_visible_fraction"]))
+        self.assertEqual(float(metrics["history_coverage_gain"]), 0.0)
+
+    def test_metrics_report_temporal_coverage_gain(self):
+        target = torch.zeros((1, 273))
+        prediction = torch.ones_like(target)
+        current_visible = torch.zeros_like(target, dtype=torch.bool)
+        current_visible[:, :10] = True
+        history_visible = current_visible.clone()
+        history_visible[:, :30] = True
+
+        metrics = terrain_completion_metrics(
+            prediction,
+            target,
+            current_visible=current_visible,
+            history_visible=history_visible,
+        )
+
+        self.assertAlmostEqual(float(metrics["current_visible_fraction"]), 10.0 / 273.0)
+        self.assertAlmostEqual(float(metrics["history_visible_fraction"]), 30.0 / 273.0)
+        self.assertAlmostEqual(float(metrics["history_coverage_gain"]), 20.0 / 273.0)
+        self.assertEqual(float(metrics["history_observed_missing_mae"]), 1.0)
+        self.assertEqual(float(metrics["never_observed_mae"]), 1.0)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,7 @@ def _run_epoch(
             output.completed_clearance.detach(),
             target,
             current_visible=output.current_visible,
+            history_visible=history.visible_masks.any(dim=1),
         )
         values = {"loss": float(loss.detach().item())}
         values.update({name: float(value.item()) for name, value in metrics.items()})
@@ -108,6 +109,7 @@ def _run_epoch(
                 output.completed_clearance.detach()[stairs],
                 target[stairs],
                 current_visible=output.current_visible[stairs],
+                history_visible=history.visible_masks.any(dim=1)[stairs],
             )
             values.update({f"stairs_{name}": float(value.item()) for name, value in stair_metrics.items()})
         for name, value in values.items():

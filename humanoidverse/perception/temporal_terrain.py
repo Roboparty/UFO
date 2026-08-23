@@ -48,6 +48,124 @@ class WarpedTerrainHistory:
     motion_features: torch.Tensor
 
 
+class TerrainHistoryBuffer:
+    """Fixed-length per-environment history with explicit reset invalidation."""
+
+    def __init__(
+        self,
+        *,
+        batch_size: int,
+        time_steps: int,
+        proprio_dim: int,
+        device: torch.device | str,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        if min(batch_size, time_steps) <= 0 or proprio_dim < 0:
+            raise ValueError("invalid terrain history dimensions")
+        shape = (batch_size, time_steps)
+        self.partial_maps = torch.full(
+            (*shape, DepthTerrainAdapter.GRID_DIMENSION),
+            float("nan"),
+            device=device,
+            dtype=dtype,
+        )
+        self.visible_masks = torch.zeros_like(self.partial_maps, dtype=torch.bool)
+        self.pelvis_pos_w = torch.zeros((*shape, 3), device=device, dtype=dtype)
+        self.heading_yaw_w = torch.zeros(shape, device=device, dtype=dtype)
+        self.timestamps_s = torch.zeros(shape, device=device, dtype=dtype)
+        self.proprio = torch.zeros((*shape, proprio_dim), device=device, dtype=dtype)
+        self.frame_valid = torch.zeros(shape, device=device, dtype=torch.bool)
+
+    @property
+    def batch_size(self) -> int:
+        return self.partial_maps.shape[0]
+
+    @property
+    def time_steps(self) -> int:
+        return self.partial_maps.shape[1]
+
+    def reset(self, reset_mask: torch.Tensor) -> None:
+        if reset_mask.shape != (self.batch_size,) or reset_mask.dtype != torch.bool:
+            raise ValueError("reset_mask must be bool with shape [B]")
+        reset_mask = reset_mask.to(device=self.partial_maps.device)
+        self.partial_maps[reset_mask] = float("nan")
+        self.visible_masks[reset_mask] = False
+        self.pelvis_pos_w[reset_mask] = 0.0
+        self.heading_yaw_w[reset_mask] = 0.0
+        self.timestamps_s[reset_mask] = 0.0
+        self.proprio[reset_mask] = 0.0
+        self.frame_valid[reset_mask] = False
+
+    def append(
+        self,
+        *,
+        partial_map: torch.Tensor,
+        visible_mask: torch.Tensor,
+        pelvis_pos_w: torch.Tensor,
+        heading_yaw_w: torch.Tensor,
+        timestamp_s: torch.Tensor,
+        proprio: torch.Tensor,
+    ) -> None:
+        expected_map = (self.batch_size, DepthTerrainAdapter.GRID_DIMENSION)
+        if partial_map.shape != expected_map or visible_mask.shape != expected_map:
+            raise ValueError("partial_map and visible_mask must have shape [B, 273]")
+        if visible_mask.dtype != torch.bool:
+            raise ValueError("visible_mask must be bool")
+        if pelvis_pos_w.shape != (self.batch_size, 3):
+            raise ValueError("pelvis_pos_w must have shape [B, 3]")
+        if heading_yaw_w.shape != (self.batch_size,) or timestamp_s.shape != (self.batch_size,):
+            raise ValueError("heading_yaw_w and timestamp_s must have shape [B]")
+        if proprio.shape != (self.batch_size, self.proprio.shape[-1]):
+            raise ValueError("proprio has the wrong shape")
+        for value in (
+            self.partial_maps,
+            self.visible_masks,
+            self.pelvis_pos_w,
+            self.heading_yaw_w,
+            self.timestamps_s,
+            self.proprio,
+            self.frame_valid,
+        ):
+            value[:, :-1] = value[:, 1:].clone()
+        self.partial_maps[:, -1] = partial_map
+        self.visible_masks[:, -1] = visible_mask
+        self.pelvis_pos_w[:, -1] = pelvis_pos_w
+        self.heading_yaw_w[:, -1] = heading_yaw_w
+        self.timestamps_s[:, -1] = timestamp_s
+        self.proprio[:, -1] = proprio
+        self.frame_valid[:, -1] = True
+
+    def single_frame_view(self) -> "TerrainHistoryBuffer":
+        """Return an identical-shape history whose only valid frame is current."""
+        result = TerrainHistoryBuffer(
+            batch_size=self.batch_size,
+            time_steps=self.time_steps,
+            proprio_dim=self.proprio.shape[-1],
+            device=self.partial_maps.device,
+            dtype=self.partial_maps.dtype,
+        )
+        result.partial_maps[:, -1] = self.partial_maps[:, -1]
+        result.visible_masks[:, -1] = self.visible_masks[:, -1]
+        result.pelvis_pos_w[:, -1] = self.pelvis_pos_w[:, -1]
+        result.heading_yaw_w[:, -1] = self.heading_yaw_w[:, -1]
+        result.timestamps_s[:, -1] = self.timestamps_s[:, -1]
+        result.proprio[:, -1] = self.proprio[:, -1]
+        result.frame_valid[:, -1] = self.frame_valid[:, -1]
+        return result
+
+    def warp(self, *, history_seconds: float, interpolation: str = "bilinear") -> WarpedTerrainHistory:
+        return warp_terrain_history_to_current(
+            self.partial_maps,
+            self.visible_masks,
+            self.pelvis_pos_w,
+            self.heading_yaw_w,
+            timestamps_s=self.timestamps_s,
+            frame_valid=self.frame_valid,
+            history_seconds=history_seconds,
+            interpolation=interpolation,
+        )
+
+
 def warp_terrain_history_to_current(
     partial_maps: torch.Tensor,
     visible_masks: torch.Tensor,
@@ -384,6 +502,7 @@ def terrain_completion_metrics(
     target: torch.Tensor,
     *,
     current_visible: torch.Tensor | None = None,
+    history_visible: torch.Tensor | None = None,
     edge_threshold: float = 0.04,
 ) -> dict[str, torch.Tensor]:
     """Report map errors separately for missing, underfoot, and edge cells."""
@@ -391,6 +510,10 @@ def terrain_completion_metrics(
         raise ValueError("prediction and target must both have shape [B, 273]")
     if current_visible is not None and (current_visible.shape != target.shape or current_visible.dtype != torch.bool):
         raise ValueError("current_visible must be bool and match target")
+    if history_visible is not None and (history_visible.shape != target.shape or history_visible.dtype != torch.bool):
+        raise ValueError("history_visible must be bool and match target")
+    if history_visible is not None and current_visible is None:
+        raise ValueError("history_visible requires current_visible")
     if edge_threshold <= 0.0:
         raise ValueError("edge_threshold must be positive")
     finite = torch.isfinite(prediction) & torch.isfinite(target)
@@ -436,4 +559,14 @@ def terrain_completion_metrics(
     if current_visible is not None:
         metrics["visible_mae"] = masked_mean(current_visible)
         metrics["missing_mae"] = masked_mean(~current_visible)
+        valid_count = finite.sum().clamp_min(1)
+        current_observed = finite & current_visible
+        metrics["current_visible_fraction"] = current_observed.sum() / valid_count
+        if history_visible is not None:
+            historical_observed = finite & history_visible
+            historical_only = finite & history_visible & ~current_visible
+            metrics["history_visible_fraction"] = historical_observed.sum() / valid_count
+            metrics["history_coverage_gain"] = historical_only.sum() / valid_count
+            metrics["history_observed_missing_mae"] = masked_mean(history_visible & ~current_visible)
+            metrics["never_observed_mae"] = masked_mean(~history_visible)
     return metrics
