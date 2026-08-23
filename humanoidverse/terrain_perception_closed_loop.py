@@ -21,6 +21,11 @@ from humanoidverse.depth_terrain_evaluation import (
 )
 from humanoidverse.mjlab_inference_utils import checkpoint_load_device, load_mjlab_env_cfg, replace_hydra_override
 from humanoidverse.perception.depth_camera import DepthCameraConfig, depth_frame_from_raycast
+from humanoidverse.perception.depth_noise import (
+    DepthNoiseConfig,
+    DepthNoisePipeline,
+    depth_noise_preset,
+)
 from humanoidverse.perception.depth_terrain_adapter import DepthTerrainAdapter
 from humanoidverse.perception.temporal_terrain import TemporalTerrainCompletion, TerrainHistoryBuffer
 from humanoidverse.terrain_transfer import tensor_checksum
@@ -49,8 +54,56 @@ NUMERIC_METRICS = (
     "planar_displacement",
     "mean_root_velocity",
     "terrain_input_mae",
+    "underfoot_mae",
+    "stairs_edge_mae",
     "current_visible_fraction",
+    "temporal_coverage_fraction",
+    "action_deviation_from_clean",
+    "sensor_clean_valid_fraction",
+    "sensor_noisy_valid_fraction",
+    "sensor_latency_frames",
+    "sensor_latency_seconds",
+    "sensor_extrinsic_translation_norm_m",
+    "sensor_extrinsic_rotation_deg",
 )
+
+
+def _per_env_map_metrics(
+    terrain_input: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    current_visible: torch.Tensor,
+    history_visible: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Map-error and coverage metrics without reducing across environments."""
+    finite = torch.isfinite(terrain_input) & torch.isfinite(target)
+    error = torch.where(finite, (terrain_input - target).abs(), 0.0)
+    valid_count = finite.sum(dim=1).clamp_min(1)
+    grid_x, grid_y = torch.meshgrid(
+        torch.linspace(-0.4, 1.6, 21, device=target.device, dtype=target.dtype),
+        torch.linspace(-0.6, 0.6, 13, device=target.device, dtype=target.dtype),
+        indexing="ij",
+    )
+    underfoot = ((grid_x.abs() <= 0.2001) & (grid_y.abs() <= 0.2001)).reshape(1, -1)
+    values = target.reshape(-1, 21, 13)
+    edge = torch.zeros_like(values, dtype=torch.bool)
+    edge[:, 1:, :] |= (values[:, 1:, :] - values[:, :-1, :]).abs() > 0.04
+    edge[:, :-1, :] |= (values[:, 1:, :] - values[:, :-1, :]).abs() > 0.04
+    edge[:, :, 1:] |= (values[:, :, 1:] - values[:, :, :-1]).abs() > 0.04
+    edge[:, :, :-1] |= (values[:, :, 1:] - values[:, :, :-1]).abs() > 0.04
+    edge = edge.reshape(target.shape) & finite
+
+    def masked_mean(mask: torch.Tensor) -> torch.Tensor:
+        mask = mask & finite
+        return (error * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1)
+
+    return {
+        "terrain_input_mae": error.sum(dim=1) / valid_count,
+        "underfoot_mae": masked_mean(underfoot.expand_as(finite)),
+        "stairs_edge_mae": masked_mean(edge),
+        "current_visible_fraction": (current_visible & finite).sum(dim=1) / valid_count,
+        "temporal_coverage_fraction": (history_visible & finite).sum(dim=1) / valid_count,
+    }
 
 
 def _load_latent(path: Path, device: str) -> tuple[torch.Tensor, dict[str, Any]]:
@@ -62,9 +115,7 @@ def _load_latent(path: Path, device: str) -> tuple[torch.Tensor, dict[str, Any]]
         raise ValueError("closed-loop evaluation requires one finite saved latent [1, Z]")
     checksum = tensor_checksum(z)
     if payload.get("z_checksum") != checksum:
-        raise ValueError(
-            f"Saved latent checksum mismatch: stored={payload.get('z_checksum')!r}, computed={checksum!r}"
-        )
+        raise ValueError(f"Saved latent checksum mismatch: stored={payload.get('z_checksum')!r}, computed={checksum!r}")
     return z.to(device), {**payload, "z_checksum": checksum}
 
 
@@ -181,6 +232,8 @@ def _rollout_mode(
     expected_initial_state: torch.Tensor | None,
     fall_clearance: float,
     max_body_impact: float,
+    noise_config: DepthNoiseConfig,
+    noise_seed: int,
 ) -> tuple[list[dict[str, Any]], torch.Tensor, dict[str, Any]]:
     if mode not in OBSERVATION_MODES:
         raise ValueError(f"Unknown observation mode: {mode}")
@@ -193,6 +246,22 @@ def _rollout_mode(
         proprio_dim=int(perception_config["proprio_dim"]),
         device=device,
     )
+    clean_history = TerrainHistoryBuffer(
+        batch_size=num_envs,
+        time_steps=int(perception_config["sequence_steps"]),
+        proprio_dim=int(perception_config["proprio_dim"]),
+        device=device,
+    )
+    noise_pipeline = DepthNoisePipeline(
+        noise_config,
+        batch_size=num_envs,
+        image_height=camera.height,
+        image_width=camera.width,
+        device=device,
+        noise_seed=noise_seed,
+    )
+    env_ids = torch.arange(num_envs, device=device, dtype=torch.int64)
+    identity_noise = noise_config.is_identity()
     episode_time = torch.zeros(num_envs, device=device)
     pending_reset = torch.ones(num_envs, device=device, dtype=torch.bool)
     z = latent.expand(num_envs, -1)
@@ -216,7 +285,22 @@ def _rollout_mode(
         impact_sum = torch.zeros(num_envs, device=device)
         impact_max = torch.zeros(num_envs, device=device)
         input_error_sum = torch.zeros(num_envs, device=device)
+        underfoot_error_sum = torch.zeros(num_envs, device=device)
+        edge_error_sum = torch.zeros(num_envs, device=device)
         visibility_sum = torch.zeros(num_envs, device=device)
+        temporal_coverage_sum = torch.zeros(num_envs, device=device)
+        action_deviation_sum = torch.zeros(num_envs, device=device)
+        sensor_diagnostic_sums = {
+            name: torch.zeros(num_envs, device=device)
+            for name in (
+                "clean_valid_fraction",
+                "noisy_valid_fraction",
+                "latency_frames",
+                "latency_seconds",
+                "extrinsic_translation_norm_m",
+                "extrinsic_rotation_deg",
+            )
+        }
         ground_history: list[torch.Tensor] = []
         clearance_history: list[torch.Tensor] = []
         radius_history: list[torch.Tensor] = []
@@ -232,20 +316,47 @@ def _rollout_mode(
             for _step in range(episode_steps):
                 synchronize_depth_and_gt(core, camera.name)
                 frame = depth_frame_from_raycast(core.mjlab_env.scene.sensors[camera.name], camera)
+                noisy_frame = noise_pipeline(
+                    depth_z=frame.depth_z,
+                    camera_pos_w=frame.camera_pos_w,
+                    camera_optical_quat_w=frame.camera_optical_quat_w,
+                    timestamp_s=episode_time,
+                    env_ids=env_ids,
+                    reset_mask=pending_reset,
+                )
                 heading_quat = calc_heading_quat(core.base_quat, w_last=True)
                 partial_map, visible_mask = adapter(
-                    frame.depth_z,
-                    frame.camera_pos_w,
-                    frame.camera_optical_quat_w,
+                    noisy_frame.depth_z,
+                    noisy_frame.camera_pos_w,
+                    noisy_frame.camera_optical_quat_w,
                     core.robot_root_states[:, :3],
                     heading_quat,
                 )
+                if identity_noise:
+                    clean_partial_map, clean_visible_mask = partial_map, visible_mask
+                else:
+                    clean_partial_map, clean_visible_mask = adapter(
+                        frame.depth_z,
+                        frame.camera_pos_w,
+                        frame.camera_optical_quat_w,
+                        core.robot_root_states[:, :3],
+                        heading_quat,
+                    )
                 gt = core._terrain_actor_obs().clone()
                 yaw = get_euler_xyz(core.base_quat, w_last=True)[2]
                 history.reset(pending_reset)
+                clean_history.reset(pending_reset)
                 history.append(
                     partial_map=partial_map,
                     visible_mask=visible_mask,
+                    pelvis_pos_w=core.robot_root_states[:, :3],
+                    heading_yaw_w=yaw,
+                    timestamp_s=noisy_frame.timestamp_s,
+                    proprio=observation["state"],
+                )
+                clean_history.append(
+                    partial_map=clean_partial_map,
+                    visible_mask=clean_visible_mask,
                     pelvis_pos_w=core.robot_root_states[:, :3],
                     heading_yaw_w=yaw,
                     timestamp_s=episode_time,
@@ -253,6 +364,8 @@ def _rollout_mode(
                 )
                 if mode == "gt":
                     terrain_input = gt
+                    clean_terrain_input = gt
+                    history_visible = visible_mask
                 else:
                     selected = history.single_frame_view() if mode == "single" else history
                     warped = selected.warp(
@@ -263,23 +376,47 @@ def _rollout_mode(
                     terrain_input = completion.completed_clearance
                     if not torch.isfinite(terrain_input).all():
                         raise RuntimeError(f"{mode} terrain completion produced non-finite Actor input")
+                    if identity_noise:
+                        clean_terrain_input = terrain_input
+                    else:
+                        clean_selected = clean_history.single_frame_view() if mode == "single" else clean_history
+                        clean_warped = clean_selected.warp(
+                            history_seconds=float(perception_config["history_seconds"]),
+                            interpolation="bilinear",
+                        )
+                        clean_terrain_input = perception(clean_warped, proprio=clean_selected.proprio).completed_clearance
+                    history_visible = warped.visible_masks.any(dim=1)
                 observation["terrain_actor"] = terrain_input
-                valid_gt = torch.isfinite(gt)
-                per_env_error = torch.where(valid_gt, (terrain_input - gt).abs(), 0.0).sum(dim=1)
-                per_env_error /= valid_gt.sum(dim=1).clamp_min(1)
-                input_error_sum[active] += per_env_error[active]
-                visibility_sum[active] += visible_mask.float().mean(dim=1)[active]
-
+                map_metrics = _per_env_map_metrics(
+                    terrain_input,
+                    gt,
+                    current_visible=visible_mask,
+                    history_visible=history_visible,
+                )
+                input_error_sum[active] += map_metrics["terrain_input_mae"][active]
+                underfoot_error_sum[active] += map_metrics["underfoot_mae"][active]
+                edge_error_sum[active] += map_metrics["stairs_edge_mae"][active]
+                visibility_sum[active] += map_metrics["current_visible_fraction"][active]
+                temporal_coverage_sum[active] += map_metrics["temporal_coverage_fraction"][active]
                 action = model.act(observation, z, mean=True)
+                if identity_noise or mode == "gt":
+                    clean_action = action
+                else:
+                    clean_observation = dict(observation)
+                    clean_observation["terrain_actor"] = clean_terrain_input
+                    clean_action = model.act(clean_observation, z, mean=True)
+                action_deviation = torch.linalg.vector_norm(action - clean_action, dim=-1)
+                action_deviation_sum[active] += action_deviation[active]
+                for name, values in noisy_frame.diagnostics.items():
+                    if name in sensor_diagnostic_sums:
+                        sensor_diagnostic_sums[name][active] += values[active]
                 observation, _reward, terminated, truncated, info = wrapped_env.step(action, to_numpy=False)
                 reset = torch.as_tensor(terminated, device=device).bool() | torch.as_tensor(truncated, device=device).bool()
                 impact = _body_impact(info, num_envs=num_envs, device=device)
                 current_active = active.clone()
                 impact_sum[current_active] += impact[current_active]
                 impact_max[current_active] = torch.maximum(impact_max[current_active], impact[current_active])
-                root_velocity_sum[current_active] += torch.linalg.vector_norm(
-                    core.robot_root_states[:, 7:9], dim=-1
-                )[current_active]
+                root_velocity_sum[current_active] += torch.linalg.vector_norm(core.robot_root_states[:, 7:9], dim=-1)[current_active]
                 valid_steps[current_active] += 1
                 nonreset_active = current_active & ~reset
                 current_xy = core.robot_root_states[:, :2]
@@ -308,11 +445,7 @@ def _rollout_mode(
         impact_tensor = torch.stack(impact_history) if impact_history else torch.empty((0, num_envs))
         rows: list[dict[str, Any]] = []
         step_heights = _step_heights(core).detach().cpu() if terrain.startswith("stairs") else None
-        terrain_levels = (
-            core.mjlab_env.scene["terrain"].terrain_levels.detach().cpu()
-            if terrain.startswith("stairs")
-            else None
-        )
+        terrain_levels = core.mjlab_env.scene["terrain"].terrain_levels.detach().cpu() if terrain.startswith("stairs") else None
         stairs_cfg = core.config.terrain.stairs
         for env_index in range(num_envs):
             ground_values = ground_tensor[:, env_index]
@@ -334,16 +467,24 @@ def _rollout_mode(
                 "episode_steps": int(valid_steps[env_index].item()),
                 "fell": bool(terminated_any[env_index].item()) or min(clearances) < fall_clearance,
                 "forward_displacement": float(final_root[env_index, 0] - initial_root[env_index, 0]),
-                "planar_displacement": float(
-                    torch.linalg.vector_norm(final_root[env_index, :2] - initial_root[env_index, :2])
-                ),
+                "planar_displacement": float(torch.linalg.vector_norm(final_root[env_index, :2] - initial_root[env_index, :2])),
                 "mean_root_velocity": float(root_velocity_sum[env_index] / steps),
                 "mean_body_impact": float(impact_sum[env_index] / steps),
                 "max_body_impact": float(impact_max[env_index]),
                 "min_ground_clearance": min(clearances),
                 "final_ground_clearance": clearances[-1],
                 "terrain_input_mae": float(input_error_sum[env_index] / steps),
+                "underfoot_mae": float(underfoot_error_sum[env_index] / steps),
+                "stairs_edge_mae": float(edge_error_sum[env_index] / steps),
                 "current_visible_fraction": float(visibility_sum[env_index] / steps),
+                "temporal_coverage_fraction": float(temporal_coverage_sum[env_index] / steps),
+                "action_deviation_from_clean": float(action_deviation_sum[env_index] / steps),
+                "sensor_clean_valid_fraction": float(sensor_diagnostic_sums["clean_valid_fraction"][env_index] / steps),
+                "sensor_noisy_valid_fraction": float(sensor_diagnostic_sums["noisy_valid_fraction"][env_index] / steps),
+                "sensor_latency_frames": float(sensor_diagnostic_sums["latency_frames"][env_index] / steps),
+                "sensor_latency_seconds": float(sensor_diagnostic_sums["latency_seconds"][env_index] / steps),
+                "sensor_extrinsic_translation_norm_m": float(sensor_diagnostic_sums["extrinsic_translation_norm_m"][env_index] / steps),
+                "sensor_extrinsic_rotation_deg": float(sensor_diagnostic_sums["extrinsic_rotation_deg"][env_index] / steps),
             }
             if terrain in {"stairs_up", "stairs_down"}:
                 row.update(
@@ -364,10 +505,7 @@ def _rollout_mode(
                 row["terrain_level"] = int(terrain_levels[env_index])
                 row["stairs_step_height"] = float(step_heights[env_index])
                 row["traversal_success"] = bool(
-                    row["outer_ground_reached"]
-                    and row["impact_safe"]
-                    and row["normal_final_clearance"]
-                    and not row["fell"]
+                    row["outer_ground_reached"] and row["impact_safe"] and row["normal_final_clearance"] and not row["fell"]
                 )
             rows.append(row)
         diagnostics = {
@@ -375,6 +513,10 @@ def _rollout_mode(
             "initial_state_checksum": initial_state_checksum,
             "history_valid_after_final_step_min": int(history.frame_valid.sum(dim=1).min().item()),
             "history_valid_after_final_step_max": int(history.frame_valid.sum(dim=1).max().item()),
+            "noise_condition": noise_config.condition,
+            "noise_severity": noise_config.severity,
+            "noise_seed": noise_seed,
+            "noise_config_hash": noise_config.hash(),
         }
         return rows, initial_state, diagnostics
     finally:
@@ -397,6 +539,8 @@ def evaluate_closed_loop(
     max_body_impact: float,
     modes: tuple[str, ...] = OBSERVATION_MODES,
     actor_checkpoint: Path | None = None,
+    noise_config: DepthNoiseConfig | None = None,
+    noise_seed: int = 0,
 ) -> dict[str, Any]:
     if terrain not in TERRAIN_NAMES:
         raise ValueError(f"Unsupported terrain: {terrain!r}")
@@ -404,13 +548,15 @@ def evaluate_closed_loop(
         raise ValueError("num_envs and episode_steps must be positive")
     if not modes or len(set(modes)) != len(modes) or any(mode not in OBSERVATION_MODES for mode in modes):
         raise ValueError(f"modes must be a unique non-empty subset of {OBSERVATION_MODES}")
+    noise_config = noise_config or depth_noise_preset("clean", max_depth_m=camera.max_range)
+    noise_config.validate()
     model_folder = model_folder.expanduser().resolve()
-    model = load_model_from_checkpoint_dir(
-        model_folder / "checkpoint", device=checkpoint_load_device(device)
-    )
+    model = load_model_from_checkpoint_dir(model_folder / "checkpoint", device=checkpoint_load_device(device))
     model.to(device).eval()
     actor_override = _load_actor_override(model, actor_checkpoint) if actor_checkpoint is not None else None
+    actor_checksum = _state_dict_checksum(model._actor.state_dict())
     perception, perception_checkpoint_data = _load_perception(perception_checkpoint, device)
+    perception_checksum = _state_dict_checksum(perception.state_dict())
     perception_config = perception_checkpoint_data["config"]
     latent, latent_payload = _load_latent(latent_path, device)
     latent_checksum = str(latent_payload["z_checksum"])
@@ -427,9 +573,7 @@ def evaluate_closed_loop(
     env_config = env_config.model_copy(
         update={
             "seed": seed,
-            "hydra_overrides": replace_hydra_override(
-                list(env_config.hydra_overrides), "terrain.terrain_type", terrain
-            ),
+            "hydra_overrides": replace_hydra_override(list(env_config.hydra_overrides), "terrain.terrain_type", terrain),
         }
     )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -453,6 +597,8 @@ def evaluate_closed_loop(
             expected_initial_state=expected_initial_state,
             fall_clearance=fall_clearance,
             max_body_impact=max_body_impact,
+            noise_config=noise_config,
+            noise_seed=noise_seed,
         )
         if expected_initial_state is None:
             expected_initial_state = initial_state
@@ -471,8 +617,10 @@ def evaluate_closed_loop(
         "model_folder": str(model_folder),
         "checkpoint_global_time": int(train_status["global_time"]) if train_status else None,
         "actor_override": actor_override,
+        "actor_checksum": actor_checksum,
         "perception_checkpoint": str(perception_checkpoint.expanduser().resolve()),
         "perception_epoch": int(perception_checkpoint_data["epoch"]),
+        "perception_checksum": perception_checksum,
         "latent_path": str(latent_path.expanduser().resolve()),
         "latent_prompt_type": latent_payload.get("prompt_type"),
         "latent_prompt_identifier": latent_payload.get("prompt_identifier"),
@@ -483,12 +631,13 @@ def evaluate_closed_loop(
         "episode_steps": episode_steps,
         "action_selection": "deterministic mean=True",
         "camera": asdict(camera),
+        "environment_seed": seed,
+        "noise_seed": noise_seed,
+        "noise_config": asdict(noise_config),
+        "noise_config_hash": noise_config.hash(),
         "initial_state_identical_across_modes": True,
         "diagnostics": diagnostics,
-        "modes": {
-            mode: _aggregate([row for row in all_rows if row["mode"] == mode])
-            for mode in modes
-        },
+        "modes": {mode: _aggregate([row for row in all_rows if row["mode"] == mode]) for mode in modes},
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     (output_dir / "raw_results.json").write_text(json.dumps(all_rows, indent=2, sort_keys=True) + "\n")
@@ -517,6 +666,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--down-pitch", type=float, default=48.0)
     parser.add_argument("--min-range", type=float, default=0.10)
     parser.add_argument("--max-range", type=float, default=2.50)
+    parser.add_argument(
+        "--noise-condition",
+        choices=("clean", "measurement", "dropout", "edge", "latency", "extrinsic", "combined"),
+        default="clean",
+    )
+    parser.add_argument("--noise-severity", choices=("mild", "nominal", "strong"), default="nominal")
+    parser.add_argument("--noise-seed", type=int, default=271828)
     return parser.parse_args()
 
 
@@ -547,6 +703,12 @@ def main() -> None:
         max_body_impact=args.max_body_impact,
         modes=tuple(args.modes),
         actor_checkpoint=args.actor_checkpoint,
+        noise_config=depth_noise_preset(
+            args.noise_condition,
+            args.noise_severity,
+            max_depth_m=args.max_range,
+        ),
+        noise_seed=args.noise_seed,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
 
