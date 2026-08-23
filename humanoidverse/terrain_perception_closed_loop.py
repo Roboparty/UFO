@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import statistics
 from dataclasses import asdict
@@ -25,7 +26,6 @@ from humanoidverse.perception.temporal_terrain import TemporalTerrainCompletion,
 from humanoidverse.terrain_transfer import tensor_checksum
 from humanoidverse.terrain_transfer_inference import _separated_stairs_progress_metrics
 from humanoidverse.utils.torch_utils import calc_heading_quat, get_euler_xyz
-
 
 OBSERVATION_MODES = ("gt", "single", "temporal")
 BOOLEAN_METRICS = (
@@ -78,6 +78,34 @@ def _load_perception(path: Path, device: str) -> tuple[TemporalTerrainCompletion
     model.load_state_dict(checkpoint["model"])
     model.to(device).eval()
     return model, checkpoint
+
+
+def _state_dict_checksum(state_dict: dict[str, torch.Tensor]) -> str:
+    digest = hashlib.sha256()
+    for name, value in sorted(state_dict.items()):
+        tensor = value.detach().contiguous().cpu()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(tensor.dtype).encode("ascii"))
+        digest.update(str(tuple(tensor.shape)).encode("ascii"))
+        digest.update(tensor.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _load_actor_override(model, path: Path) -> dict[str, Any]:
+    resolved = path.expanduser().resolve()
+    payload = torch.load(resolved, map_location="cpu", weights_only=True)
+    actor_state = payload.get("actor") if isinstance(payload, dict) else None
+    if not isinstance(actor_state, dict) or not actor_state:
+        raise ValueError(f"invalid Actor milestone checkpoint: {resolved}")
+    if any(not isinstance(value, torch.Tensor) or not torch.isfinite(value).all() for value in actor_state.values()):
+        raise ValueError(f"Actor milestone contains non-finite or non-tensor state: {resolved}")
+    model._actor.load_state_dict(actor_state, strict=True)
+    model.eval().requires_grad_(False)
+    return {
+        "path": str(resolved),
+        "step": int(payload["step"]),
+        "checksum": _state_dict_checksum(actor_state),
+    }
 
 
 def _default_target_states(wrapped_env) -> dict[str, torch.Tensor]:
@@ -368,6 +396,7 @@ def evaluate_closed_loop(
     fall_clearance: float,
     max_body_impact: float,
     modes: tuple[str, ...] = OBSERVATION_MODES,
+    actor_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     if terrain not in TERRAIN_NAMES:
         raise ValueError(f"Unsupported terrain: {terrain!r}")
@@ -380,6 +409,7 @@ def evaluate_closed_loop(
         model_folder / "checkpoint", device=checkpoint_load_device(device)
     )
     model.to(device).eval()
+    actor_override = _load_actor_override(model, actor_checkpoint) if actor_checkpoint is not None else None
     perception, perception_checkpoint_data = _load_perception(perception_checkpoint, device)
     perception_config = perception_checkpoint_data["config"]
     latent, latent_payload = _load_latent(latent_path, device)
@@ -440,6 +470,7 @@ def evaluate_closed_loop(
     summary = {
         "model_folder": str(model_folder),
         "checkpoint_global_time": int(train_status["global_time"]) if train_status else None,
+        "actor_override": actor_override,
         "perception_checkpoint": str(perception_checkpoint.expanduser().resolve()),
         "perception_epoch": int(perception_checkpoint_data["epoch"]),
         "latent_path": str(latent_path.expanduser().resolve()),
@@ -469,6 +500,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-folder", type=Path, required=True)
     parser.add_argument("--perception-checkpoint", type=Path, required=True)
     parser.add_argument("--latent", type=Path, required=True)
+    parser.add_argument("--actor-checkpoint", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--terrain", choices=TERRAIN_NAMES, required=True)
     parser.add_argument("--num-envs", type=int, default=64)
@@ -514,6 +546,7 @@ def main() -> None:
         fall_clearance=args.fall_clearance,
         max_body_impact=args.max_body_impact,
         modes=tuple(args.modes),
+        actor_checkpoint=args.actor_checkpoint,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
 
