@@ -91,6 +91,7 @@ def collect_terrain_perception(
         "seed": seed,
         "control_dt_s": core.dt,
         "camera": asdict(camera),
+        "terrain_component_names": list(core.terrain_component_names),
         "policy_terrain_input": "GT terrain_actor",
         "stored_depth": False,
     }

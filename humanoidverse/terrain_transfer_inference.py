@@ -59,6 +59,169 @@ def _stairs_down_edge_offset(
     return down_edge - edge_margin
 
 
+def _stairs_pre_ascent_offset(*, platform_width: float, edge_margin: float) -> float:
+    """Return a point on the center platform facing the first ascending step."""
+    if platform_width <= 0.0 or not 0.0 < edge_margin < platform_width / 2.0:
+        raise ValueError("stairs edge margin must lie inside the center platform")
+    return platform_width / 2.0 - edge_margin
+
+
+def _stairs_step_height(env) -> tuple[float, float, int]:
+    """Return generated step height, normalized difficulty, and terrain level."""
+    core = env._env
+    terrain = core.mjlab_env.scene["terrain"]
+    level = int(terrain.terrain_levels[0].item())
+    num_rows = int(terrain.terrain_origins.shape[0])
+    difficulty_min, difficulty_max = (
+        float(value) for value in core.config.terrain.difficulty_range
+    )
+    fraction = 0.0 if num_rows <= 1 else level / (num_rows - 1)
+    difficulty = difficulty_min + fraction * (difficulty_max - difficulty_min)
+    height_min, height_max = (
+        float(value) for value in core.config.terrain.stairs.step_height_range
+    )
+    return height_min + difficulty * (height_max - height_min), difficulty, level
+
+
+def _scalar_aux_reward(info: dict[str, Any], name: str) -> float:
+    value = info.get("aux_rewards", {}).get(name)
+    if value is None:
+        return 0.0
+    return float(torch.as_tensor(value).reshape(-1)[0].item())
+
+
+def _stairs_progress_metrics(
+    *,
+    ground_heights: list[float],
+    ground_clearances: list[float],
+    body_impacts: list[float],
+    step_height: float,
+    num_steps: int,
+    fall_clearance: float,
+    min_descent_steps: int,
+    max_allowed_body_impact: float,
+) -> dict[str, Any]:
+    """Measure stair-level progress and reject impact-driven false successes."""
+    if not ground_heights or not ground_clearances:
+        raise ValueError("stairs progress requires ground heights and clearances")
+    if step_height <= 0.0 or num_steps <= 0 or min_descent_steps <= 0:
+        raise ValueError("stairs progress dimensions and thresholds must be positive")
+    initial_ground_height = ground_heights[0]
+    max_ground_height = max(ground_heights)
+    min_ground_height = min(ground_heights)
+    ascent_steps = min(
+        num_steps,
+        max(0, int((max_ground_height - initial_ground_height + 0.5 * step_height) // step_height)),
+    )
+    descent_steps = min(
+        num_steps,
+        max(0, int((initial_ground_height - min_ground_height + 0.5 * step_height) // step_height)),
+    )
+    max_body_impact = max(body_impacts, default=0.0)
+    normal_final_clearance = ground_clearances[-1] >= fall_clearance
+    impact_safe = max_body_impact <= max_allowed_body_impact
+    return {
+        "initial_ground_height": initial_ground_height,
+        "max_ground_height": max_ground_height,
+        "min_ground_height": min_ground_height,
+        "ascent_initiated": ascent_steps >= 1,
+        "ascending_steps_completed": ascent_steps,
+        "high_platform_reached": ascent_steps >= num_steps,
+        "descent_initiated": descent_steps >= 1,
+        "descending_steps_completed": descent_steps,
+        "low_platform_reached": descent_steps >= num_steps,
+        "mean_body_impact": sum(body_impacts) / max(len(body_impacts), 1),
+        "max_body_impact": max_body_impact,
+        "impact_safe": impact_safe,
+        "min_ground_clearance": min(ground_clearances),
+        "normal_final_clearance": normal_final_clearance,
+        "ascent_success": ascent_steps >= num_steps and impact_safe and normal_final_clearance,
+        "descent_success": (
+            descent_steps >= min_descent_steps and impact_safe and normal_final_clearance
+        ),
+    }
+
+
+def _max_consecutive_stair_transitions(levels: list[int]) -> int:
+    """Count the longest adjacent, ordered stair-level progression."""
+    if not levels:
+        return 0
+    current_run = 0
+    longest_run = 0
+    previous = levels[0]
+    for level in levels[1:]:
+        if level == previous:
+            continue
+        if level == previous + 1:
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+        else:
+            current_run = 0
+        previous = level
+    return longest_run
+
+
+def _separated_stairs_progress_metrics(
+    *,
+    terrain: str,
+    ground_heights: list[float],
+    ground_clearances: list[float],
+    body_impacts: list[float],
+    planar_radii: list[float],
+    cumulative_planar_path: float,
+    step_height: float,
+    num_steps: int,
+    center_width: float,
+    fall_clearance: float,
+    max_allowed_body_impact: float,
+) -> dict[str, Any]:
+    """Measure center-to-outer traversal on one separated stair family."""
+    if terrain not in {"stairs_up", "stairs_down"}:
+        raise ValueError(f"Unsupported separated stairs terrain: {terrain!r}")
+    if not ground_heights or len(ground_heights) != len(planar_radii):
+        raise ValueError("Separated stairs metrics require aligned height/radius trajectories")
+    if step_height <= 0.0 or num_steps <= 0 or center_width <= 0.0:
+        raise ValueError("Separated stairs dimensions must be positive")
+
+    direction = 1.0 if terrain == "stairs_up" else -1.0
+    initial_height = ground_heights[0]
+    signed_progress = [direction * (height - initial_height) for height in ground_heights]
+    levels = [
+        min(num_steps, max(0, int((progress + 0.5 * step_height) // step_height)))
+        for progress in signed_progress
+    ]
+    center_departure_step = next(
+        (index for index, radius in enumerate(planar_radii) if radius >= center_width / 2.0),
+        None,
+    )
+    first_transition_step = next(
+        (index for index, level in enumerate(levels) if level >= 1),
+        None,
+    )
+    max_body_impact = max(body_impacts, default=0.0)
+    normal_final_clearance = ground_clearances[-1] >= fall_clearance
+    center_looped = first_transition_step is None and cumulative_planar_path >= 2.0 * center_width
+    return {
+        "stairs_direction": "up" if direction > 0.0 else "down",
+        "initial_ground_height": initial_height,
+        "center_departed": center_departure_step is not None,
+        "center_departure_step": center_departure_step,
+        "first_transition": first_transition_step is not None,
+        "first_transition_step": first_transition_step,
+        "consecutive_steps_completed": _max_consecutive_stair_transitions(levels),
+        "outer_ground_reached": max(levels) >= num_steps,
+        "max_stair_level_reached": max(levels),
+        "stalled_at_center": first_transition_step is None,
+        "center_looped": center_looped,
+        "cumulative_planar_path": cumulative_planar_path,
+        "mean_body_impact": sum(body_impacts) / max(len(body_impacts), 1),
+        "max_body_impact": max_body_impact,
+        "impact_safe": max_body_impact <= max_allowed_body_impact,
+        "min_ground_clearance": min(ground_clearances),
+        "normal_final_clearance": normal_final_clearance,
+    }
+
+
 def _course_completion_radius(course_cfg, *, final_flat_margin: float = 0.30) -> float:
     """Return the radius just inside the final flat annulus."""
     return (
@@ -257,7 +420,41 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
         else:
             target_states = {key: value.clone() for key, value in target_states.items()}
             target_states["root_states"][:, :3] += wrapped_env._env.env_origins[:1].to(args.device)
-        if terrain == "stairs" and args.stairs_down_edge_margin is not None:
+        stairs_reset_region = getattr(args, "stairs_reset_region", None)
+        if stairs_reset_region is not None and terrain != "stairs":
+            raise ValueError("--stairs-reset-region is only valid with stairs terrain")
+        if stairs_reset_region is not None and (
+            args.stairs_start_step > 0 or args.stairs_down_edge_margin is not None
+        ):
+            raise ValueError(
+                "--stairs-reset-region cannot be combined with --stairs-start-step or --stairs-down-edge-margin"
+            )
+        if terrain == "stairs" and stairs_reset_region is not None:
+            stairs_cfg = wrapped_env._env.config.terrain.stairs
+            edge_margin = float(wrapped_env._env.config.terrain.reset.stairs_edge_margin)
+            if stairs_reset_region == "center":
+                start_offset = 0.0
+            elif stairs_reset_region == "pre_ascent":
+                start_offset = _stairs_pre_ascent_offset(
+                    platform_width=float(stairs_cfg.platform_width),
+                    edge_margin=edge_margin,
+                )
+            elif stairs_reset_region == "pre_descent":
+                start_offset = _stairs_down_edge_offset(
+                    platform_width=float(stairs_cfg.platform_width),
+                    step_depth=float(stairs_cfg.step_depth),
+                    num_steps=int(stairs_cfg.num_steps),
+                    plateau_width=float(stairs_cfg.plateau_width),
+                    edge_margin=edge_margin,
+                )
+            else:
+                raise ValueError(f"Unsupported stairs reset region: {stairs_reset_region!r}")
+            target_states["root_states"][:, 0] += start_offset
+            print(
+                f"[INFO] stairs reset region={stairs_reset_region} "
+                f"local_xy=({start_offset:.3f}, 0.000)"
+            )
+        elif terrain == "stairs" and args.stairs_down_edge_margin is not None:
             if args.stairs_start_step > 0:
                 raise ValueError("--stairs-start-step and --stairs-down-edge-margin are mutually exclusive")
             stairs_cfg = wrapped_env._env.config.terrain.stairs
@@ -287,6 +484,8 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
             )
         observation, _ = wrapped_env.reset(to_numpy=False, target_states=target_states)
         initial_root = wrapped_env._env.robot_root_states[0, :3].clone()
+        initial_clearance = _root_ground_clearance(wrapped_env)
+        initial_ground_height = float(initial_root[2].item()) - initial_clearance
         max_forward_displacement = 0.0
         max_planar_displacement = 0.0
         course_completion_radius = (
@@ -298,6 +497,12 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
         velocities: list[float] = []
         prompt_values: list[float] = []
         tracking_errors: list[float] = []
+        ground_heights = [initial_ground_height]
+        ground_clearances = [initial_clearance]
+        body_impacts: list[float] = []
+        planar_radii = [0.0]
+        cumulative_planar_path = 0.0
+        previous_root_xy = initial_root[:2].clone()
         frames = []
         if args.save_mp4:
             renderer = MujocoQposRenderer(
@@ -329,11 +534,21 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
                 torch.linalg.vector_norm(wrapped_env._env.robot_root_states[0, :2] - initial_root[:2]).item()
             )
             max_planar_displacement = max(max_planar_displacement, planar_displacement)
+            current_root_xy = wrapped_env._env.robot_root_states[0, :2].clone()
+            cumulative_planar_path += float(torch.linalg.vector_norm(current_root_xy - previous_root_xy).item())
+            previous_root_xy = current_root_xy
+            planar_radii.append(planar_displacement)
             course_completed = bool(
                 course_completion_radius is not None and planar_displacement >= course_completion_radius
             )
             velocities.append(float(torch.linalg.vector_norm(wrapped_env._env.robot_root_states[0, 7:9]).item()))
             prompt_values.append(_prompt_value(model, observation, z_step))
+            clearance = _root_ground_clearance(wrapped_env)
+            ground_clearances.append(clearance)
+            ground_heights.append(
+                float(wrapped_env._env.robot_root_states[0, 2].item()) - clearance
+            )
+            body_impacts.append(_scalar_aux_reward(_info, "penalty_body_impact"))
             if args.prompt_type == "tracking":
                 tracking_errors.append(float(torch.linalg.vector_norm(wrapped_env._env.dif_global_body_pos, dim=-1).mean().item()))
             if renderer is not None:
@@ -348,6 +563,47 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
                 break
         final_root = wrapped_env._env.robot_root_states[0, :3].clone()
         final_ground_clearance = _root_ground_clearance(wrapped_env)
+        stairs_metrics: dict[str, Any] = {}
+        if terrain == "stairs":
+            step_height, terrain_difficulty, terrain_level = _stairs_step_height(wrapped_env)
+            num_steps = int(wrapped_env._env.config.terrain.stairs.num_steps)
+            stairs_metrics = {
+                "stairs_reset_region": stairs_reset_region,
+                "terrain_level": terrain_level,
+                "terrain_difficulty": terrain_difficulty,
+                "stairs_step_height": step_height,
+                **_stairs_progress_metrics(
+                    ground_heights=ground_heights,
+                    ground_clearances=ground_clearances,
+                    body_impacts=body_impacts,
+                    step_height=step_height,
+                    num_steps=num_steps,
+                    fall_clearance=float(args.fall_clearance),
+                    min_descent_steps=int(args.min_descent_steps),
+                    max_allowed_body_impact=float(args.max_body_impact),
+                ),
+            }
+        elif terrain in {"stairs_up", "stairs_down"}:
+            step_height, terrain_difficulty, terrain_level = _stairs_step_height(wrapped_env)
+            stairs_cfg = wrapped_env._env.config.terrain.stairs
+            stairs_metrics = {
+                "terrain_level": terrain_level,
+                "terrain_difficulty": terrain_difficulty,
+                "stairs_step_height": step_height,
+                **_separated_stairs_progress_metrics(
+                    terrain=terrain,
+                    ground_heights=ground_heights,
+                    ground_clearances=ground_clearances,
+                    body_impacts=body_impacts,
+                    planar_radii=planar_radii,
+                    cumulative_planar_path=cumulative_planar_path,
+                    step_height=step_height,
+                    num_steps=int(stairs_cfg.num_steps),
+                    center_width=float(stairs_cfg.platform_width),
+                    fall_clearance=float(args.fall_clearance),
+                    max_allowed_body_impact=float(args.max_body_impact),
+                ),
+            }
         final_goal_error = None
         if args.prompt_type == "goal":
             achieved_z = model.goal_inference(observation)
@@ -385,6 +641,7 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
             "final_goal_error": final_goal_error,
             "mean_tracking_error": sum(tracking_errors) / len(tracking_errors) if tracking_errors else None,
             "video_path": str(video_path) if video_path is not None else None,
+            **stairs_metrics,
         }
         return result
     finally:
@@ -439,6 +696,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Start this many meters inside the high plateau's first descending edge, facing outward.",
+    )
+    parser.add_argument(
+        "--stairs-reset-region",
+        choices=("center", "pre_ascent", "pre_descent"),
+        default=None,
+        help="Start a stairs rollout from the matching training reset region.",
+    )
+    parser.add_argument(
+        "--min-descent-steps",
+        type=int,
+        default=3,
+        help="Minimum completed descending levels required by strict descent success.",
+    )
+    parser.add_argument(
+        "--max-body-impact",
+        type=float,
+        default=1.0,
+        help="Maximum continuous body-impact severity allowed by strict success metrics.",
     )
     parser.add_argument("--save-mp4", action="store_true")
     parser.add_argument("--render-size", type=int, default=480)
@@ -509,8 +784,9 @@ def main() -> None:
         raise AssertionError("same-z checksum changed across terrain rollouts")
     args.output.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
     csv_path = args.output.with_suffix(".csv")
+    fieldnames = list(dict.fromkeys(key for row in results for key in row))
     with csv_path.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(results[0]))
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(results)
     print(f"[INFO] wrote {args.output} and {csv_path}")

@@ -35,7 +35,8 @@ from humanoidverse.perception.depth_camera import (
 from humanoidverse.perception.depth_terrain_adapter import DepthTerrainAdapter
 from humanoidverse.utils.torch_utils import calc_heading_quat, xyzw_to_wxyz
 
-TERRAIN_NAMES = ("flat", "slope", "stairs", "rough", "platforms")
+TERRAIN_NAMES = ("flat", "slope", "stairs_up", "stairs_down", "rough", "platforms")
+STAIR_TERRAIN_NAMES = frozenset(("stairs", "stairs_up", "stairs_down"))
 
 
 def build_depth_evaluation_env(env_config, *, num_envs: int, camera: DepthCameraConfig):
@@ -468,6 +469,12 @@ def evaluate_depth_terrain(
     env_config = env_config.model_copy(update=env_updates)
 
     if device.startswith("cuda"):
+        # reset_peak_memory_stats() fails before the CUDA runtime has been
+        # initialized (even when the requested device is valid).  The
+        # benchmark intentionally samples memory before building the env, so
+        # initialize CUDA explicitly rather than relying on the first tensor
+        # allocation performed by MJLab.
+        torch.cuda.init()
         torch.cuda.reset_peak_memory_stats(device)
         before_allocated = torch.cuda.memory_allocated(device)
     else:
@@ -524,7 +531,10 @@ def evaluate_depth_terrain(
                 accumulators.setdefault(name, MetricAccumulator(torch.device(device))).update(predicted[mask], visible[mask], gt[mask])
                 region_buffers[name].append((predicted[mask], visible[mask], gt[mask]))
 
-            stairs_mask = torch.tensor([item == "stairs" for item in names], device=device)
+            stairs_mask = torch.tensor(
+                [item in STAIR_TERRAIN_NAMES for item in names],
+                device=device,
+            )
             if torch.any(stairs_mask):
                 edges = stair_edge_mask(gt[stairs_mask])
                 valid = visible[stairs_mask] & torch.isfinite(gt[stairs_mask])
@@ -771,6 +781,7 @@ def benchmark_baseline_environment(
         updates["hydra_overrides"] = replace_hydra_override(list(env_config.hydra_overrides), "terrain.terrain_type", terrain)
     env_config = env_config.model_copy(update=updates)
     if device.startswith("cuda"):
+        torch.cuda.init()
         torch.cuda.reset_peak_memory_stats(device)
         before = torch.cuda.memory_allocated(device)
     else:

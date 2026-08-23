@@ -14,23 +14,29 @@ from humanoidverse.terrains.rp1_primitives import (
     NeutralHfPyramidSlopedTerrainCfg,
     TerrainBoundedStairsCfg,
     TerrainBoxFlatCfg,
+    TerrainSeparatedPyramidStairsCfg,
     TerrainTraversalCourseCfg,
     spawn_patch_sampling,
 )
 
-TerrainMode = Literal["plane", "flat", "slope", "stairs", "rough", "platforms", "mixed", "rp1_simple", "course"]
+TerrainMode = Literal[
+    "plane", "flat", "slope", "stairs", "stairs_up", "stairs_down", "rough", "platforms",
+    "mixed", "rp1_simple", "course",
+]
 SUPPORTED_TERRAINS: tuple[TerrainMode, ...] = (
     "plane",
     "flat",
     "slope",
     "stairs",
+    "stairs_up",
+    "stairs_down",
     "rough",
     "platforms",
     "mixed",
     "rp1_simple",
     "course",
 )
-TERRAIN_COMPONENT_NAMES = ("flat", "slope", "stairs", "rough", "platforms")
+TERRAIN_COMPONENT_NAMES = ("flat", "slope", "stairs_up", "stairs_down", "rough", "platforms")
 
 
 def _get(config: Any, path: str, default: Any) -> Any:
@@ -73,7 +79,12 @@ def make_ufo_v0_generator_cfg(mode: TerrainMode, config: Any) -> TerrainGenerato
     if mode != "mixed":
         weights = {name: float(name == mode) for name in TERRAIN_COMPONENT_NAMES}
 
-    size_path = "course.patch_size" if mode == "course" else "patch_size"
+    if mode == "course":
+        size_path = "course.patch_size"
+    elif mode == "stairs":
+        size_path = "stairs.legacy_patch_size"
+    else:
+        size_path = "patch_size"
     size = tuple(float(x) for x in _get(config, size_path, (8.0, 8.0)))
     slope_min_deg = float(_get(config, "slope.min_angle_deg", 5.0))
     slope_max_deg = float(_get(config, "slope.max_angle_deg", 12.0))
@@ -94,13 +105,33 @@ def make_ufo_v0_generator_cfg(mode: TerrainMode, config: Any) -> TerrainGenerato
             horizontal_scale=horizontal_scale,
             vertical_scale=float(_get(config, "heightfield.vertical_scale", 0.005)),
         ),
+        # Retain the old combined staircase as an explicit legacy inference
+        # mode; mixed training uses separate ascent and descent families.
         "stairs": TerrainBoundedStairsCfg(
-            proportion=weights["stairs"],
+            proportion=1.0,
             step_height_range=step_height,
             step_width=float(_get(config, "stairs.step_depth", 0.30)),
-            platform_width=float(_get(config, "stairs.platform_width", 1.5)),
-            num_steps=int(_get(config, "stairs.num_steps", 6)),
+            platform_width=float(_get(config, "stairs.legacy_platform_width", 1.0)),
+            num_steps=int(_get(config, "stairs.legacy_num_steps", 6)),
             plateau_width=float(_get(config, "stairs.plateau_width", 0.8)),
+            border_width=float(_get(config, "stairs.border_width", 0.5)),
+        ),
+        "stairs_up": TerrainSeparatedPyramidStairsCfg(
+            proportion=weights["stairs_up"],
+            direction="up",
+            step_height_range=step_height,
+            step_width=float(_get(config, "stairs.step_depth", 0.30)),
+            platform_width=float(_get(config, "stairs.platform_width", 0.80)),
+            num_steps=int(_get(config, "stairs.num_steps", 10)),
+            border_width=float(_get(config, "stairs.border_width", 0.5)),
+        ),
+        "stairs_down": TerrainSeparatedPyramidStairsCfg(
+            proportion=weights["stairs_down"],
+            direction="down",
+            step_height_range=step_height,
+            step_width=float(_get(config, "stairs.step_depth", 0.30)),
+            platform_width=float(_get(config, "stairs.platform_width", 0.80)),
+            num_steps=int(_get(config, "stairs.num_steps", 10)),
             border_width=float(_get(config, "stairs.border_width", 0.5)),
         ),
         "rough": NeutralHfPerlinNoiseTerrainCfg(
@@ -136,6 +167,7 @@ def make_ufo_v0_generator_cfg(mode: TerrainMode, config: Any) -> TerrainGenerato
             num_steps=int(_get(config, "course.num_steps", 5)),
             top_platform_length=float(_get(config, "course.top_platform_length", 0.80)),
             connector_length=float(_get(config, "course.connector_length", 1.00)),
+            include_ramp=bool(_get(config, "course.include_ramp", True)),
             ramp_length=float(_get(config, "course.ramp_length", 2.50)),
             ramp_angle_deg=float(_get(config, "course.ramp_angle_deg", 8.0)),
             border_width=float(_get(config, "course.border_width", 0.50)),

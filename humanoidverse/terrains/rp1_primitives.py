@@ -214,8 +214,119 @@ class TerrainBoundedStairsCfg(SubTerrainCfg):
 
 
 @dataclass(kw_only=True)
+class TerrainSeparatedPyramidStairsCfg(SubTerrainCfg):
+    """A fixed-step square staircase with a center-only transition start."""
+
+    direction: str
+    step_height_range: tuple[float, float] = (0.10, 0.18)
+    step_width: float = 0.30
+    platform_width: float = 0.80
+    num_steps: int = 10
+    border_width: float = 0.50
+    base_thickness: float = 0.25
+
+    def function(self, difficulty: float, spec: mujoco.MjSpec, rng: np.random.Generator) -> TerrainOutput:
+        del rng
+        if self.direction not in {"up", "down"}:
+            raise ValueError("stair direction must be 'up' or 'down'")
+        if self.num_steps <= 0:
+            raise ValueError("num_steps must be positive")
+        if min(self.step_width, self.platform_width, self.base_thickness) <= 0.0:
+            raise ValueError("stair dimensions must be positive")
+
+        stair_outer_width = self.platform_width + 2 * self.num_steps * self.step_width
+        available_width = min(self.size) - 2 * self.border_width
+        if stair_outer_width >= available_width:
+            raise ValueError("separated stairs need a flat outer seam inside the terrain patch")
+
+        step_height = self.step_height_range[0] + difficulty * (
+            self.step_height_range[1] - self.step_height_range[0]
+        )
+        peak_height = self.num_steps * step_height
+        center_xy = (self.size[0] / 2.0, self.size[1] / 2.0)
+        body = spec.body("terrain")
+        base_top = -peak_height if self.direction == "up" else 0.0
+        base_bottom = base_top - self.base_thickness
+        base_size = (
+            (self.platform_width, self.platform_width)
+            if self.direction == "up"
+            else self.size
+        )
+        geometries = [
+            _add_box(
+                body,
+                center_xy=center_xy,
+                size_xy=base_size,
+                bottom=base_bottom,
+                top=base_top,
+                color=(0.30, 0.32, 0.34, 1.0),
+            )
+        ]
+
+        if self.direction == "down":
+            geometries.append(
+                _add_box(
+                    body,
+                    center_xy=center_xy,
+                    size_xy=(self.platform_width, self.platform_width),
+                    bottom=0.0,
+                    top=peak_height,
+                    color=(0.54, 0.54, 0.50, 1.0),
+                )
+            )
+
+        current_width = self.platform_width
+        for step in range(1, self.num_steps + 1):
+            outer_width = current_width + 2 * self.step_width
+            if self.direction == "up":
+                top = -(self.num_steps - step) * step_height
+                bottom = base_top
+            else:
+                top = (self.num_steps - step) * step_height
+                bottom = 0.0
+            if top > bottom + 1.0e-6:
+                geometries.extend(
+                    _add_square_ring(
+                        body,
+                        center_xy=center_xy,
+                        inner_width=current_width,
+                        outer_width=outer_width,
+                        bottom=bottom,
+                        top=top,
+                        color=(0.34 + 0.025 * step, 0.37 + 0.02 * step, 0.40, 1.0),
+                    )
+                )
+            current_width = outer_width
+
+        if self.direction == "up":
+            # Fill the remainder at z=0 so every tile boundary shares the
+            # connected map's common collision and ray-cast height.
+            geometries.extend(
+                _add_square_ring(
+                    body,
+                    center_xy=center_xy,
+                    inner_width=current_width,
+                    # A tiny overlap removes exact-edge ray gaps between
+                    # independently compiled neighboring tiles.
+                    outer_width=min(self.size) + 2.0e-3,
+                    bottom=base_top,
+                    top=0.0,
+                    color=(0.42, 0.43, 0.43, 1.0),
+                )
+            )
+
+        center_height = -peak_height if self.direction == "up" else peak_height
+        return _mark_as_terrain(
+            TerrainOutput(
+                origin=np.array([center_xy[0], center_xy[1], center_height]),
+                geometries=geometries,
+            )
+        )
+
+
+@dataclass(kw_only=True)
 class TerrainTraversalCourseCfg(SubTerrainCfg):
-    """A heading-agnostic radial route with a fixed obstacle sequence."""
+    """A straight +x route with stair edges spanning the full tile width."""
 
     flat_run: float = 1.80
     step_height: float = 0.12
@@ -223,6 +334,7 @@ class TerrainTraversalCourseCfg(SubTerrainCfg):
     num_steps: int = 5
     top_platform_length: float = 0.80
     connector_length: float = 1.00
+    include_ramp: bool = True
     ramp_length: float = 2.50
     ramp_angle_deg: float = 8.0
     border_width: float = 0.50
@@ -234,7 +346,9 @@ class TerrainTraversalCourseCfg(SubTerrainCfg):
         if self.num_steps <= 0:
             raise ValueError("num_steps must be positive")
         if min(self.step_height, self.step_depth, self.ramp_length, self.horizontal_scale) <= 0.0:
-            raise ValueError("course step, ramp, and heightfield dimensions must be positive")
+            raise ValueError("course step and terrain dimensions must be positive")
+        if self.include_ramp:
+            raise ValueError("box-based traversal course does not support include_ramp=True")
 
         stairs_start = self.flat_run
         stairs_up_end = stairs_start + self.num_steps * self.step_depth
@@ -242,56 +356,53 @@ class TerrainTraversalCourseCfg(SubTerrainCfg):
         stairs_down_end = stairs_down_start + self.num_steps * self.step_depth
         ramp_start = stairs_down_end + self.connector_length
         ramp_end = ramp_start + self.ramp_length
-        safe_radius = min(self.size) / 2.0 - self.border_width
-        if ramp_end >= safe_radius:
+        safe_forward_extent = self.size[0] / 2.0 - self.border_width
+        course_end = ramp_end if self.include_ramp else stairs_down_end
+        if course_end >= safe_forward_extent:
             raise ValueError("course does not fit inside the terrain patch")
 
-        num_cols = int(round(self.size[0] / self.horizontal_scale)) + 1
-        num_rows = int(round(self.size[1] / self.horizontal_scale)) + 1
-        x_coords = np.linspace(0.0, self.size[0], num_cols)
-        y_coords = np.linspace(0.0, self.size[1], num_rows)
-        xx, yy = np.meshgrid(x_coords, y_coords)
         center_x = self.size[0] / 2.0
         center_y = self.size[1] / 2.0
-        radius = np.hypot(xx - center_x, yy - center_y)
-        heights = np.zeros_like(radius)
+        terrain_body = spec.body("terrain")
+        color = (0.38, 0.44, 0.40, 1.0)
+        geometries = [
+            _add_box(
+                terrain_body,
+                center_xy=(center_x, center_y),
+                size_xy=self.size,
+                bottom=-self.base_thickness,
+                top=0.0,
+                color=color,
+            )
+        ]
 
-        up = (radius >= stairs_start) & (radius < stairs_up_end)
-        up_levels = np.floor((radius[up] - stairs_start) / self.step_depth).astype(np.int32) + 1
-        heights[up] = up_levels * self.step_height
+        def add_band(start: float, end: float, height: float) -> None:
+            if height <= 0.0 or end <= start:
+                return
+            geometries.append(
+                _add_box(
+                    terrain_body,
+                    center_xy=(center_x + (start + end) / 2.0, center_y),
+                    size_xy=(end - start, self.size[1]),
+                    bottom=0.0,
+                    top=height,
+                    color=color,
+                )
+            )
 
+        for level in range(1, self.num_steps + 1):
+            start = stairs_start + (level - 1) * self.step_depth
+            add_band(start, start + self.step_depth, level * self.step_height)
         stair_peak = self.num_steps * self.step_height
-        top = (radius >= stairs_up_end) & (radius < stairs_down_start)
-        heights[top] = stair_peak
+        add_band(stairs_up_end, stairs_down_start, stair_peak)
+        for level in range(1, self.num_steps + 1):
+            start = stairs_down_start + (level - 1) * self.step_depth
+            add_band(start, start + self.step_depth, (self.num_steps - level) * self.step_height)
 
-        down = (radius >= stairs_down_start) & (radius < stairs_down_end)
-        down_levels = np.floor((radius[down] - stairs_down_start) / self.step_depth).astype(np.int32) + 1
-        heights[down] = np.maximum(stair_peak - down_levels * self.step_height, 0.0)
-
-        ramp = (radius >= ramp_start) & (radius < ramp_end)
-        ramp_slope = math.tan(math.radians(self.ramp_angle_deg))
-        heights[ramp] = (radius[ramp] - ramp_start) * ramp_slope
-        ramp_rise = self.ramp_length * ramp_slope
-        heights[radius >= ramp_end] = ramp_rise
-
-        max_height = float(np.max(heights))
-        normalized = heights / max_height
-        field = spec.add_hfield(
-            name=f"hfield_course_{uuid.uuid4().hex}",
-            size=(self.size[0] / 2.0, self.size[1] / 2.0, max_height, self.base_thickness),
-            nrow=num_rows,
-            ncol=num_cols,
-            userdata=normalized.astype(np.float32).ravel().tolist(),
-        )
-        geom = spec.body("terrain").add_geom(
-            type=mujoco.mjtGeom.mjGEOM_HFIELD,
-            hfieldname=field.name,
-            pos=(center_x, center_y, 0.0),
-        )
         return _mark_as_terrain(
             TerrainOutput(
                 origin=np.array([center_x, center_y, 0.0]),
-                geometries=[TerrainGeometry(geom=geom, hfield=field, color=(0.38, 0.44, 0.40, 1.0))],
+                geometries=geometries,
             )
         )
 

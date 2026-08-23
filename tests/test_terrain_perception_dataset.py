@@ -91,7 +91,20 @@ class TerrainPerceptionDatasetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             dataset_dir = root / "dataset"
-            writer = TerrainPerceptionChunkWriter(dataset_dir, chunk_steps=8)
+            writer = TerrainPerceptionChunkWriter(
+                dataset_dir,
+                chunk_steps=8,
+                metadata={
+                    "terrain_component_names": [
+                        "flat",
+                        "slope",
+                        "stairs_up",
+                        "stairs_down",
+                        "rough",
+                        "platforms",
+                    ]
+                },
+            )
             for step in range(8):
                 writer.append(make_frame(step))
             writer.close()
@@ -111,6 +124,7 @@ class TerrainPerceptionDatasetTest(unittest.TestCase):
             )
 
             self.assertEqual(len(summary["history"]), 1)
+            self.assertEqual(summary["stairs_terrain_ids"], [2, 3])
             self.assertTrue((root / "model" / "latest.pt").is_file())
             self.assertTrue((root / "model" / "best.pt").is_file())
 

@@ -16,6 +16,7 @@ from omegaconf import OmegaConf
 
 from humanoidverse.agents.buffers.transition import DictBuffer
 from humanoidverse.agents.envs.humanoidverse_mjlab import (
+    RESET_REGION_ID,
     HumanoidVerseMjlabConfig,
     HumanoidVerseMjlabCore,
     body_contact_severity,
@@ -24,14 +25,14 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     pre_descent_reset_positions,
     sample_lie_down_reset_mask,
     sample_pre_descent_reset_mask,
-    sample_terrain_seam_reset_mask,
     sample_terrain_reset_regions,
+    sample_terrain_seam_reset_mask,
     select_pre_descent_directions,
+    separated_stairs_upright_reset_mask,
     stairs_transition_reset_positions,
     tangential_contact_speed,
     terrain_grid_boundary_margin,
     terrain_grid_coordinates,
-    RESET_REGION_ID,
 )
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import _calc_metrics, emd_numpy
 from humanoidverse.agents.presets import build_agent_preset
@@ -53,15 +54,15 @@ from humanoidverse.terrain_transfer_inference import (
 from humanoidverse.terrains import make_terrain_entity_cfg, terrain_component_names
 from humanoidverse.terrains.coverage import validate_motion_terrain_coverage
 from humanoidverse.terrains.rp1_simple import make_ufo_v0_generator_cfg
+from humanoidverse.terrains.terrain_height_sensor import (
+    mark_terrain_padding_ray_group,
+    repair_padding_ray_misses,
+)
 from humanoidverse.terrains.terrain_observation import (
     RobotCentricGridPatternCfg,
     flat_zero_observations,
     observations_from_clearances,
     reference_ray_index,
-)
-from humanoidverse.terrains.terrain_height_sensor import (
-    mark_terrain_padding_ray_group,
-    repair_padding_ray_misses,
 )
 from humanoidverse.tracking_inference import _center_target_states_on_terrain
 from humanoidverse.training.workspace import Workspace, make_flat_terrain_priority_eval_config
@@ -268,24 +269,48 @@ def test_stairs_are_excluded_without_disabling_other_seam_resets() -> None:
     assert flat_only.tolist() == [True, False]
 
 
+def test_separated_stairs_reset_at_center_and_exclude_lie_down() -> None:
+    terrain_ids = torch.tensor([2, 3, 0, 5])
+    regions = sample_terrain_reset_regions(
+        terrain_ids,
+        torch.tensor([0.0, 0.99, 0.1, 0.1]),
+        component_names=("flat", "slope", "stairs_up", "stairs_down", "rough", "platforms"),
+        slope_random_prob=0.0,
+        stairs_probabilities=(1.0, 0.0, 0.0, 0.0, 0.0),
+        rough_random_prob=0.0,
+        platforms_random_prob=0.0,
+    )
+    assert regions.tolist() == [
+        RESET_REGION_ID["stairs_up_center"],
+        RESET_REGION_ID["stairs_down_center"],
+        RESET_REGION_ID["flat_center"],
+        RESET_REGION_ID["platforms_center"],
+    ]
+    upright_stairs = separated_stairs_upright_reset_mask(regions)
+    lie_down = sample_lie_down_reset_mask(
+        torch.zeros(4), probability=0.30, excluded=upright_stairs
+    )
+    assert lie_down.tolist() == [False, False, True, True]
+
+
 def test_connected_grid_internal_seams_are_not_boundaries() -> None:
-    patch = torch.tensor([14.0, 14.0])
+    patch = torch.tensor([8.0, 8.0])
     points = torch.tensor(
         [
-            [0.0, -21.01],
-            [0.0, -20.99],
-            [69.0, 34.0],
-            [84.01, 0.0],
+            [0.0, -16.01],
+            [0.0, -15.99],
+            [39.0, 23.0],
+            [57.01, 0.0],
         ]
     )
-    rows, cols, inside = terrain_grid_coordinates(points, patch, num_rows=10, num_cols=5)
+    rows, cols, inside = terrain_grid_coordinates(points, patch, num_rows=10, num_cols=6)
     assert inside.tolist() == [True, True, True, False]
     assert cols[:2].tolist() == [0, 1]
     margins = terrain_grid_boundary_margin(
-        points, patch, num_rows=10, num_cols=5, border_width=14.0
+        points, patch, num_rows=10, num_cols=6, border_width=17.0
     )
     torch.testing.assert_close(
-        margins, torch.tensor([27.99, 28.01, 15.0, -0.01]), atol=1e-5, rtol=0.0
+        margins, torch.tensor([24.99, 25.01, 18.0, -0.01]), atol=1e-5, rtol=0.0
     )
 
 
@@ -314,7 +339,7 @@ def test_stairs_transition_positions_fit_one_cycle_in_14m_tile() -> None:
 
 def test_course_completion_radius_is_inside_final_flat() -> None:
     course = OmegaConf.load("humanoidverse/config/terrain/terrain_ufo_v0.yaml").terrain.course
-    assert math.isclose(_course_completion_radius(course), 9.4)
+    assert math.isclose(_course_completion_radius(course), 12.4)
 
 
 def test_prompt_latent_round_trip_preserves_checksum(tmp_path) -> None:
@@ -698,20 +723,49 @@ class TerrainPhysicsObservationTest(unittest.TestCase):
                 atol=1e-5,
             )
 
+    def test_separated_stairs_have_inverse_ten_step_profiles(self) -> None:
+        offsets = [0.0, 0.39, 0.41, 0.71, 1.01, 1.31, 1.61, 1.91, 2.21, 2.51, 2.81, 3.11, 3.41, 3.8]
+        stairs_up = _physics_heights_at_offsets("stairs_up", offsets)
+        stairs_down = _physics_heights_at_offsets("stairs_down", offsets)
+        np.testing.assert_allclose(
+            stairs_up,
+            [-1.80, -1.80, -1.62, -1.44, -1.26, -1.08, -0.90, -0.72, -0.54, -0.36, -0.18, 0.0, 0.0, 0.0],
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            stairs_down,
+            [1.80, 1.80, 1.62, 1.44, 1.26, 1.08, 0.90, 0.72, 0.54, 0.36, 0.18, 0.0, 0.0, 0.0],
+            atol=1e-5,
+        )
+
+    def test_separated_stairs_are_four_way_symmetric(self) -> None:
+        for mode, center_height, first_step in (
+            ("stairs_up", -1.80, -1.62),
+            ("stairs_down", 1.80, 1.62),
+        ):
+            np.testing.assert_allclose(
+                _physics_heights_at_xy_offsets(
+                    mode,
+                    [(0.0, 0.0), (0.41, 0.0), (-0.41, 0.0), (0.0, 0.41), (0.0, -0.41)],
+                ),
+                [center_height, first_step, first_step, first_step, first_step],
+                atol=1e-5,
+            )
+
     def test_platform_bands_alternate_between_raised_and_flat(self) -> None:
-        offsets = [0.0, 1.0, 1.8, 2.6, 3.4, 4.2]
+        offsets = [0.0, 1.0, 1.8, 2.6, 3.4]
         values = _physics_heights_at_offsets("platforms", offsets)
-        np.testing.assert_allclose(values, [0.0, 0.15, 0.0, 0.15, 0.0, 0.15], atol=1e-5)
+        np.testing.assert_allclose(values, [0.0, 0.15, 0.0, 0.15, 0.0], atol=1e-5)
 
     def test_mixed_tile_collision_seams_are_level_and_gap_free(self) -> None:
         epsilon = 0.05
         points: list[tuple[float, float]] = []
         # Seam between the two difficulty rows, sampled in every family.
-        for y in (-28.0, -14.0, 0.0, 14.0, 28.0):
+        for y in (-20.0, -12.0, -4.0, 4.0, 12.0, 20.0):
             points.extend([(-epsilon, y), (0.0, y), (epsilon, y)])
-        # Seams between the five terrain families, sampled in both rows.
-        for x in (-7.0, 7.0):
-            for y in (-21.0, -7.0, 7.0, 21.0):
+        # Seams between the six terrain families, sampled in both rows.
+        for x in (-4.0, 4.0):
+            for y in (-16.0, -8.0, 0.0, 8.0, 16.0):
                 points.extend([(x, y - epsilon), (x, y), (x, y + epsilon)])
         np.testing.assert_allclose(_mixed_terrain_heights(points), 0.0, atol=0.011)
 
@@ -767,16 +821,25 @@ class TerrainPhysicsObservationTest(unittest.TestCase):
         torch.testing.assert_close(hit_positions[0, 1], torch.tensor([15.0, 0.0, 0.0]))
         torch.testing.assert_close(normals[0, 1], torch.tensor([0.0, 0.0, 1.0]))
 
-    def test_traversal_course_has_ordered_flat_stairs_ramp_flat_profile(self) -> None:
-        offsets = [0.0, 1.9, 3.4, 4.2, 5.8, 6.7, 8.8, 9.3]
+    def test_traversal_course_has_ordered_ten_step_up_down_profile(self) -> None:
+        offsets = [0.0, 1.9, 4.7, 5.1, 5.9, 8.05, 8.7, 9.6]
         values = _physics_heights_at_offsets("course", offsets)
         self.assertAlmostEqual(values[0], 0.0, places=5)
         self.assertAlmostEqual(values[1], 0.12, places=4)
-        self.assertAlmostEqual(values[2], 0.60, places=4)
-        self.assertAlmostEqual(values[3], 0.48, places=4)
-        self.assertAlmostEqual(values[4], 0.0, places=4)
-        self.assertGreater(values[6], values[5])
-        self.assertAlmostEqual(values[7], 2.5 * math.tan(math.radians(8.0)), places=4)
+        self.assertAlmostEqual(values[2], 1.20, places=4)
+        self.assertAlmostEqual(values[3], 1.20, places=4)
+        self.assertAlmostEqual(values[4], 0.96, places=4)
+        self.assertAlmostEqual(values[5], 0.12, places=4)
+        self.assertAlmostEqual(values[6], 0.0, places=4)
+        self.assertAlmostEqual(values[7], 0.0, places=4)
+
+    def test_traversal_course_stair_edges_are_straight_across_y(self) -> None:
+        for x_offset in (1.9, 4.7, 5.9, 8.0):
+            heights = _physics_heights_at_xy_offsets(
+                "course",
+                [(x_offset, y_offset) for y_offset in (-3.0, -1.0, 0.0, 1.0, 3.0)],
+            )
+            np.testing.assert_allclose(heights, heights[0], atol=1e-5)
 
     def test_rough_collision_heights_vary_and_are_finite(self) -> None:
         values = _physics_height_profile("rough")
@@ -903,54 +966,56 @@ class TerrainNetworkRoutingTest(unittest.TestCase):
         self.assertNotIn("terrain_priv", _preset("fb").model.obs_normalizer.normalizers)
         self.assertNotIn("terrain_actor", _preset("fb").model.obs_normalizer.normalizers)
 
-    def test_phase2_uses_fixed_harder_terrain_distribution(self) -> None:
+    def test_separated_stairs_use_fixed_terrain_distribution(self) -> None:
         terrain = OmegaConf.load("humanoidverse/config/terrain/terrain_ufo_v0.yaml").terrain
         self.assertEqual(
             dict(terrain.terrain_mix),
-            {"flat": 0.15, "slope": 0.15, "stairs": 0.3, "rough": 0.2, "platforms": 0.2},
+            {
+                "flat": 0.15,
+                "slope": 0.15,
+                "stairs_up": 0.20,
+                "stairs_down": 0.20,
+                "rough": 0.15,
+                "platforms": 0.15,
+            },
         )
         self.assertEqual(list(terrain.stairs.step_height_range), [0.10, 0.18])
         self.assertEqual(list(terrain.rough.amplitude_range), [0.03, 0.05])
         self.assertEqual(float(terrain.slope.max_angle_deg), 8.0)
-        self.assertEqual(list(terrain.patch_size), [14.0, 14.0])
-        self.assertEqual(float(terrain.border_width), 14.0)
-        self.assertEqual(int(terrain.stairs.num_steps), 6)
-        self.assertEqual(float(terrain.stairs.plateau_width), 0.8)
+        self.assertEqual(list(terrain.patch_size), [8.0, 8.0])
+        self.assertEqual(float(terrain.border_width), 17.0)
+        self.assertEqual(int(terrain.stairs.num_steps), 10)
+        self.assertEqual(float(terrain.stairs.platform_width), 0.8)
         self.assertEqual(float(terrain.stairs.pre_descent_edge_margin), 0.35)
         self.assertEqual(float(terrain.stairs.pre_descent_ground_probe_clearance), 1.5)
         self.assertEqual(
             dict(terrain.reset.stairs_probabilities),
-            {"center": 0.5, "pre_descent": 0.2, "pre_ascent": 0.2, "intercycle": 0.1, "tread": 0.0},
+            {"center": 1.0, "pre_descent": 0.0, "pre_ascent": 0.0, "intercycle": 0.0, "tread": 0.0},
         )
         self.assertEqual(float(terrain.reset.seam_reset_prob), 0.20)
-        self.assertEqual(list(terrain.reset.seam_excluded_terrains), ["stairs"])
-        cycle_radius = (
-            2 * int(terrain.stairs.num_steps) * float(terrain.stairs.step_depth)
-            + 2 * float(terrain.stairs.plateau_width)
-        )
+        self.assertEqual(list(terrain.reset.seam_excluded_terrains), ["stairs_up", "stairs_down"])
         available_width = min(float(value) for value in terrain.patch_size) - 2 * float(
             terrain.stairs.border_width
         )
-        available_radius = (available_width - float(terrain.stairs.platform_width)) / 2
-        num_cycles = int(available_radius // cycle_radius)
-        stair_transition_width = float(terrain.stairs.platform_width) + 2 * num_cycles * cycle_radius
-        self.assertEqual(num_cycles, 1)
-        self.assertAlmostEqual(stair_transition_width, 11.4)
+        stair_transition_width = float(terrain.stairs.platform_width) + (
+            2 * int(terrain.stairs.num_steps) * float(terrain.stairs.step_depth)
+        )
+        self.assertAlmostEqual(stair_transition_width, 6.8)
         self.assertLess(stair_transition_width, available_width)
         np.testing.assert_array_equal(
             _proportional_counts(1024, np.asarray(list(terrain.terrain_mix.values()))),
-            [154, 154, 306, 205, 205],
+            [154, 154, 204, 204, 154, 154],
         )
         np.testing.assert_array_equal(
             _proportional_counts(8192, np.asarray(list(terrain.terrain_mix.values()))),
-            [1229, 1229, 2457, 1639, 1638],
+            [1229, 1229, 1638, 1638, 1229, 1229],
         )
         self.assertFalse(bool(terrain.coverage.fail_on_boundary_violation))
 
     def test_all_lafan_clips_fit_patch_with_sensor_and_policy_margin(self) -> None:
         report = validate_motion_terrain_coverage(
             "humanoidverse/data/lafan_29dof_10s-clipped.pkl",
-            patch_size=(14.0, 14.0),
+            patch_size=(8.0, 8.0),
             sensor_radius=math.hypot(1.6, 0.6),
             policy_margin=2.0,
             safe_radius=21.0,
@@ -1028,7 +1093,7 @@ class TerrainPriorityEvaluationTest(unittest.TestCase):
     def test_mixed_train_and_flat_priority_component_sets(self) -> None:
         self.assertEqual(
             terrain_component_names("mixed"),
-            ("flat", "slope", "stairs", "rough", "platforms"),
+            ("flat", "slope", "stairs_up", "stairs_down", "rough", "platforms"),
         )
         self.assertEqual(terrain_component_names("flat"), ("flat",))
 

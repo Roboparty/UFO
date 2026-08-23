@@ -73,15 +73,22 @@ class DepthTerrainEvaluationTest(unittest.TestCase):
         core = SimpleNamespace(
             _terrain_patch_size=torch.tensor([14.0, 14.0]),
             _terrain_grid_rows=10,
-            _terrain_grid_cols=5,
-            terrain_component_names=("flat", "slope", "stairs", "rough", "platforms"),
+            _terrain_grid_cols=6,
+            terrain_component_names=(
+                "flat",
+                "slope",
+                "stairs_up",
+                "stairs_down",
+                "rough",
+                "platforms",
+            ),
             config=SimpleNamespace(terrain=SimpleNamespace(platforms=SimpleNamespace(center_width=1.5, band_width=0.8))),
         )
 
         x, y = elevated_platform_probe_xy(core)
 
         self.assertAlmostEqual(x, 8.15)
-        self.assertAlmostEqual(y, 28.0)
+        self.assertAlmostEqual(y, 35.0)
 
     def test_stair_edge_marks_both_sides_of_discontinuity(self):
         gt = torch.ones((1, 21, 13))

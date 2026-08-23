@@ -6,17 +6,17 @@ defaults:
 terrain:
   # Selected only by --agent fb_terrain; original FB remains unchanged.
   enabled: true
-  terrain_type: mixed  # flat, slope, stairs, rough, platforms, mixed
+  terrain_type: mixed  # flat, slope, stairs_up, stairs_down, rough, platforms, mixed
   seed: 0
-  # Harder phase-2 fixed distribution, used after global step 99,295,232.
-  # This is an explicit distribution shift, not a time-varying curriculum.
-  terrain_mix: {flat: 0.15, slope: 0.15, stairs: 0.30, rough: 0.20, platforms: 0.20}
-  # Tiles form one connected global map. A 14 m tile is the smallest rounded
-  # size that retains one complete 6-up/platform/6-down stairs cycle.
-  patch_size: [14.0, 14.0]
+  # Fixed six-family distribution. Ascent and descent are separate so their
+  # state coverage and success can be measured independently.
+  terrain_mix: {flat: 0.15, slope: 0.15, stairs_up: 0.20, stairs_down: 0.20, rough: 0.15, platforms: 0.15}
+  # Tiles form one connected global map. Both stair families return to z=0 at
+  # their outer seams, matching all adjacent terrain columns.
+  patch_size: [8.0, 8.0]
   # Shared flat border around the complete grid. Combined with half a tile,
   # this leaves 21 m from every outer spawn origin to the world boundary.
-  border_width: 14.0
+  border_width: 17.0
   num_rows: 10
   difficulty_range: [0.0, 1.0]
   heightfield: {horizontal_scale: 0.1, vertical_scale: 0.005}
@@ -26,20 +26,14 @@ terrain:
   # Actor/F/B/Critic never receive the region identifier.
   reset:
     seam_reset_prob: 0.20
-    # Preserve complete ascent/descent trajectories inside stairs tiles.
-    # Seam coverage remains enabled for every other terrain family.
-    seam_excluded_terrains: [stairs]
+    # Stair resets remain at their center platform; seam coverage remains
+    # enabled for every other terrain family.
+    seam_excluded_terrains: [stairs_up, stairs_down]
     seam_inset: 0.35
     slope_random_prob: 0.30
     slope_radius_range: [1.25, 3.0]
-    stairs_probabilities:
-      # 70% ascent-oriented coverage (center + pre-ascent), while retaining
-      # explicit high-plateau descent starts. Avoid unstable mid-tread resets.
-      center: 0.50
-      pre_descent: 0.20
-      pre_ascent: 0.20
-      intercycle: 0.10
-      tread: 0.00
+    # Retained only for the explicit legacy `terrain_type=stairs` mode.
+    stairs_probabilities: {center: 1.0, pre_descent: 0.0, pre_ascent: 0.0, intercycle: 0.0, tread: 0.0}
     stairs_edge_margin: 0.35
     rough_random_prob: 0.50
     platforms_random_prob: 0.30
@@ -58,8 +52,14 @@ terrain:
   stairs:
     step_height_range: [0.10, 0.18]
     step_depth: 0.30
-    platform_width: 1.0
-    num_steps: 6
+    # Upright-only center reset platform. Its small footprint makes a rollout
+    # encounter the first transition instead of circling on local flat ground.
+    platform_width: 0.8
+    num_steps: 10
+    # The old combined up/platform/down inference terrain still needs 14 m.
+    legacy_patch_size: [14.0, 14.0]
+    legacy_platform_width: 1.0
+    legacy_num_steps: 6
     plateau_width: 0.8
     # Elevated-region reset probes start above the collision geometry.
     pre_descent_edge_margin: 0.35
@@ -83,16 +83,17 @@ terrain:
     lacunarity: 2.0
     border_width: 0.5
 
-  # Inference-only, deterministic +x traversal route. It is not part of the
-  # mixed training distribution.
+  # Inference-only straight +x traversal: flat -> 10 stairs up -> short top ->
+  # 10 stairs down -> flat. It is not part of the mixed training distribution.
   course:
     patch_size: [22.0, 22.0]
     flat_run: 1.80
     step_height: 0.12
     step_depth: 0.30
-    num_steps: 5
+    num_steps: 10
     top_platform_length: 0.80
     connector_length: 1.00
+    include_ramp: false
     ramp_length: 2.50
     ramp_angle_deg: 8.0
     border_width: 0.5

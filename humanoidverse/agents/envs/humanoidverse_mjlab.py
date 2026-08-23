@@ -29,13 +29,13 @@ from humanoidverse.agents.base import BaseConfig
 from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHistoryHandler
 from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
 from humanoidverse.terrains import make_terrain_entity_cfg, terrain_component_names
+from humanoidverse.terrains.terrain_height_sensor import PbfmTerrainHeightSensorCfg
 from humanoidverse.terrains.terrain_observation import (
     RobotCentricGridPatternCfg,
     flat_zero_observations,
     observations_from_clearances,
     reference_ray_index,
 )
-from humanoidverse.terrains.terrain_height_sensor import PbfmTerrainHeightSensorCfg
 from humanoidverse.utils.helpers import pre_process_config
 from humanoidverse.utils.motion_lib.motion_lib_robot import MotionLibRobot
 from humanoidverse.utils.torch_utils import (
@@ -63,6 +63,8 @@ RESET_REGION_NAMES = (
     "slope_center",
     "slope_random",
     "stairs_center",
+    "stairs_up_center",
+    "stairs_down_center",
     "stairs_pre_descent",
     "stairs_pre_ascent",
     "stairs_intercycle",
@@ -255,6 +257,13 @@ def sample_lie_down_reset_mask(
     return (samples < probability) & ~excluded
 
 
+def separated_stairs_upright_reset_mask(region_ids: torch.Tensor) -> torch.Tensor:
+    """Identify stair-family center resets that must retain the motion pose."""
+    return (region_ids == RESET_REGION_ID["stairs_up_center"]) | (
+        region_ids == RESET_REGION_ID["stairs_down_center"]
+    )
+
+
 def sample_terrain_reset_regions(
     terrain_ids: torch.Tensor,
     samples: torch.Tensor,
@@ -277,7 +286,9 @@ def sample_terrain_reset_regions(
         raise ValueError("stairs reset probabilities must sum to 1")
 
     names = tuple(component_names)
-    unknown = sorted(set(names) - {"flat", "slope", "stairs", "rough", "platforms"})
+    unknown = sorted(
+        set(names) - {"flat", "slope", "stairs", "stairs_up", "stairs_down", "rough", "platforms"}
+    )
     if unknown:
         raise ValueError(f"unsupported terrain components for reset sampling: {unknown}")
     region_ids = torch.full_like(terrain_ids, RESET_REGION_ID["flat_center"], dtype=torch.long)
@@ -307,6 +318,9 @@ def sample_terrain_reset_regions(
         "stairs_intercycle"
     ]
     region_ids[stairs & (samples >= threshold_intercycle)] = RESET_REGION_ID["stairs_tread"]
+
+    region_ids[terrain_mask("stairs_up")] = RESET_REGION_ID["stairs_up_center"]
+    region_ids[terrain_mask("stairs_down")] = RESET_REGION_ID["stairs_down_center"]
 
     rough = terrain_mask("rough")
     region_ids[rough] = RESET_REGION_ID["rough_center"]
@@ -1524,7 +1538,7 @@ class HumanoidVerseMjlabCore:
         terrain_entity = self.mjlab_env.scene["terrain"]
         terrain_ids = terrain_entity.terrain_types[env_ids]
         positions = self.env_origins[env_ids, :2].clone()
-        supported_components = {"flat", "slope", "stairs", "rough", "platforms"}
+        supported_components = {"flat", "slope", "stairs", "stairs_up", "stairs_down", "rough", "platforms"}
         if any(name not in supported_components for name in self.terrain_component_names):
             region_ids = torch.full(
                 (len(env_ids),), RESET_REGION_ID["flat_center"], device=self.device, dtype=torch.long
@@ -2054,10 +2068,11 @@ class HumanoidVerseMjlabCore:
                     )
             lie_down_mask = torch.zeros(len(env_ids), device=self.device, dtype=torch.bool)
             if self.config.get("lie_down_init", False):
+                upright_stairs = separated_stairs_upright_reset_mask(reset_region_ids)
                 lie_down_mask = sample_lie_down_reset_mask(
                     torch.rand(len(env_ids), device=self.device),
                     probability=float(getattr(self.config, "lie_down_init_prob", 0.0)),
-                    excluded=torch.zeros(len(env_ids), device=self.device, dtype=torch.bool),
+                    excluded=upright_stairs,
                 )
                 if not self.is_evaluating:
                     self._lie_down_reset_count += torch.count_nonzero(lie_down_mask)

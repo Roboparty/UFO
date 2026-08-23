@@ -60,11 +60,12 @@ def _run_epoch(
     device: torch.device,
     history_seconds: float,
     optimizer: torch.optim.Optimizer | None,
-    stairs_terrain_id: int,
+    stairs_terrain_ids: tuple[int, ...],
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
     totals: dict[str, float] = {}
+    metric_counts: dict[str, int] = {}
     batches = 0
     for batch in loader:
         partial = batch["partial_map"].to(device)
@@ -98,7 +99,10 @@ def _run_epoch(
         )
         values = {"loss": float(loss.detach().item())}
         values.update({name: float(value.item()) for name, value in metrics.items()})
-        stairs = batch["terrain_type"].to(device) == stairs_terrain_id
+        stairs = torch.isin(
+            batch["terrain_type"].to(device),
+            torch.tensor(stairs_terrain_ids, device=device),
+        )
         if torch.any(stairs):
             stair_metrics = terrain_completion_metrics(
                 output.completed_clearance.detach()[stairs],
@@ -108,10 +112,11 @@ def _run_epoch(
             values.update({f"stairs_{name}": float(value.item()) for name, value in stair_metrics.items()})
         for name, value in values.items():
             totals[name] = totals.get(name, 0.0) + value
+            metric_counts[name] = metric_counts.get(name, 0) + 1
         batches += 1
     if batches == 0:
         raise ValueError("terrain perception data loader contains no batches")
-    return {name: value / batches for name, value in totals.items()}
+    return {name: value / metric_counts[name] for name, value in totals.items()}
 
 
 def train_terrain_perception(
@@ -127,7 +132,7 @@ def train_terrain_perception(
     hidden_channels: int,
     device: str,
     seed: int,
-    stairs_terrain_id: int = 2,
+    stairs_terrain_ids: tuple[int, ...] | None = None,
 ) -> dict[str, object]:
     torch.manual_seed(seed)
     full_dataset = TerrainPerceptionSequenceDataset(
@@ -135,6 +140,13 @@ def train_terrain_perception(
         sequence_steps=sequence_steps,
         history_seconds=history_seconds,
     )
+    if stairs_terrain_ids is None:
+        component_names = tuple(full_dataset.metadata.get("terrain_component_names", ()))
+        stairs_terrain_ids = tuple(index for index, name in enumerate(component_names) if str(name).startswith("stairs"))
+        if not stairs_terrain_ids:
+            stairs_terrain_ids = (2,)
+    if not stairs_terrain_ids or any(index < 0 for index in stairs_terrain_ids):
+        raise ValueError("stairs_terrain_ids must contain non-negative terrain IDs")
     if validation_dataset_dir is not None:
         train_dataset: Dataset = full_dataset
         validation_dataset: Dataset = TerrainPerceptionSequenceDataset(
@@ -176,7 +188,7 @@ def train_terrain_perception(
             device=torch_device,
             history_seconds=history_seconds,
             optimizer=optimizer,
-            stairs_terrain_id=stairs_terrain_id,
+            stairs_terrain_ids=stairs_terrain_ids,
         )
         with torch.no_grad():
             validation_metrics = _run_epoch(
@@ -185,7 +197,7 @@ def train_terrain_perception(
                 device=torch_device,
                 history_seconds=history_seconds,
                 optimizer=None,
-                stairs_terrain_id=stairs_terrain_id,
+                stairs_terrain_ids=stairs_terrain_ids,
             )
         record = {"epoch": epoch, "train": train_metrics, "validation": validation_metrics}
         history.append(record)
@@ -199,6 +211,7 @@ def train_terrain_perception(
                 "proprio_dim": full_dataset.proprio_dim,
                 "sequence_steps": sequence_steps,
                 "history_seconds": history_seconds,
+                "stairs_terrain_ids": stairs_terrain_ids,
             },
         }
         torch.save(checkpoint, output_dir / "latest.pt")
@@ -214,6 +227,7 @@ def train_terrain_perception(
         "validation_sequences": len(validation_dataset),
         "history": history,
         "best_validation_loss": best_validation,
+        "stairs_terrain_ids": list(stairs_terrain_ids),
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
@@ -232,7 +246,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-channels", type=int, default=16)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--stairs-terrain-id", type=int, default=2)
+    parser.add_argument(
+        "--stairs-terrain-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Terrain IDs aggregated into stairs metrics; inferred from dataset metadata by default.",
+    )
     return parser.parse_args()
 
 
@@ -250,7 +270,7 @@ def main() -> None:
         hidden_channels=args.hidden_channels,
         device=args.device,
         seed=args.seed,
-        stairs_terrain_id=args.stairs_terrain_id,
+        stairs_terrain_ids=(tuple(args.stairs_terrain_ids) if args.stairs_terrain_ids is not None else None),
     )
 
 

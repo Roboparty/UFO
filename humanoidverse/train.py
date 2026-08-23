@@ -58,8 +58,8 @@ AGENT_ALIASES = {
 from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import HumanoidVerseMjlabTrackingEvaluationConfig
 from humanoidverse.agents.presets import build_agent_preset
-from humanoidverse.training.workspace import TrainConfig
 from humanoidverse.terrains.coverage import validate_motion_terrain_coverage
+from humanoidverse.training.workspace import TrainConfig
 from humanoidverse.utils.motion_data import prepare_motion_manifest
 from humanoidverse.utils.robot_spec import assert_robot_configs_compatible, load_robot_training_spec, resolve_robot_config_path
 
@@ -473,7 +473,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--terrain-mode",
-        choices=["flat", "slope", "stairs", "rough", "platforms", "mixed"],
+        choices=["flat", "slope", "stairs", "stairs_up", "stairs_down", "rough", "platforms", "mixed"],
         default=None,
         help="Physical terrain for --agent fb_terrain (default: mixed).",
     )
