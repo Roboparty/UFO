@@ -409,15 +409,28 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"ddp_bucket_cap_mb={cfg.ddp_bucket_cap_mb:g}",
         flush=True,
     )
+    training_completed = False
     try:
         workspace = cfg.build()
         workspace.train()
+        training_completed = True
     finally:
         if world_size > 1:
             import torch.distributed as dist
 
             if dist.is_available() and dist.is_initialized():
-                dist.destroy_process_group()
+                if training_completed:
+                    dist.destroy_process_group()
+                elif rank == 0:
+                    # A rank-local exception can leave peers inside a collective.
+                    # Calling destroy_process_group() from only the failed rank
+                    # then hides the original traceback behind a second deadlock.
+                    print(
+                        "[WARNING] Skipping coordinated process-group teardown after a training failure; "
+                        "the distributed launcher will terminate peer ranks.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
 
 def launch(args: argparse.Namespace) -> None:

@@ -425,6 +425,14 @@ class HumanoidVerseMjlabTrackingEvaluation:
             )
         }
         motion_ids = sorted(motion_lengths)
+        if use_distributed:
+            env_counts: list[int | None] = [None] * world_size
+            dist.all_gather_object(env_counts, int(core.num_envs))
+            if len(set(env_counts)) != 1:
+                raise RuntimeError(
+                    "Distributed tracking evaluation requires one shared num_envs capacity across ranks; "
+                    f"got {env_counts}"
+                )
         rank_chunks = balanced_motion_chunks(
             motion_ids,
             motion_lengths,
@@ -536,11 +544,13 @@ class HumanoidVerseMjlabTrackingEvaluation:
     def record_results(metrics: Mapping[str, Mapping[str, Any]], *, timestep: int, logger) -> None:
         if logger is None:
             return
+        rows = []
         for motion_name, metric in metrics.items():
             row = dict(metric)
             row["motion_name"] = motion_name
             row["timestep"] = timestep
-            logger.log(row)
+            rows.append(row)
+        logger.log_many(rows)
 
     def close(self) -> None:
         mp_manager = getattr(self, "mp_manager", None)

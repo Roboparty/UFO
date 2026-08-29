@@ -67,6 +67,7 @@ from humanoidverse.terrains.terrain_observation import (
 from humanoidverse.tracking_inference import _center_target_states_on_terrain
 from humanoidverse.training.workspace import (
     Workspace,
+    distributed_eval_num_envs,
     distributed_motion_ids,
     make_flat_terrain_priority_eval_config,
     merge_distributed_evaluation_results,
@@ -1145,34 +1146,38 @@ class TerrainPriorityEvaluationTest(unittest.TestCase):
             distributed_sync=False,
         )
         workspace.distributed_rank = 0
+        motion_lib = SimpleNamespace(_num_unique_motions=16)
+        workspace.train_env = SimpleNamespace(_env=SimpleNamespace(_motion_lib=motion_lib))
         workspace._priority_eval_env = None
         built_env = Mock()
         with patch.object(HumanoidVerseMjlabConfig, "build", return_value=(built_env, {})) as build:
             self.assertIs(workspace._get_priority_eval_env(), built_env)
             self.assertIs(workspace._get_priority_eval_env(), built_env)
-        build.assert_called_once_with(num_envs=16)
+        build.assert_called_once_with(num_envs=16, motion_lib=motion_lib)
         workspace._close_priority_eval_env()
         built_env.close.assert_called_once_with()
         self.assertIsNone(workspace._priority_eval_env)
 
-    def test_distributed_priority_eval_env_matches_local_motion_shard_size(self) -> None:
-        workspace = Workspace.__new__(Workspace)
-        workspace.cfg = SimpleNamespace(
-            env=self._mixed_env_cfg(),
-            online_parallel_envs=1024,
-            distributed_sync=True,
-            tags={"agent": "fb_terrain"},
-        )
-        workspace.distributed_rank = 3
-        workspace.distributed_world_size = 8
-        workspace.train_env = SimpleNamespace(
-            _env=SimpleNamespace(_motion_lib=SimpleNamespace(_num_unique_motions=862))
-        )
-        workspace._priority_eval_env = None
-        built_env = Mock()
-        with patch.object(HumanoidVerseMjlabConfig, "build", return_value=(built_env, {})) as build:
-            self.assertIs(workspace._get_priority_eval_env(), built_env)
-        build.assert_called_once_with(num_envs=108)
+    def test_distributed_priority_eval_env_uses_same_capacity_on_every_rank(self) -> None:
+        for rank in range(8):
+            workspace = Workspace.__new__(Workspace)
+            workspace.cfg = SimpleNamespace(
+                env=self._mixed_env_cfg(),
+                online_parallel_envs=1024,
+                distributed_sync=True,
+                tags={"agent": "fb_terrain"},
+            )
+            workspace.distributed_rank = rank
+            workspace.distributed_world_size = 8
+            motion_lib = SimpleNamespace(_num_unique_motions=862)
+            workspace.train_env = SimpleNamespace(_env=SimpleNamespace(_motion_lib=motion_lib))
+            workspace._priority_eval_env = None
+            built_env = Mock()
+            with patch.object(HumanoidVerseMjlabConfig, "build", return_value=(built_env, {})) as build:
+                self.assertIs(workspace._get_priority_eval_env(), built_env)
+            build.assert_called_once_with(num_envs=108, motion_lib=motion_lib)
+
+        self.assertEqual(distributed_eval_num_envs(862, 8), 108)
 
     def test_distributed_motion_shards_cover_every_motion_once(self) -> None:
         shards = [distributed_motion_ids(862, rank, 8) for rank in range(8)]

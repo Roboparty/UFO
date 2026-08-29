@@ -18,6 +18,7 @@ from humanoidverse.agents.evaluations.humanoidverse_mjlab import (
     balanced_motion_chunks,
 )
 from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgent
+from humanoidverse.agents.misc.loggers import CSVLogger
 from humanoidverse.distributed import sync_floating_buffers, wrap_distributed_stage
 
 
@@ -147,6 +148,33 @@ def test_balanced_motion_chunks_cover_every_motion_once():
     assert sorted(assigned) == motion_ids
     assert len(assigned) == len(set(assigned))
     assert all(len(chunk) <= 2 for chunks in rank_chunks for chunk in chunks)
+
+
+def test_balanced_motion_chunks_match_across_equal_rank_capacities():
+    motion_ids = list(range(862))
+    lengths = {motion_id: 499 for motion_id in motion_ids}
+    per_rank = [
+        balanced_motion_chunks(motion_ids, lengths, chunk_size=108, world_size=8)[rank]
+        for rank in range(8)
+    ]
+    assigned = [motion_id for chunks in per_rank for chunk in chunks for motion_id in chunk]
+    assert sorted(assigned) == motion_ids
+    assert len(assigned) == len(set(assigned))
+    assert [sum(map(len, chunks)) for chunks in per_rank] == [108, 108, 108, 108, 108, 108, 108, 106]
+
+
+def test_csv_logger_batches_rows_and_preserves_existing_schema(tmp_path):
+    output = tmp_path / "evaluation.csv"
+    CSVLogger(output).log_many([{"motion_id": 0, "emd": 0.1}, {"motion_id": 1, "emd": 0.2}])
+    CSVLogger(output).log({"motion_id": 2, "emd": 0.3, "distance": 0.4})
+
+    import pandas as pd
+
+    frame = pd.read_csv(output)
+    assert frame["motion_id"].tolist() == [0, 1, 2]
+    assert frame.columns.tolist() == ["emd", "motion_id", "distance"]
+    assert np.isnan(frame.loc[0, "distance"])
+    assert np.isclose(frame.loc[2, "distance"], 0.4)
 
 
 def test_parallel_joint_metric_matches_expected_distance():

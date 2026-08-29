@@ -109,6 +109,15 @@ def distributed_motion_ids(num_motions: int, rank: int, world_size: int) -> list
     return list(range(rank, num_motions, world_size))
 
 
+def distributed_eval_num_envs(num_motions: int, world_size: int) -> int:
+    """Return one shared per-rank capacity for a distributed motion evaluation."""
+    if num_motions <= 0:
+        raise ValueError("num_motions must be positive")
+    if world_size <= 0:
+        raise ValueError("world_size must be positive")
+    return (num_motions + world_size - 1) // world_size
+
+
 def merge_distributed_evaluation_results(
     shards: list[dict[str, dict[str, dict[str, tp.Any]]]],
 ) -> dict[str, dict[str, dict[str, tp.Any]]]:
@@ -625,7 +634,12 @@ class Workspace:
                 local_motion_count = len(
                     distributed_motion_ids(num_motions, self.distributed_rank, self.distributed_world_size)
                 )
-                eval_num_envs = max(1, local_motion_count)
+                # Every rank must derive balanced_motion_chunks() with the same
+                # capacity.  Allocating only the local shard size made the last
+                # ranks use a smaller chunk size whenever the motion count was
+                # not divisible by world_size, producing overlapping/missing
+                # motion IDs at the final gather.
+                eval_num_envs = distributed_eval_num_envs(num_motions, self.distributed_world_size)
             self._priority_eval_env, _ = eval_cfg.build(
                 num_envs=eval_num_envs,
                 motion_lib=self.train_env._env._motion_lib,
