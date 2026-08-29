@@ -224,6 +224,8 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
         return self.n_dim
 
     def size(self):
+        if self.storage is None:
+            return 0
         return len(self) * self.storage[self.end_key].shape[1]
 
     @torch.no_grad

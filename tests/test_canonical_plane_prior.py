@@ -240,6 +240,18 @@ def test_prior_compact_replay_preserves_current_outcomes_and_depth_contract() ->
     torch.testing.assert_close(discount.reshape(-1), torch.tensor([0.99, 0.99, 0.0]))
 
 
+def test_empty_prior_replay_reports_zero_transitions_before_first_extend() -> None:
+    buffer = TrajectoryDictBufferMultiDim(
+        capacity=16,
+        device="cpu",
+        n_dim=2,
+        end_key="episode_boundary",
+    )
+
+    assert buffer.storage is None
+    assert buffer.size() == 0
+
+
 def test_prior_reset_marks_an_administrative_episode_boundary() -> None:
     workspace = Workspace.__new__(Workspace)
     workspace.cfg = SimpleNamespace(prior_plane_envs=3)
