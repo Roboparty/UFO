@@ -25,6 +25,7 @@ from humanoidverse.agents.evaluations.same_z_terrain import (
     SameZTerrainEvaluation,
     SameZTerrainEvaluationConfig,
 )
+from humanoidverse.terrains.rp1_simple import RP1_TERRAIN_COMPONENT_NAMES, rp1_center_reset_profile
 
 os.environ["OMP_NUM_THREADS"] = "1"
 
@@ -1011,11 +1012,13 @@ class Workspace:
             tile_crossings = raw_env._terrain_tile_crossing_count.clone()
             transition_counts = raw_env._terrain_transition_counts.clone()
             reset_region_counts = raw_env._reset_region_counts.clone()
+            reset_family_counts = raw_env._reset_terrain_family_counts.clone()
             lie_down_resets = raw_env._lie_down_reset_count.clone()
             if self.cfg.distributed_sync and self.distributed_world_size > 1:
                 torch.distributed.all_reduce(tile_crossings, op=torch.distributed.ReduceOp.SUM)
                 torch.distributed.all_reduce(transition_counts, op=torch.distributed.ReduceOp.SUM)
                 torch.distributed.all_reduce(reset_region_counts, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(reset_family_counts, op=torch.distributed.ReduceOp.SUM)
                 torch.distributed.all_reduce(lie_down_resets, op=torch.distributed.ReduceOp.SUM)
             metrics["terrain/tile_crossing_count"] = int(tile_crossings.item())
             for source_id, source_name in enumerate(raw_env.terrain_component_names):
@@ -1023,8 +1026,23 @@ class Workspace:
                     count = int(transition_counts[source_id, target_id].item())
                     if count:
                         metrics[f"terrain/transition/{source_name}_to_{target_name}"] = count
-            for region_id, region_name in enumerate(RESET_REGION_NAMES):
-                metrics[f"reset/{region_name}"] = int(reset_region_counts[region_id].item())
+            reset_family_total = int(reset_family_counts.sum().item())
+            metrics["reset/family_total"] = reset_family_total
+            is_rp1_simple = tuple(raw_env.terrain_component_names) == tuple(
+                RP1_TERRAIN_COMPONENT_NAMES
+            )
+            for family_id, family_name in enumerate(raw_env.terrain_component_names):
+                count = int(reset_family_counts[family_id].item())
+                metrics[f"reset/family/{family_name}"] = count
+                metrics[f"reset/family_fraction/{family_name}"] = (
+                    float(count / reset_family_total) if reset_family_total else 0.0
+                )
+                if is_rp1_simple:
+                    reset_profile, _vertical_direction = rp1_center_reset_profile(family_name)
+                    metrics[f"reset/profile/{reset_profile}"] = count
+            if raw_env._reset_region_labels_are_semantic:
+                for region_id, region_name in enumerate(RESET_REGION_NAMES):
+                    metrics[f"reset/region/{region_name}"] = int(reset_region_counts[region_id].item())
             metrics["reset/lie_down"] = int(lie_down_resets.item())
             return metrics
 

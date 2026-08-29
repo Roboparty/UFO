@@ -10,7 +10,7 @@ import pydantic
 import torch
 
 from humanoidverse.terrain_transfer import clone_same_z_for_terrains, tensor_checksum
-from humanoidverse.terrains.rp1_simple import RP1_TERRAIN_COMPONENT_NAMES
+from humanoidverse.terrains.rp1_simple import RP1_TERRAIN_COMPONENT_NAMES, rp1_center_reset_profile
 
 from ..envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
 from ..nn_models import eval_mode
@@ -403,6 +403,7 @@ class SameZTerrainEvaluation:
                 - _yaw_xyzw(reference["root_rot"][0])
             )
             for family_id, family in enumerate(families):
+                evaluation_family, initial_vertical_direction = rp1_center_reset_profile(family)
                 env_index = motion_index * len(families) + family_id
                 policy_delta = last_valid_root[env_index, :2] - initial_policy_root[env_index, :2]
                 signed_progress = torch.dot(policy_delta, direction)
@@ -423,10 +424,13 @@ class SameZTerrainEvaluation:
                 rollout_context = rollout_contexts[env_index]
                 if tensor_checksum(rollout_context) != z_meta["hash"]:
                     raise AssertionError(f"same-z tensor changed during rollout for motion={motion_id} family={family}")
-                key = f"motion={motion_id}/terrain={family}/difficulty={difficulty_row}"
+                key = f"motion={motion_id}/terrain={evaluation_family}/difficulty={difficulty_row}"
                 rows[key] = {
                     "motion_id": int(motion_id),
-                    "terrain_family": family,
+                    "terrain_family": evaluation_family,
+                    "terrain_asset_family": family,
+                    "initial_vertical_direction": initial_vertical_direction,
+                    "reset_region": "tile_center",
                     "difficulty_row": int(difficulty_row),
                     "z_hash": z_meta["hash"],
                     "z_shape": str(z_meta["shape"]),

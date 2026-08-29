@@ -21,7 +21,7 @@ from humanoidverse.agents.nn_models import eval_mode
 from humanoidverse.agents.normalizers import BatchNormNormalizerConfig, ObsNormalizerConfig
 from humanoidverse.perception.instinct_direct_depth import RP1DirectDepthConfig, RP1DirectDepthRuntime
 from humanoidverse.terrain_transfer import tensor_checksum
-from humanoidverse.terrains.rp1_simple import RP1_TERRAIN_COMPONENT_NAMES
+from humanoidverse.terrains.rp1_simple import RP1_TERRAIN_COMPONENT_NAMES, rp1_center_reset_profile
 from humanoidverse.training.workspace import (
     Workspace,
     _assert_canonical_plane_terrain_priv,
@@ -315,6 +315,19 @@ def test_same_z_evaluator_uses_exact_seven_hashes_and_fixed_zero_depth_delay() -
     assert encoded["shape"] == (4, 3)
     assert set(encoded["clones"]) == set(RP1_TERRAIN_COMPONENT_NAMES)
     assert {tensor_checksum(value) for value in encoded["clones"].values()} == {encoded["hash"]}
+
+
+def test_same_z_stair_labels_describe_center_outward_motion() -> None:
+    assert rp1_center_reset_profile("low_stairs_up") == (
+        "low_stairs_descent_from_center",
+        "descent",
+    )
+    assert rp1_center_reset_profile("low_stairs_down") == (
+        "low_stairs_ascent_from_center",
+        "ascent",
+    )
+    with pytest.raises(ValueError, match="unknown RP1 terrain"):
+        rp1_center_reset_profile("stairs_unknown")
 
 
 def test_same_z_reference_heading_is_shared_and_aligned_with_terrain_column() -> None:

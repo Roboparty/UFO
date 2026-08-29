@@ -67,6 +67,30 @@ RP1_TERRAIN_PROPORTIONS = {
     "hf_pyramid_slope_inv": 0.10,
     "boxes": 0.10,
 }
+# MJLab names the stair assets by their height profile when approaching the
+# tile center. RP1 resets at that center, so the initial policy traversal is
+# the opposite direction: the pyramid starts high and descends outwards,
+# while the inverted pyramid starts low and ascends outwards. Keep the raw
+# asset names for geometry/checkpoint compatibility and use these profiles in
+# training diagnostics and same-z evaluation output.
+RP1_CENTER_RESET_PROFILES = {
+    "flat": "flat",
+    "perlin_rough": "perlin_rough",
+    "low_stairs_up": "low_stairs_descent_from_center",
+    "low_stairs_down": "low_stairs_ascent_from_center",
+    "low_platforms": "low_platforms",
+    "hf_pyramid_slope_inv": "hf_pyramid_slope_inv",
+    "boxes": "boxes",
+}
+RP1_CENTER_RESET_VERTICAL_DIRECTIONS = {
+    "flat": "non_stair",
+    "perlin_rough": "non_stair",
+    "low_stairs_up": "descent",
+    "low_stairs_down": "ascent",
+    "low_platforms": "non_stair",
+    "hf_pyramid_slope_inv": "non_stair",
+    "boxes": "non_stair",
+}
 RP1_TERRAIN_REFERENCE_PROJECT = "UFO-rp1"
 RP1_TERRAIN_REFERENCE_COMMIT = "8c364e1001734097aac58e5033a1b5076925d3c5"
 RP1_PATCH_SIZE = 5.0
@@ -84,6 +108,18 @@ RP1_STAIR_PLATFORM_WIDTH = RP1_CENTER_PLATFORM_WIDTH
 RP1_OUTER_WALL_HEIGHT = 5.0
 RP1_OUTER_WALL_THICKNESS = 0.05
 RP1_OUTER_WALL_COLOR = (0.5, 0.5, 0.5, 1.0)
+
+
+def rp1_center_reset_profile(asset_family: str) -> tuple[str, str]:
+    """Return the direction-correct center-reset label for one RP1 asset."""
+
+    try:
+        return (
+            RP1_CENTER_RESET_PROFILES[asset_family],
+            RP1_CENTER_RESET_VERTICAL_DIRECTIONS[asset_family],
+        )
+    except KeyError as error:
+        raise ValueError(f"unknown RP1 terrain asset family: {asset_family!r}") from error
 
 
 def _get(config: Any, path: str, default: Any) -> Any:

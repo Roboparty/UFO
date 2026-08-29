@@ -96,6 +96,26 @@ RESET_REGION_NAMES = (
     "tile_seam",
 )
 RESET_REGION_ID = {name: index for index, name in enumerate(RESET_REGION_NAMES)}
+RESET_REGION_COMPONENT_NAMES = frozenset(
+    {"flat", "slope", "stairs", "stairs_up", "stairs_down", "rough", "platforms"}
+)
+
+
+def reset_region_labels_are_semantic(component_names: tuple[str, ...]) -> bool:
+    """Whether the legacy reset-region IDs describe these terrain assets."""
+
+    return all(name in RESET_REGION_COMPONENT_NAMES for name in component_names)
+
+
+def terrain_family_reset_histogram(terrain_ids: torch.Tensor, *, num_families: int) -> torch.Tensor:
+    """Count assigned reset families without using the robot's later tile location."""
+
+    if terrain_ids.ndim != 1:
+        raise ValueError("terrain reset family IDs must be one-dimensional")
+    counts = torch.bincount(terrain_ids, minlength=num_families)
+    if counts.shape[0] != num_families:
+        raise ValueError("terrain reset family ID is outside the configured family range")
+    return counts
 
 
 def _rp1_direct_depth_config(config) -> RP1DirectDepthConfig | None:
@@ -1247,6 +1267,12 @@ class HumanoidVerseMjlabCore:
             (self.num_envs,), RESET_REGION_ID["flat_center"], device=self.device, dtype=torch.long
         )
         self._reset_region_counts = torch.zeros(len(RESET_REGION_NAMES), device=self.device, dtype=torch.long)
+        self._reset_terrain_family_counts = torch.zeros(
+            len(self.terrain_component_names), device=self.device, dtype=torch.long
+        )
+        self._reset_region_labels_are_semantic = reset_region_labels_are_semantic(
+            self.terrain_component_names
+        )
         self._lie_down_reset_count = torch.zeros((), device=self.device, dtype=torch.long)
         terrain_generator_cfg = None
         if self.terrain_enabled and self.terrain_mode != "plane":
@@ -1727,8 +1753,7 @@ class HumanoidVerseMjlabCore:
         terrain_entity = self.mjlab_env.scene["terrain"]
         terrain_ids = terrain_entity.terrain_types[env_ids]
         positions = self.env_origins[env_ids, :2].clone()
-        supported_components = {"flat", "slope", "stairs", "stairs_up", "stairs_down", "rough", "platforms"}
-        if any(name not in supported_components for name in self.terrain_component_names):
+        if not self._reset_region_labels_are_semantic:
             region_ids = torch.full(
                 (len(env_ids),), RESET_REGION_ID["flat_center"], device=self.device, dtype=torch.long
             )
@@ -2300,6 +2325,15 @@ class HumanoidVerseMjlabCore:
                 root_pos[:, :2] = reset_xy
                 self._reset_region_ids[env_ids] = reset_region_ids
                 if not self.is_evaluating:
+                    reset_family_ids = (
+                        torch.zeros_like(env_ids)
+                        if self._terrain_patch_size is None
+                        else self.mjlab_env.scene["terrain"].terrain_types[env_ids]
+                    )
+                    self._reset_terrain_family_counts += terrain_family_reset_histogram(
+                        reset_family_ids,
+                        num_families=len(self.terrain_component_names),
+                    )
                     self._reset_region_counts += torch.bincount(
                         reset_region_ids, minlength=len(RESET_REGION_NAMES)
                     )

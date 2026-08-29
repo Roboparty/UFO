@@ -23,6 +23,7 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     peak_contact_force,
     pre_descent_ground_probe_z,
     pre_descent_reset_positions,
+    reset_region_labels_are_semantic,
     sample_lie_down_reset_mask,
     sample_pre_descent_reset_mask,
     sample_terrain_reset_regions,
@@ -31,6 +32,7 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     separated_stairs_upright_reset_mask,
     stairs_transition_reset_positions,
     tangential_contact_speed,
+    terrain_family_reset_histogram,
     terrain_grid_boundary_margin,
     terrain_grid_coordinates,
 )
@@ -297,6 +299,25 @@ def test_separated_stairs_reset_at_center_and_exclude_lie_down() -> None:
         torch.zeros(4), probability=0.30, excluded=upright_stairs
     )
     assert lie_down.tolist() == [False, False, True, True]
+
+
+def test_rp1_reset_diagnostics_count_true_assigned_families() -> None:
+    component_names = (
+        "flat",
+        "perlin_rough",
+        "low_stairs_up",
+        "low_stairs_down",
+        "low_platforms",
+        "hf_pyramid_slope_inv",
+        "boxes",
+    )
+    terrain_ids = torch.tensor([0, 1, 2, 2, 3, 3, 4, 5, 6])
+    counts = terrain_family_reset_histogram(terrain_ids, num_families=len(component_names))
+    assert counts.tolist() == [1, 1, 2, 2, 1, 1, 1]
+    assert not reset_region_labels_are_semantic(component_names)
+    assert reset_region_labels_are_semantic(
+        ("flat", "slope", "stairs_up", "stairs_down", "rough", "platforms")
+    )
 
 
 def test_connected_grid_internal_seams_are_not_boundaries() -> None:
