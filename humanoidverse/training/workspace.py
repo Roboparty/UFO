@@ -1290,6 +1290,7 @@ class Workspace:
         start_time = time.time()
         fps_start_time = time.time()
         checkpoint_time_checker = EveryNStepsChecker(self._checkpoint_global_time, self.cfg.checkpoint_every_steps)
+        last_saved_global_time = self._checkpoint_global_time
         eval_time_checker = EveryNStepsChecker(self._checkpoint_global_time, self.cfg.eval_every_steps)
         update_agent_time_checker = EveryNStepsChecker(self._checkpoint_local_time, self.cfg.update_agent_every)
         log_time_checker = EveryNStepsChecker(self._checkpoint_global_time, self.cfg.log_every_updates)
@@ -1308,13 +1309,18 @@ class Workspace:
             and any(eval_instances)
         )
 
+        final_local_time = self._checkpoint_local_time
+        final_global_time = self._checkpoint_global_time
         for local_time in range(self._checkpoint_local_time, max_local_time + local_step_increment, local_step_increment):
             global_time = local_time * global_step_scale
+            final_local_time = local_time
+            final_global_time = global_time
             if global_time > self.cfg.num_env_steps:
                 break
             if (local_time != self._checkpoint_local_time) and checkpoint_time_checker.check(global_time):
                 checkpoint_time_checker.update_last_step(global_time)
                 self.save(local_time=local_time, global_time=global_time, optimizer_steps=self._optimizer_steps, replay_buffer=replay_buffer)
+                last_saved_global_time = global_time
 
             if global_time >= self.cfg.num_env_steps:
                 break
@@ -1761,6 +1767,19 @@ class Workspace:
             truncated = new_truncated
             done = np.logical_or(new_terminated.ravel(), new_truncated.ravel())
             info = new_info
+        # Periodic checkpoint intervals need not divide the exact global step
+        # budget. Persist the state that has consumed the final accepted main
+        # rollout before closing the environments, otherwise a watchdog can
+        # repeatedly resume from the preceding periodic checkpoint.
+        final_global_time = min(final_global_time, self.cfg.num_env_steps)
+        final_local_time = final_global_time // global_step_scale
+        if final_global_time > last_saved_global_time:
+            self.save(
+                local_time=final_local_time,
+                global_time=final_global_time,
+                optimizer_steps=self._optimizer_steps,
+                replay_buffer=replay_buffer,
+            )
         train_env.close()
 
     def eval(self, t, replay_buffer, *, distributed_shard: bool = False, write_outputs: bool = True):
