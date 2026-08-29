@@ -39,7 +39,9 @@ DEFAULT_AGENT = "fb"
 DEFAULT_NUM_ENVS = 1024
 DEFAULT_PRIOR_PLANE_ENVS = 128
 DEFAULT_NUM_ENV_STEPS = 192000000
-DEFAULT_CHECKPOINT_EVERY_STEPS = 3200000
+DEFAULT_CHECKPOINT_EVERY_STEPS = 9600000
+DEFAULT_TRACKING_EVAL_EVERY_STEPS = 3200000
+DEFAULT_SAME_Z_EVAL_EVERY_STEPS = 9600000
 DEFAULT_DATA_PATH = "humanoidverse/data/lafan_29dof_10s-clipped.pkl"
 DEFAULT_WORK_DIR = "runs/ufo"
 DEFAULT_BUFFER_SIZE = 5120000
@@ -104,7 +106,9 @@ def build_ufo_mjlab_config(
     use_wandb: bool,
     wandb_run_name: str | None,
     wandb_project: str = DEFAULT_WANDB_PROJECT,
-    checkpoint_every_steps: int = 9600000,
+    checkpoint_every_steps: int = DEFAULT_CHECKPOINT_EVERY_STEPS,
+    tracking_eval_every_steps: int = DEFAULT_TRACKING_EVAL_EVERY_STEPS,
+    same_z_eval_every_steps: int = DEFAULT_SAME_Z_EVAL_EVERY_STEPS,
     distributed_rank: int = 0,
     distributed_world_size: int = 1,
     disable_eval_prioritization: bool = False,
@@ -137,6 +141,13 @@ def build_ufo_mjlab_config(
         raise ValueError("prior_plane_envs must be non-negative")
     if prior_plane_envs > 0 and agent != "fb_depth":
         raise ValueError("canonical-plane prior collection is supported only by fb_depth")
+    for cadence_name, cadence_steps in (
+        ("checkpoint_every_steps", checkpoint_every_steps),
+        ("tracking_eval_every_steps", tracking_eval_every_steps),
+        ("same_z_eval_every_steps", same_z_eval_every_steps),
+    ):
+        if int(cadence_steps) <= 0:
+            raise ValueError(f"{cadence_name} must be positive")
     if smoke and prior_plane_envs > 0:
         prior_plane_envs = min(prior_plane_envs, max(2, num_envs // 8))
     if gradient_sync == "auto":
@@ -172,6 +183,7 @@ def build_ufo_mjlab_config(
                 videos_dir="videos",
                 video_name_prefix="unknown_agent",
                 name_in_logs="humanoidverse_tracking_eval",
+                every_steps=int(tracking_eval_every_steps),
                 env=None,
                 num_envs=num_envs,
                 n_episodes_per_motion=1,
@@ -183,6 +195,7 @@ def build_ufo_mjlab_config(
                     name="SameZTerrainEvaluationConfig",
                     generate_videos=False,
                     name_in_logs="same_z_terrain_eval",
+                    every_steps=int(same_z_eval_every_steps),
                     seed=seed,
                 )
             )
@@ -397,6 +410,8 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         wandb_run_name=args.wandb_run_name,
         wandb_project=args.wandb_project,
         checkpoint_every_steps=args.checkpoint_every_steps,
+        tracking_eval_every_steps=args.tracking_eval_every_steps,
+        same_z_eval_every_steps=args.same_z_eval_every_steps,
         distributed_rank=rank,
         distributed_world_size=world_size,
         disable_eval_prioritization=bool(args.disable_eval_prioritization),
@@ -580,6 +595,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-envs", type=int, default=DEFAULT_NUM_ENVS)
     parser.add_argument("--num-env-steps", type=int, default=DEFAULT_NUM_ENV_STEPS)
     parser.add_argument("--checkpoint-every-steps", type=int, default=DEFAULT_CHECKPOINT_EVERY_STEPS)
+    parser.add_argument(
+        "--tracking-eval-every-steps",
+        type=int,
+        default=DEFAULT_TRACKING_EVAL_EVERY_STEPS,
+        help="Flat tracking/EMD evaluation cadence in global environment steps.",
+    )
+    parser.add_argument(
+        "--same-z-eval-every-steps",
+        type=int,
+        default=DEFAULT_SAME_Z_EVAL_EVERY_STEPS,
+        help="Same-z terrain evaluation cadence in global environment steps.",
+    )
     parser.add_argument(
         "--data-path",
         nargs="+",

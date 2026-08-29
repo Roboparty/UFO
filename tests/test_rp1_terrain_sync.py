@@ -30,6 +30,7 @@ from humanoidverse.terrains.rp1_simple import (
     add_rp1_outer_walls,
     make_rp1_simple_generator_cfg,
 )
+from humanoidverse.agents.utils import AnchoredEveryNStepsChecker
 from humanoidverse.train import build_ufo_mjlab_config
 
 
@@ -162,3 +163,43 @@ def test_fb_depth_defaults_to_rp1_simple_without_changing_fb_terrain_default() -
     terrain = build_ufo_mjlab_config(agent="fb_terrain", terrain_mode=None, **common)
     assert "terrain.terrain_type=rp1_simple" in depth.env.hydra_overrides
     assert "terrain.terrain_type=mixed" in terrain.env.hydra_overrides
+
+
+def test_fb_depth_uses_separate_checkpoint_tracking_and_same_z_cadences() -> None:
+    cfg = build_ufo_mjlab_config(
+        device="cpu",
+        work_dir="/tmp/ufo-rp1-eval-cadence-test",
+        num_envs=2,
+        num_env_steps=2048,
+        seed=7,
+        use_wandb=False,
+        wandb_run_name=None,
+        disable_eval_prioritization=False,
+        smoke=False,
+        agent="fb_depth",
+        terrain_mode="rp1_simple",
+    )
+    evaluations = {evaluation.name_in_logs: evaluation for evaluation in cfg.evaluations}
+    assert cfg.checkpoint_every_steps == 9_600_000
+    assert evaluations["humanoidverse_tracking_eval"].every_steps == 3_200_000
+    assert evaluations["same_z_terrain_eval"].every_steps == 9_600_000
+
+
+def test_tracking_third_trigger_aligns_with_same_z_and_checkpoint() -> None:
+    tracking = AnchoredEveryNStepsChecker(0, 3_200_000)
+    same_z = AnchoredEveryNStepsChecker(0, 9_600_000)
+    checkpoint = AnchoredEveryNStepsChecker(0, 9_600_000)
+    tracking_triggers = []
+    shared_triggers = []
+    for step in range(0, 9_700_000, 8192):
+        if tracking.check(step):
+            tracking_triggers.append(step)
+            tracking.update_last_step(step)
+        if same_z.check(step):
+            shared_triggers.append(step)
+            same_z.update_last_step(step)
+        if checkpoint.check(step):
+            assert shared_triggers[-1] == step
+            checkpoint.update_last_step(step)
+    assert tracking_triggers == [0, 3_203_072, 6_406_144, 9_601_024]
+    assert shared_triggers == [0, 9_601_024]

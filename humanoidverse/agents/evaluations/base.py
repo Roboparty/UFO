@@ -5,6 +5,9 @@ from ..base import BaseConfig
 class BaseEvalConfig(BaseConfig):
     """Abstract class for evaluation configurations."""
 
+    # Optional evaluator-local cadence in global environment steps. When
+    # omitted, TrainConfig.eval_every_steps remains the compatibility fallback.
+    every_steps: int | None = None
     # Turn on/off the generation of videos. Video generation does not need to be used or even implemented.
     generate_videos: bool = False
     # If videos are generated, the video_dir will be created (converted to Path)

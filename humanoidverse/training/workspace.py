@@ -57,7 +57,12 @@ from humanoidverse.agents.fb_cpr.agent import FBcprAgentConfig
 from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentConfig
 from humanoidverse.agents.misc.loggers import CSVLogger
 from humanoidverse.agents.tldr_dist_aux.agent import TldrDistAuxAgentConfig
-from humanoidverse.agents.utils import EveryNStepsChecker, get_local_workdir, set_seed_everywhere
+from humanoidverse.agents.utils import (
+    AnchoredEveryNStepsChecker,
+    EveryNStepsChecker,
+    get_local_workdir,
+    set_seed_everywhere,
+)
 from humanoidverse.distributed import (
     all_gather_objects,
     barrier,
@@ -350,6 +355,18 @@ class TrainConfig(BaseConfig):
             raise ValueError("Loading expert data from motion library is only supported for HumanoidVerseMjlabConfig")
         if self.ddp_bucket_cap_mb <= 0:
             raise ValueError("ddp_bucket_cap_mb must be positive")
+        if self.checkpoint_every_steps <= 0 or self.eval_every_steps <= 0:
+            raise ValueError("checkpoint and fallback evaluation cadences must be positive")
+        evaluation_configs = (
+            self.evaluations.values()
+            if isinstance(self.evaluations, dict)
+            else self.evaluations
+        )
+        for evaluation in evaluation_configs:
+            if evaluation.every_steps is not None and evaluation.every_steps <= 0:
+                raise ValueError(
+                    f"evaluation {evaluation.name_in_logs!r} cadence must be positive"
+                )
         if self.prior_plane_envs < 0:
             raise ValueError("prior_plane_envs must be non-negative")
         if self.prior_buffer_size < 0:
@@ -424,6 +441,14 @@ def _global_step_scale(cfg: TrainConfig) -> int:
 
 def _effective_batch_size(cfg: TrainConfig) -> int:
     return int(cfg.agent.train.batch_size) * _global_step_scale(cfg)
+
+
+def _evaluation_interval_steps(evaluation, *, fallback: int) -> int:
+    configured = getattr(evaluation.cfg, "every_steps", None)
+    interval = int(fallback if configured is None else configured)
+    if interval <= 0:
+        raise ValueError(f"evaluation cadence must be positive, got {interval}")
+    return interval
 
 
 def _num_envs_per_rank(cfg: TrainConfig) -> int:
@@ -1307,25 +1332,23 @@ class Workspace:
         metric_update_counts: dict[str, int] = {}
         start_time = time.time()
         fps_start_time = time.time()
-        checkpoint_time_checker = EveryNStepsChecker(self._checkpoint_global_time, self.cfg.checkpoint_every_steps)
+        checkpoint_time_checker = AnchoredEveryNStepsChecker(
+            self._checkpoint_global_time,
+            self.cfg.checkpoint_every_steps,
+        )
         last_saved_global_time = self._checkpoint_global_time
-        eval_time_checker = EveryNStepsChecker(self._checkpoint_global_time, self.cfg.eval_every_steps)
+        evaluation_time_checkers = {
+            name: AnchoredEveryNStepsChecker(
+                self._checkpoint_global_time,
+                _evaluation_interval_steps(
+                    evaluation,
+                    fallback=self.cfg.eval_every_steps,
+                ),
+            )
+            for name, evaluation in self.evaluations.items()
+        }
         update_agent_time_checker = EveryNStepsChecker(self._checkpoint_local_time, self.cfg.update_agent_every)
         log_time_checker = EveryNStepsChecker(self._checkpoint_global_time, self.cfg.log_every_updates)
-
-        eval_instances = [
-            isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation)
-            for evaluation in self.evaluations.values()
-        ]
-        uses_humanoidverse_eval = any(
-            isinstance(evaluation, (HumanoidVerseMjlabTrackingEvaluation, SameZTerrainEvaluation))
-            for evaluation in self.evaluations.values()
-        )
-        distributed_tracking_eval = (
-            self.cfg.distributed_sync
-            and self.distributed_world_size > 1
-            and any(eval_instances)
-        )
 
         final_local_time = self._checkpoint_local_time
         final_global_time = self._checkpoint_global_time
@@ -1343,10 +1366,30 @@ class Workspace:
             if global_time >= self.cfg.num_env_steps:
                 break
 
-            if (self.evaluate and eval_time_checker.check(global_time)) or (
-                self.evaluate and global_time == self._checkpoint_global_time
-            ):
+            force_eval_at_resume = self.evaluate and global_time == self._checkpoint_global_time
+            due_evaluation_names = [
+                name
+                for name, checker in evaluation_time_checkers.items()
+                if force_eval_at_resume or checker.check(global_time)
+            ]
+            if due_evaluation_names:
                 eval_metrics = {}
+                due_evaluations = [self.evaluations[name] for name in due_evaluation_names]
+                distributed_tracking_eval = (
+                    self.cfg.distributed_sync
+                    and self.distributed_world_size > 1
+                    and any(
+                        isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation)
+                        for evaluation in due_evaluations
+                    )
+                )
+                uses_humanoidverse_eval = any(
+                    isinstance(
+                        evaluation,
+                        (HumanoidVerseMjlabTrackingEvaluation, SameZTerrainEvaluation),
+                    )
+                    for evaluation in due_evaluations
+                )
                 run_eval_on_this_rank = (
                     distributed_tracking_eval
                     or (not self.cfg.distributed_sync)
@@ -1358,6 +1401,7 @@ class Workspace:
                         replay_buffer=replay_buffer,
                         distributed_shard=distributed_tracking_eval,
                         write_outputs=not distributed_tracking_eval,
+                        evaluation_names=due_evaluation_names,
                     )
                 if distributed_tracking_eval:
                     if self.distributed_rank == 0:
@@ -1366,7 +1410,8 @@ class Workspace:
                         eval_metrics = {}
                 if self.cfg.distributed_sync:
                     barrier()
-                eval_time_checker.update_last_step(global_time)
+                for name in due_evaluation_names:
+                    evaluation_time_checkers[name].update_last_step(global_time)
                 if uses_humanoidverse_eval:
                     # reset if there is a humanoidverse evaluation
                     td, info = train_env.reset()
@@ -1389,7 +1434,7 @@ class Workspace:
                     if self.prior_env is not None:
                         prior_collector_state = self._reset_prior_collector()
 
-                if self.cfg.prioritization:
+                if self.cfg.prioritization and self.priorization_eval_name in due_evaluation_names:
                     # priorities
                     priority_payload = None
                     # Distributed tracking evaluation runs on every rank, but the
@@ -1800,17 +1845,30 @@ class Workspace:
             )
         train_env.close()
 
-    def eval(self, t, replay_buffer, *, distributed_shard: bool = False, write_outputs: bool = True):
+    def eval(
+        self,
+        t,
+        replay_buffer,
+        *,
+        distributed_shard: bool = False,
+        write_outputs: bool = True,
+        evaluation_names: tp.Iterable[str] | None = None,
+    ):
+        selected_names = tuple(self.evaluations if evaluation_names is None else evaluation_names)
+        unknown_names = sorted(set(selected_names) - set(self.evaluations))
+        if unknown_names:
+            raise KeyError(f"unknown evaluations requested: {unknown_names}")
         print(
             f"Starting evaluation at time {t} on rank {self.distributed_rank}"
             + (" (distributed motion shard)" if distributed_shard else ""),
+            f"evaluations={selected_names}",
             flush=True,
         )
         evaluation_results = {}
 
         # This will contain the results, mapping evaluation.cfg.name --> dict of metrics
         evaluation_results = {}
-        for evaluation_name in self.evaluations.keys():
+        for evaluation_name in selected_names:
             logger = self.eval_loggers.get(evaluation_name) if write_outputs else None
             evaluation = self.evaluations[evaluation_name]
 

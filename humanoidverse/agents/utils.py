@@ -36,6 +36,23 @@ class EveryNStepsChecker:
         self.last_step = step
 
 
+class AnchoredEveryNStepsChecker(EveryNStepsChecker):
+    """Periodic checker that does not accumulate step-quantization drift.
+
+    Environment steps advance in parallel-env-sized chunks, so a nominal
+    3.2M deadline is normally crossed slightly late. Advancing the schedule by
+    the nominal interval keeps its third trigger aligned with a 9.6M cadence.
+    """
+
+    def update_last_step(self, step: int):
+        elapsed = step - self.last_step
+        if elapsed < 0:
+            raise ValueError("step schedules cannot move backwards")
+        completed_intervals = elapsed // self.every_n_steps
+        if completed_intervals > 0:
+            self.last_step += completed_intervals * self.every_n_steps
+
+
 def dict_to_config(source: Mapping, target: Any):
     target_fields = {field.name for field in dataclasses.fields(target)}
     for field in target_fields:
