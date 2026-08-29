@@ -8,7 +8,6 @@ from omegaconf import OmegaConf
 
 from humanoidverse.agents.envs.humanoidverse_mjlab import (
     _random_yaw_quaternions,
-    reference_heading_alignment,
     rotate_root_motion_by_yaw,
 )
 from humanoidverse.agents.presets.fb import build_fb_agent
@@ -22,30 +21,6 @@ def _yaw_quaternion(angle: torch.Tensor) -> torch.Tensor:
         (torch.zeros_like(half), torch.zeros_like(half), torch.sin(half), torch.cos(half)),
         dim=-1,
     )
-
-
-def test_reference_heading_reward_has_expected_zero_ninety_and_one_eighty_values() -> None:
-    angles = torch.tensor([0.0, torch.pi / 2.0, torch.pi])
-    root_rotation = _yaw_quaternion(angles)
-    reference_rotation = _yaw_quaternion(torch.zeros_like(angles))
-
-    reward = reference_heading_alignment(root_rotation, reference_rotation, torch.zeros(3))
-
-    torch.testing.assert_close(reward, torch.tensor([1.0, 0.5, 0.0]), atol=1.0e-6, rtol=0.0)
-
-
-def test_reference_heading_reward_applies_episode_motion_offset() -> None:
-    reference_angles = torch.tensor([-0.7, 0.2, 1.1])
-    offsets = torch.tensor([1.3, -2.1, 0.4])
-    root_rotation = _yaw_quaternion(reference_angles + offsets)
-
-    reward = reference_heading_alignment(
-        root_rotation,
-        _yaw_quaternion(reference_angles),
-        offsets,
-    )
-
-    torch.testing.assert_close(reward, torch.ones(3), atol=1.0e-6, rtol=0.0)
 
 
 def test_reset_yaw_rotates_pose_linear_velocity_and_angular_velocity_together() -> None:
@@ -77,15 +52,15 @@ def test_reset_yaw_sampler_is_full_range_and_yaw_only() -> None:
 
 
 @pytest.mark.parametrize("builder", [build_fb_agent, build_fb_terrain_agent, build_fb_depth_agent])
-def test_fb_training_consumes_heading_reference_auxiliary_reward(builder) -> None:
+def test_fb_training_does_not_consume_hidden_reference_heading_reward(builder) -> None:
     cfg = builder(device="cpu", compile=False)
 
-    assert "heading_reference_alignment" in cfg.aux_rewards
-    assert cfg.aux_rewards_scaling["heading_reference_alignment"] == pytest.approx(2.0)
+    assert "heading_reference_alignment" not in cfg.aux_rewards
+    assert "heading_reference_alignment" not in cfg.aux_rewards_scaling
 
 
-def test_environment_heading_reference_reward_weight_is_two() -> None:
+def test_environment_does_not_enable_hidden_reference_heading_reward() -> None:
     config_path = Path(__file__).parents[1] / "humanoidverse/config/rewards/reward_bfm_zero.yaml"
     rewards = OmegaConf.load(config_path).rewards
 
-    assert rewards.reward_scales.heading_reference_alignment == pytest.approx(2.0)
+    assert "heading_reference_alignment" not in rewards.reward_scales

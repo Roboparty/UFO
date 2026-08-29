@@ -750,14 +750,6 @@ def _random_yaw_quaternions(n: int, device: str) -> torch.Tensor:
     )
 
 
-def _yaw_from_xyzw(quaternion: torch.Tensor) -> torch.Tensor:
-    """Return world yaw from an xyzw quaternion batch."""
-    if quaternion.ndim != 2 or quaternion.shape[1] != 4:
-        raise ValueError("quaternion must have shape [B, 4]")
-    x, y, z, w = quaternion.unbind(dim=-1)
-    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y.square() + z.square()))
-
-
 def rotate_root_motion_by_yaw(
     root_rotation: torch.Tensor,
     root_velocity: torch.Tensor,
@@ -775,27 +767,6 @@ def rotate_root_motion_by_yaw(
         my_quat_rotate(yaw_rotation, root_velocity),
         my_quat_rotate(yaw_rotation, root_angular_velocity),
     )
-
-
-def reference_heading_alignment(
-    root_rotation: torch.Tensor,
-    reference_root_rotation: torch.Tensor,
-    motion_heading_offset: torch.Tensor,
-) -> torch.Tensor:
-    """Cosine reward for following the reset-rotated reference heading."""
-    batch_size = root_rotation.shape[0]
-    if root_rotation.shape != (batch_size, 4) or reference_root_rotation.shape != (batch_size, 4):
-        raise ValueError("root rotations must have matching [B, 4] shapes")
-    if motion_heading_offset.shape != (batch_size,):
-        raise ValueError("motion_heading_offset must have shape [B]")
-    forward = torch.zeros((batch_size, 3), device=root_rotation.device, dtype=root_rotation.dtype)
-    forward[:, 0] = 1.0
-    root_forward = my_quat_rotate(root_rotation, forward)
-    reference_forward = my_quat_rotate(reference_root_rotation, forward)
-    root_heading = torch.atan2(root_forward[:, 1], root_forward[:, 0])
-    reference_heading = torch.atan2(reference_forward[:, 1], reference_forward[:, 0])
-    target_heading = reference_heading + motion_heading_offset
-    return 0.5 * (torch.cos(wrap_to_pi(root_heading - target_heading)) + 1.0)
 
 
 def _compose_humanoidverse_config(
@@ -1271,7 +1242,6 @@ class HumanoidVerseMjlabCore:
             else 0
         )
         self._terrain_motion_offsets = torch.zeros(self.num_envs, 3, device=self.device)
-        self.motion_heading_offsets = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self._reset_region_ids = torch.full(
             (self.num_envs,), RESET_REGION_ID["flat_center"], device=self.device, dtype=torch.long
         )
@@ -2084,12 +2054,6 @@ class HumanoidVerseMjlabCore:
         aux["feet_heading_alignment"] = torch.abs(wrap_to_pi(torch.atan2(forward_left[:, 1], forward_left[:, 0]) - heading_root)) + torch.abs(
             wrap_to_pi(torch.atan2(forward_right[:, 1], forward_right[:, 0]) - heading_root)
         )
-        aux["heading_reference_alignment"] = reference_heading_alignment(
-            self.base_quat,
-            self.ref_body_rot_extend[:, 0],
-            self.motion_heading_offsets,
-        )
-
         reward = torch.zeros(self.num_envs, device=self.device)
         for name, scale in self.reward_scales.items():
             if name not in aux:
@@ -2292,7 +2256,6 @@ class HumanoidVerseMjlabCore:
                     "terrain.reset.ground_probe_clearance must be positive and below max_ray_distance"
                 )
             ground_probe_z = self.env_origins[env_ids, 2] + generic_probe_clearance
-        reference_root_rot = None
         if target_states is not None:
             self._terrain_motion_offsets[env_ids] = 0.0
             root_xyzw = target_states["root_states"][env_ids].to(self.device, dtype=torch.float32)
@@ -2308,7 +2271,6 @@ class HumanoidVerseMjlabCore:
             root_rot = motion_res["root_rot"]
             root_vel = motion_res["root_vel"]
             root_ang_vel = motion_res["root_ang_vel"]
-            reference_root_rot = root_rot
             yaw_rotation = _random_yaw_quaternions(len(env_ids), self.device)
             root_rot, root_vel, root_ang_vel = rotate_root_motion_by_yaw(
                 root_rot,
@@ -2404,13 +2366,6 @@ class HumanoidVerseMjlabCore:
             )
             joint_vel = motion_res["dof_vel"] + torch.randn_like(motion_res["dof_vel"]) * float(self.config.init_noise_scale.dof_vel) * float(
                 self.config.noise_to_initial_level
-            )
-
-        if reference_root_rot is None:
-            self.motion_heading_offsets[env_ids] = 0.0
-        else:
-            self.motion_heading_offsets[env_ids] = wrap_to_pi(
-                _yaw_from_xyzw(root_xyzw[:, 3:7]) - _yaw_from_xyzw(reference_root_rot)
             )
 
         if self.terrain_enabled:

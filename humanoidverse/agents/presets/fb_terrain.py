@@ -47,7 +47,6 @@ def build_fb_terrain_agent(**kwargs):
                     "penalty_body_impact",
                     "penalty_slippage",
                     "penalty_ankle_roll",
-                    "heading_reference_alignment",
                 ],
                 "aux_rewards_scaling": {
                     "penalty_action_rate": -0.1,
@@ -55,7 +54,6 @@ def build_fb_terrain_agent(**kwargs):
                     "penalty_body_impact": -1.0,
                     "penalty_slippage": -1.0,
                     "penalty_ankle_roll": -1.0,
-                    "heading_reference_alignment": 2.0,
                 },
             }
         )

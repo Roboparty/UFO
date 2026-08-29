@@ -21,7 +21,6 @@ rewards:
       # better for landing
       # penalty_feet_ori: -2.0
       feet_heading_alignment: -0.1
-      heading_reference_alignment: 2.0
       penalty_slippage: -1.0
 
       limits_dof_pos: -10.0
