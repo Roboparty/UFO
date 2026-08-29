@@ -1621,14 +1621,22 @@ class Workspace:
             # we check if at the next iteration we will evaluate
             next_local_time = local_time + local_step_increment
             next_global_time = next_local_time * global_step_scale
-            if (self.evaluate and eval_time_checker.check(next_global_time)) or (
-                self.evaluate and next_global_time == self._checkpoint_global_time
+            next_uses_humanoidverse_eval = self.evaluate and any(
+                checker.check(next_global_time)
+                and isinstance(
+                    self.evaluations[name],
+                    (HumanoidVerseMjlabTrackingEvaluation, SameZTerrainEvaluation),
+                )
+                for name, checker in evaluation_time_checkers.items()
+            )
+            if (
+                isinstance(self.cfg.env, HumanoidVerseMjlabConfig)
+                and next_uses_humanoidverse_eval
             ):
-                if isinstance(self.cfg.env, HumanoidVerseMjlabConfig) and uses_humanoidverse_eval:
-                    # make sure we set truncated since at the next iteration we are forced to reset the environment
-                    # after the evaluation. This is because we share the environment with the evaluation
-                    new_truncated = np.ones_like(new_truncated, dtype=bool)
-                    truncated = np.ones_like(new_truncated, dtype=bool)
+                # Make sure we set truncated since at the next iteration we are
+                # forced to reset the shared training environment after eval.
+                new_truncated = np.ones_like(new_truncated, dtype=bool)
+                truncated = np.ones_like(new_truncated, dtype=bool)
 
             if Version(gymnasium.__version__) >= Version("1.0"):
                 if self.cfg.use_trajectory_buffer:
