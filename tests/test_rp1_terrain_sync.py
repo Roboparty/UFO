@@ -180,6 +180,7 @@ def test_fb_depth_uses_separate_checkpoint_tracking_and_same_z_cadences() -> Non
         terrain_mode="rp1_simple",
     )
     evaluations = {evaluation.name_in_logs: evaluation for evaluation in cfg.evaluations}
+    assert cfg.agent.train.reg_coeff == 0.01
     assert cfg.checkpoint_every_steps == 9_600_000
     assert evaluations["humanoidverse_tracking_eval"].every_steps == 3_200_000
     assert evaluations["same_z_terrain_eval"].every_steps == 9_600_000

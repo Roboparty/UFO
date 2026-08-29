@@ -178,7 +178,7 @@ def build_fb_agent(
             lr_critic=0.0003 * lr_scale,
             critic_target_tau=0.005,
             critic_pessimism_penalty=0.5,
-            reg_coeff=0.05,
+            reg_coeff=0.01,
             scale_reg=True,
             expert_asm_ratio=0.6,
             relabel_ratio=0.8,
