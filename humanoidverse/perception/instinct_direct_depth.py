@@ -210,13 +210,22 @@ class RP1DirectDepthRuntime:
         cfg: RP1DirectDepthConfig,
         *,
         enable_noise: bool,
+        fixed_delay_frames: int | None = None,
     ) -> None:
         cfg.validate()
+        if fixed_delay_frames is not None and not (
+            cfg.delayed_frame_ranges[0] <= int(fixed_delay_frames) <= cfg.delayed_frame_ranges[1]
+        ):
+            raise ValueError(
+                "fixed_delay_frames must lie inside the frozen RP1 delay range "
+                f"{cfg.delayed_frame_ranges}, got {fixed_delay_frames}"
+            )
         self.cfg = cfg
         self.camera = cfg.camera_config()
         self.num_envs = int(num_envs)
         self.device = torch.device(device)
         self.enable_noise = bool(enable_noise)
+        self.fixed_delay_frames = None if fixed_delay_frames is None else int(fixed_delay_frames)
         self._history = torch.zeros(
             (self.num_envs, cfg.history_length, cfg.output_height, cfg.output_width),
             dtype=self.output_dtype,
@@ -264,12 +273,15 @@ class RP1DirectDepthRuntime:
         if env_ids.numel() == 0:
             return
         frame = self.current_frame(sensor)
-        self._delay_frames[env_ids] = torch.randint(
-            self.cfg.delayed_frame_ranges[0],
-            self.cfg.delayed_frame_ranges[1] + 1,
-            (env_ids.numel(),),
-            device=self.device,
-        )
+        if self.fixed_delay_frames is None:
+            self._delay_frames[env_ids] = torch.randint(
+                self.cfg.delayed_frame_ranges[0],
+                self.cfg.delayed_frame_ranges[1] + 1,
+                (env_ids.numel(),),
+                device=self.device,
+            )
+        else:
+            self._delay_frames[env_ids] = self.fixed_delay_frames
         self._history[env_ids] = frame[env_ids, None]
         self._latest[env_ids] = frame[env_ids, None]
         self._initialized[env_ids] = True

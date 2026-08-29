@@ -18,6 +18,30 @@ from ..nn_models import _soft_update_params, eval_mode
 from .model import FBcprAuxModelConfig
 
 
+def prior_transition_discount(
+    prior_batch: dict[str, tp.Any],
+    *,
+    gamma: float,
+    device: str | torch.device,
+) -> torch.Tensor:
+    """Return the behavior-prior discount aligned with the sampled action.
+
+    The canonical-plane collector stores the outcome of the action in the
+    current replay slot.  The legacy fallback is retained for checkpoints
+    produced before the dedicated prior stream existed.
+    """
+
+    if "transition_terminated" in prior_batch and "transition_truncated" in prior_batch:
+        done = prior_batch["transition_terminated"].to(device) | prior_batch[
+            "transition_truncated"
+        ].to(device)
+    else:
+        done = prior_batch["next"]["terminated"].to(device)
+        if "truncated" in prior_batch["next"]:
+            done = done | prior_batch["next"]["truncated"].to(device)
+    return float(gamma) * ~done
+
+
 class FBcprAuxAgentTrainConfig(FBcprAgentTrainConfig):
     lr_aux_critic: float = 1e-4
     reg_coeff_aux: float = 1.0
@@ -80,77 +104,149 @@ class FBcprAuxAgent(FBcprAgent):
 
             self.update_aux_critic = CudaGraphModule(self.update_aux_critic, warmup=5)
 
+    def _relabel_main_and_prior_z(
+        self,
+        *,
+        main_next_obs: torch.Tensor | dict[str, torch.Tensor],
+        prior_next_obs: torch.Tensor | dict[str, torch.Tensor],
+        expert_z: torch.Tensor,
+        main_rollout_z: torch.Tensor,
+        prior_rollout_z: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Relabel each stream independently while keeping z-buffer ownership main-only."""
+
+        sampled_main_z = self.sample_mixed_z(train_goal=main_next_obs, expert_encodings=expert_z).clone()
+        self.z_buffer.add(sampled_main_z)
+        sampled_prior_z = self.sample_mixed_z(train_goal=prior_next_obs, expert_encodings=expert_z).clone()
+
+        if self.cfg.train.relabel_ratio is None:
+            return main_rollout_z, prior_rollout_z
+        main_mask = torch.rand((self.cfg.train.batch_size, 1), device=self.device) <= self.cfg.train.relabel_ratio
+        prior_mask = torch.rand((self.cfg.train.batch_size, 1), device=self.device) <= self.cfg.train.relabel_ratio
+        return (
+            torch.where(main_mask, sampled_main_z, main_rollout_z),
+            torch.where(prior_mask, sampled_prior_z, prior_rollout_z),
+        )
+
     def update(self, replay_buffer, step: int) -> Dict[str, torch.Tensor]:
         expert_batch = replay_buffer["expert_slicer"].sample(self.cfg.train.batch_size)
-        train_batch = replay_buffer["train"].sample(self.cfg.train.batch_size)
+        main_batch = replay_buffer["train"].sample(self.cfg.train.batch_size)
+        prior_batch = replay_buffer.get("prior", replay_buffer["train"]).sample(self.cfg.train.batch_size)
 
-        train_obs, train_action, train_next_obs = (
-            tree_map(lambda x: x.to(self.device), train_batch["observation"]),
-            train_batch["action"].to(self.device),
-            tree_map(lambda x: x.to(self.device), train_batch["next"]["observation"]),
+        main_obs, main_action, main_next_obs = (
+            tree_map(lambda x: x.to(self.device), main_batch["observation"]),
+            main_batch["action"].to(self.device),
+            tree_map(lambda x: x.to(self.device), main_batch["next"]["observation"]),
         )
-        discount = self.cfg.train.discount * ~train_batch["next"]["terminated"].to(self.device)
+        prior_obs, prior_action, prior_next_obs = (
+            tree_map(lambda x: x.to(self.device), prior_batch["observation"]),
+            prior_batch["action"].to(self.device),
+            tree_map(lambda x: x.to(self.device), prior_batch["next"]["observation"]),
+        )
+        main_discount = self.cfg.train.discount * ~main_batch["next"]["terminated"].to(self.device)
+        prior_discount = prior_transition_discount(
+            prior_batch,
+            gamma=self.cfg.train.discount,
+            device=self.device,
+        )
         expert_obs, expert_next_obs = (
             tree_map(lambda x: x.to(self.device), expert_batch["observation"]),
             tree_map(lambda x: x.to(self.device), expert_batch["next"]["observation"]),
         )
 
-        self._model._obs_normalizer(train_obs)
-        self._model._obs_normalizer(train_next_obs)
+        # Shared running statistics are updated by the main terrain stream
+        # only. The canonical-plane prior is transformed in eval mode below.
+        self._model._obs_normalizer(main_obs)
+        self._model._obs_normalizer(main_next_obs)
 
         with torch.no_grad(), eval_mode(self._model._obs_normalizer):
-            train_obs, train_next_obs = (
-                self._model._obs_normalizer(train_obs),
-                self._model._obs_normalizer(train_next_obs),
+            main_obs, main_next_obs = (
+                self._model._obs_normalizer(main_obs),
+                self._model._obs_normalizer(main_next_obs),
+            )
+            prior_obs, prior_next_obs = (
+                self._model._obs_normalizer(prior_obs),
+                self._model._obs_normalizer(prior_next_obs),
             )
             expert_obs, expert_next_obs = (
                 self._model._obs_normalizer(expert_obs),
                 self._model._obs_normalizer(expert_next_obs),
             )
 
+        prior_terrain_var = None
+        if isinstance(prior_obs, dict) and "terrain_priv" in prior_obs:
+            raw_prior = prior_batch["observation"].get("terrain_priv")
+            raw_prior_next = prior_batch["next"]["observation"].get("terrain_priv")
+            if raw_prior is None or raw_prior_next is None:
+                raise RuntimeError("Prior observations must contain terrain_priv at t and t+1")
+            # The Agent intentionally accepts any prior_batch provider so A*/B/C
+            # ablations do not fork the optimizer code. Workspace collection is
+            # the source-of-truth assertion that C's plane stream is raw zero;
+            # when this batch is canonical plane, additionally prove that shared
+            # normalization did not create sample-wise geometry information.
+            raw_plane = (
+                torch.count_nonzero(raw_prior).item() == 0
+                and torch.count_nonzero(raw_prior_next).item() == 0
+            )
+            if raw_plane:
+                prior_terrain_var = torch.stack(
+                    (
+                        prior_obs["terrain_priv"].float().var(dim=0, unbiased=False).amax(),
+                        prior_next_obs["terrain_priv"].float().var(dim=0, unbiased=False).amax(),
+                    )
+                ).amax()
+                if prior_terrain_var.item() > 1.0e-7:
+                    raise RuntimeError(
+                        "Canonical-plane terrain_priv acquired sample-wise variation during normalization: "
+                        f"max_variance={prior_terrain_var.item():.3e}"
+                    )
+
         torch.compiler.cudagraph_mark_step_begin()
         expert_z = self.encode_expert(next_obs=expert_next_obs)
-        train_z = train_batch["z"].to(self.device)
+        main_z = main_batch["z"].to(self.device)
+        prior_z = prior_batch["z"].to(self.device)
 
-        # train the discriminator
+        # D sees the prior policy's original rollout z, matching the existing
+        # algorithm. Relabeling happens independently below for both critics.
         grad_penalty = self.cfg.train.grad_penalty_discriminator if self.cfg.train.grad_penalty_discriminator > 0 else None
         metrics = self.update_discriminator(
             expert_obs=expert_obs,
             expert_z=expert_z,
-            train_obs=train_obs,
-            train_z=train_z,
+            train_obs=prior_obs,
+            train_z=prior_z,
             grad_penalty=grad_penalty,
         )
 
-        z = self.sample_mixed_z(train_goal=train_next_obs, expert_encodings=expert_z).clone()
-        self.z_buffer.add(z)
-
-        if self.cfg.train.relabel_ratio is not None:
-            mask = torch.rand((self.cfg.train.batch_size, 1), device=self.device) <= self.cfg.train.relabel_ratio
-            train_z = torch.where(mask, z, train_z)
+        main_z, prior_z = self._relabel_main_and_prior_z(
+            main_next_obs=main_next_obs,
+            prior_next_obs=prior_next_obs,
+            expert_z=expert_z,
+            main_rollout_z=main_z,
+            prior_rollout_z=prior_z,
+        )
 
         q_loss_coef = self.cfg.train.q_loss_coef if self.cfg.train.q_loss_coef > 0 else None
         clip_grad_norm = self.cfg.train.clip_grad_norm if self.cfg.train.clip_grad_norm > 0 else None
 
         metrics.update(
             self.update_fb(
-                obs=train_obs,
-                action=train_action,
-                discount=discount,
-                next_obs=train_next_obs,
-                goal=train_next_obs,
-                z=train_z,
+                obs=main_obs,
+                action=main_action,
+                discount=main_discount,
+                next_obs=main_next_obs,
+                goal=main_next_obs,
+                z=main_z,
                 q_loss_coef=q_loss_coef,
                 clip_grad_norm=clip_grad_norm,
             )
         )
         metrics.update(
             self.update_critic(
-                obs=train_obs,
-                action=train_action,
-                discount=discount,
-                next_obs=train_next_obs,
-                z=train_z,
+                obs=prior_obs,
+                action=prior_action,
+                discount=prior_discount,
+                next_obs=prior_next_obs,
+                z=prior_z,
             )
         )
         # compute scalar auxiliary reward as a weighted sum of the auxiliary rewards
@@ -161,29 +257,33 @@ class FBcprAuxAgent(FBcprAgent):
         )
         for aux_reward_name in self.cfg.aux_rewards:
             # let's log even this information
-            metrics[f"aux_rew/{aux_reward_name}"] = train_batch["aux_rewards"][aux_reward_name].mean()
-            aux_reward += self.cfg.aux_rewards_scaling[aux_reward_name] * train_batch["aux_rewards"][aux_reward_name].to(self.device)
+            metrics[f"aux_rew/{aux_reward_name}"] = main_batch["aux_rewards"][aux_reward_name].mean()
+            aux_reward += self.cfg.aux_rewards_scaling[aux_reward_name] * main_batch["aux_rewards"][aux_reward_name].to(self.device)
 
         aux_reward = self._model._aux_reward_normalizer(aux_reward)
 
         metrics.update(
             self.update_aux_critic(
-                obs=train_obs,
-                action=train_action,
-                discount=discount,
+                obs=main_obs,
+                action=main_action,
+                discount=main_discount,
                 aux_reward=aux_reward,
-                next_obs=train_next_obs,
-                z=train_z,
+                next_obs=main_next_obs,
+                z=main_z,
             )
         )
         metrics.update(
             self._run_actor_update(
-                obs=train_obs,
-                action=train_action,
-                z=train_z,
+                main_obs=main_obs,
+                main_z=main_z,
+                prior_obs=prior_obs,
+                prior_z=prior_z,
                 clip_grad_norm=clip_grad_norm,
             )
         )
+        metrics["prior/discount_mean"] = prior_discount.float().mean().detach()
+        if prior_terrain_var is not None:
+            metrics["prior/terrain_priv_normalized_var_max"] = prior_terrain_var.detach()
 
         with torch.no_grad():
             _soft_update_params(
@@ -255,28 +355,36 @@ class FBcprAuxAgent(FBcprAgent):
 
     def update_actor(
         self,
-        obs: torch.Tensor | dict[str, torch.Tensor],
-        action: torch.Tensor,
-        z: torch.Tensor,
+        main_obs: torch.Tensor | dict[str, torch.Tensor],
+        main_z: torch.Tensor,
+        prior_obs: torch.Tensor | dict[str, torch.Tensor],
+        prior_z: torch.Tensor,
         clip_grad_norm: float | None,
     ) -> Dict[str, torch.Tensor]:
         actor_stage = self._training_stage("actor")
         actor = self._model._actor if actor_stage is None else actor_stage
         with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
-            dist = actor(obs, z, self._model.cfg.actor_std)
-            action = dist.sample(clip=self.cfg.train.stddev_clip)
+            # One actor forward and one optimizer step preserve DDP reducer and
+            # optimization semantics while the two loss branches use their own
+            # state distributions.
+            combined_obs = tree_map(lambda main, prior: torch.cat((main, prior), dim=0), main_obs, prior_obs)
+            combined_z = torch.cat((main_z, prior_z), dim=0)
+            dist = actor(combined_obs, combined_z, self._model.cfg.actor_std)
+            combined_action = dist.sample(clip=self.cfg.train.stddev_clip)
+            main_batch_size = main_z.shape[0]
+            main_action = combined_action[:main_batch_size]
+            prior_action = combined_action[main_batch_size:]
 
-            # compute discriminator reward loss
-            Qs_discriminator = self._model._critic(obs, z, action)  # num_parallel x batch x (1 or n_bins)
+            # Canonical-plane behavior anchor.
+            Qs_discriminator = self._model._critic(prior_obs, prior_z, prior_action)
             _, _, Q_discriminator = self.get_targets_uncertainty(Qs_discriminator, self.cfg.train.actor_pessimism_penalty)  # batch
 
-            # compute auxiliary reward loss
-            Qs_aux = self._model._aux_critic(obs, z, action)  # num_parallel x batch x (1 or n_bins)
+            # Main RP1 terrain realization and physical auxiliary objectives.
+            Qs_aux = self._model._aux_critic(main_obs, main_z, main_action)
             _, _, Q_aux = self.get_targets_uncertainty(Qs_aux, self.cfg.train.actor_pessimism_penalty)  # batch
 
-            # compute fb reward loss
-            Fs = self._model._forward_map(obs, z, action)  # num_parallel x batch x z_dim
-            Qs_fb = (Fs * z).sum(-1)  # num_parallel x batch
+            Fs = self._model._forward_map(main_obs, main_z, main_action)
+            Qs_fb = (Fs * main_z).sum(-1)  # num_parallel x batch
             _, _, Q_fb = self.get_targets_uncertainty(Qs_fb, self.cfg.train.actor_pessimism_penalty)  # batch
 
             weight = Q_fb.abs().mean().detach() if self.cfg.train.scale_reg else 1.0

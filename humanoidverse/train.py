@@ -37,6 +37,7 @@ _ensure_compile_cache()
 
 DEFAULT_AGENT = "fb"
 DEFAULT_NUM_ENVS = 1024
+DEFAULT_PRIOR_PLANE_ENVS = 128
 DEFAULT_NUM_ENV_STEPS = 192000000
 DEFAULT_CHECKPOINT_EVERY_STEPS = 3200000
 DEFAULT_DATA_PATH = "humanoidverse/data/lafan_29dof_10s-clipped.pkl"
@@ -58,6 +59,7 @@ AGENT_ALIASES = {
 
 from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import HumanoidVerseMjlabTrackingEvaluationConfig
+from humanoidverse.agents.evaluations.same_z_terrain import SameZTerrainEvaluationConfig
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.terrains.coverage import validate_motion_terrain_coverage
 from humanoidverse.terrains.rp1_simple import RP1_PATCH_SIZE, RP1_TERRAIN_BORDER_WIDTH
@@ -112,6 +114,7 @@ def build_ufo_mjlab_config(
     data_mix_weights: list[float] | None = None,
     update_z_every_step: int | None = None,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
+    prior_plane_envs: int | None = None,
     disable_dr: bool = False,
     disable_obs_noise: bool = False,
     lr_scale: float = 1.0,
@@ -127,6 +130,15 @@ def build_ufo_mjlab_config(
     ddp_bucket_cap_mb: float = 25.0,
 ) -> TrainConfig:
     agent = canonical_agent_name(agent)
+    if prior_plane_envs is None:
+        prior_plane_envs = DEFAULT_PRIOR_PLANE_ENVS if agent == "fb_depth" else 0
+    prior_plane_envs = int(prior_plane_envs)
+    if prior_plane_envs < 0:
+        raise ValueError("prior_plane_envs must be non-negative")
+    if prior_plane_envs > 0 and agent != "fb_depth":
+        raise ValueError("canonical-plane prior collection is supported only by fb_depth")
+    if smoke and prior_plane_envs > 0:
+        prior_plane_envs = min(prior_plane_envs, max(2, num_envs // 8))
     if gradient_sync == "auto":
         gradient_sync = (
             "ddp"
@@ -165,6 +177,15 @@ def build_ufo_mjlab_config(
                 n_episodes_per_motion=1,
             )
         ]
+        if agent == "fb_depth":
+            evaluations.append(
+                SameZTerrainEvaluationConfig(
+                    name="SameZTerrainEvaluationConfig",
+                    generate_videos=False,
+                    name_in_logs="same_z_terrain_eval",
+                    seed=seed,
+                )
+            )
     agent_device = "cuda" if device.startswith("cuda") else "cpu"
     resolved_update_z_every_step = (
         _default_update_z_every_step(agent) if update_z_every_step is None else int(update_z_every_step)
@@ -232,6 +253,10 @@ def build_ufo_mjlab_config(
             ]
         )
 
+    main_buffer_size = min(int(buffer_size), 4096) if smoke else int(buffer_size)
+    replay_time_slots = max(main_buffer_size // max(int(num_envs), 1), 2)
+    prior_buffer_size = prior_plane_envs * replay_time_slots
+
     return TrainConfig(
         name="TrainConfig",
         agent=agent_cfg,
@@ -261,6 +286,7 @@ def build_ufo_mjlab_config(
         work_dir=work_dir,
         seed=seed,
         online_parallel_envs=num_envs,
+        prior_plane_envs=prior_plane_envs,
         log_every_updates=train_runtime["log_every_updates"],
         num_env_steps=num_env_steps,
         update_agent_every=train_runtime["update_agent_every"],
@@ -275,7 +301,8 @@ def build_ufo_mjlab_config(
         prioritization_scale=2.0,
         prioritization_mode="exp",
         use_trajectory_buffer=train_runtime["use_trajectory_buffer"],
-        buffer_size=min(int(buffer_size), 4096) if smoke else int(buffer_size),
+        buffer_size=main_buffer_size,
+        prior_buffer_size=prior_buffer_size,
         use_wandb=use_wandb,
         wandb_ename=os.environ.get("WANDB_ENTITY"),
         wandb_gname=wandb_group,
@@ -379,6 +406,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         data_mix_weights=args.data_mix_weights,
         update_z_every_step=args.update_z_every_step,
         buffer_size=args.buffer_size,
+        prior_plane_envs=args.prior_plane_envs,
         disable_dr=bool(args.disable_dr),
         disable_obs_noise=bool(args.disable_obs_noise),
         lr_scale=args.lr_scale,
@@ -399,6 +427,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"robot_config={cfg.env.robot_config_path}, mjcf_path={cfg.env.mjcf_path}, "
         f"data_path={cfg.env.lafan_tail_path}, data_mix_weights={cfg.env.data_mix_weights}, "
         f"num_envs_per_rank={args.num_envs}, global_parallel_envs={args.num_envs * world_size}, "
+        f"prior_plane_envs_per_rank={cfg.prior_plane_envs}, prior_buffer_size_per_rank={cfg.prior_buffer_size}, "
         f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, "
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
@@ -583,6 +612,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="Replay capacity per rank/GPU.")
     parser.add_argument(
+        "--prior-plane-envs",
+        type=int,
+        default=None,
+        help=(
+            "Canonical-plane policy environments per rank for the fb_depth D/Q_D prior stream "
+            f"(default: {DEFAULT_PRIOR_PLANE_ENVS}; use 0 only for legacy/ablation runs)."
+        ),
+    )
+    parser.add_argument(
         "--expert-buffer-cache",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -682,6 +720,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--update-z-every-step must be positive")
     if args.buffer_size <= 0:
         raise ValueError("--buffer-size must be positive")
+    if args.prior_plane_envs is not None and args.prior_plane_envs < 0:
+        raise ValueError("--prior-plane-envs must be non-negative")
+    if args.prior_plane_envs not in (None, 0) and args.agent != "fb_depth":
+        raise ValueError("--prior-plane-envs is only supported with --agent fb_depth")
     if args.num_agent_updates is not None and args.num_agent_updates <= 0:
         raise ValueError("--num-agent-updates must be positive")
     if args.lr_scale <= 0:

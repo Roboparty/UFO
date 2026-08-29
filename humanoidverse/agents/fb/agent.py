@@ -6,6 +6,7 @@
 import json
 import pickle
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Literal, Tuple
 
@@ -21,6 +22,20 @@ from ..envs.utils.gym_spaces import json_to_space, space_to_json
 from ..misc.zbuffer import ZBuffer
 from ..nn_models import _soft_update_params, eval_mode, weight_init
 from .model import FBModel, FBModelConfig
+
+
+@dataclass
+class RolloutContextState:
+    """Collector-local latent and expert-tracking rollout state.
+
+    Training may drive more than one environment collector with the same
+    agent. The temporal bookkeeping therefore belongs to the collector, not
+    to the shared agent/model.
+    """
+
+    z: torch.Tensor | None = None
+    expert_env_ids: torch.Tensor | None = None
+    tracking_z: torch.Tensor | None = None
 
 
 class _FBTrainingStage(torch.nn.Module):
@@ -434,8 +449,17 @@ class FBAgent:
             z[:, step] = z[:, step:end_idx].mean(dim=1)
         return self._model.project_z(z)  # N x T x z_dim
 
-    def maybe_update_rollout_context(self, z: torch.Tensor | None, step_count: torch.Tensor, replay_buffer: None = None) -> torch.Tensor:
-        # get mask for environmets where we need to change z
+    def advance_rollout_context(
+        self,
+        state: RolloutContextState,
+        step_count: torch.Tensor,
+        replay_buffer: dict | None = None,
+    ) -> RolloutContextState:
+        """Advance one collector without mutating agent-global rollout state."""
+
+        z = state.z
+        expert_env_ids = state.expert_env_ids
+        tracking_z = state.tracking_z
         if z is not None:
             mask_reset_z = step_count % self.cfg.train.update_z_every_step == 0
             if self.cfg.train.use_mix_rollout and not self.z_buffer.empty():
@@ -444,21 +468,69 @@ class FBAgent:
                 new_z = self._model.sample_z(z.shape[0], device=self._model.device)
             z = torch.where(mask_reset_z, new_z, z.to(self._model.device))
             if self.cfg.train.rollout_expert_trajectories:
+                if replay_buffer is None:
+                    raise ValueError("Expert rollout contexts require an expert replay buffer")
                 idxs = step_count % self.cfg.train.rollout_expert_trajectories_length
                 if torch.any(idxs == 0):
-                    n_elem = int(self.cfg.train.rollout_expert_trajectories_percentage*step_count.shape[0])
-                    self.env_idx_with_expert_rollout = torch.randint(0, step_count.shape[0], size=(n_elem,), device=self._model.device)
-                    self.tracking_z = self._sample_tracking_z(replay_buffer, n_elem, self.cfg.train.rollout_expert_trajectories_length)  # N x T x z_dim
-                mod_time = idxs[self.env_idx_with_expert_rollout].ravel()
-                z[self.env_idx_with_expert_rollout] = self.tracking_z[torch.arange(len(self.env_idx_with_expert_rollout), device=self._model.device), mod_time]
+                    n_elem = int(self.cfg.train.rollout_expert_trajectories_percentage * step_count.shape[0])
+                    expert_env_ids = torch.randint(
+                        0,
+                        step_count.shape[0],
+                        size=(n_elem,),
+                        device=self._model.device,
+                    )
+                    tracking_z = self._sample_tracking_z(
+                        replay_buffer,
+                        n_elem,
+                        self.cfg.train.rollout_expert_trajectories_length,
+                    )
+                if expert_env_ids is None or tracking_z is None:
+                    raise RuntimeError("Expert rollout context was not initialized")
+                mod_time = idxs[expert_env_ids].ravel()
+                z[expert_env_ids] = tracking_z[
+                    torch.arange(len(expert_env_ids), device=self._model.device),
+                    mod_time,
+                ]
         else:
             z = self._model.sample_z(step_count.shape[0], device=self._model.device)
             if self.cfg.train.rollout_expert_trajectories:
-                n_elem = int(self.cfg.train.rollout_expert_trajectories_percentage*step_count.shape[0])
-                self.env_idx_with_expert_rollout = torch.randint(0, step_count.shape[0], size=(n_elem,), device=self._model.device)
-                self.tracking_z = self._sample_tracking_z(replay_buffer, n_elem, self.cfg.train.rollout_expert_trajectories_length)  # N x T x z_dim
-                z[self.env_idx_with_expert_rollout] = self.tracking_z[:, 0]
-        return z
+                if replay_buffer is None:
+                    raise ValueError("Expert rollout contexts require an expert replay buffer")
+                n_elem = int(self.cfg.train.rollout_expert_trajectories_percentage * step_count.shape[0])
+                expert_env_ids = torch.randint(
+                    0,
+                    step_count.shape[0],
+                    size=(n_elem,),
+                    device=self._model.device,
+                )
+                tracking_z = self._sample_tracking_z(
+                    replay_buffer,
+                    n_elem,
+                    self.cfg.train.rollout_expert_trajectories_length,
+                )
+                z[expert_env_ids] = tracking_z[:, 0]
+        return RolloutContextState(
+            z=z,
+            expert_env_ids=expert_env_ids,
+            tracking_z=tracking_z,
+        )
+
+    def maybe_update_rollout_context(self, z: torch.Tensor | None, step_count: torch.Tensor, replay_buffer: None = None) -> torch.Tensor:
+        # Backward-compatible single-collector entrypoint. New multi-stream
+        # training owns RolloutContextState instances in the workspace.
+        state = self.advance_rollout_context(
+            RolloutContextState(
+                z=z,
+                expert_env_ids=self.env_idx_with_expert_rollout,
+                tracking_z=getattr(self, "tracking_z", None),
+            ),
+            step_count,
+            replay_buffer,
+        )
+        self.env_idx_with_expert_rollout = state.expert_env_ids
+        self.tracking_z = state.tracking_z
+        assert state.z is not None
+        return state.z
 
     @classmethod
     def load(cls, path: str, device: str | None = None):

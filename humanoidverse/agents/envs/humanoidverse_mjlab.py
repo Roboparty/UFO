@@ -1211,6 +1211,7 @@ class HumanoidVerseMjlabCore:
                 self.device,
                 self.direct_depth_config,
                 enable_noise=not bool(creation_config.disable_obs_noise),
+                fixed_delay_frames=creation_config.fixed_direct_depth_delay_frames,
             )
             if self.direct_depth_config is not None
             else None
@@ -2582,6 +2583,13 @@ class HumanoidVerseMjlabConfig(BaseConfig):
     auto_reset: bool = False
     seed: int | None = None
     evaluation_fast_path: bool = False
+    # Evaluation-only override. None preserves the frozen per-episode {0, 1}
+    # training contract; deterministic same-z evaluation explicitly uses 0.
+    fixed_direct_depth_delay_frames: int | None = None
+
+    def model_post_init(self, context) -> None:
+        if self.fixed_direct_depth_delay_frames is not None and int(self.fixed_direct_depth_delay_frames) not in {0, 1}:
+            raise ValueError("fixed_direct_depth_delay_frames must be 0, 1, or None")
 
     def build(self, num_envs: int = 1, *, motion_lib=None) -> tp.Tuple[HumanoidVerseMjlabVectorEnv, tp.Any]:
         assert num_envs >= 1

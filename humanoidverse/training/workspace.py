@@ -3,6 +3,7 @@
 # This source code is licensed under the CC BY-NC 4.0 license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import os
 
 from humanoidverse.agents.envs.expert_motion_loader import (
@@ -20,6 +21,10 @@ from humanoidverse.agents.evaluations.humanoidverse_mjlab import (
     HumanoidVerseMjlabTrackingEvaluation,
     HumanoidVerseMjlabTrackingEvaluationConfig,
 )
+from humanoidverse.agents.evaluations.same_z_terrain import (
+    SameZTerrainEvaluation,
+    SameZTerrainEvaluationConfig,
+)
 
 os.environ["OMP_NUM_THREADS"] = "1"
 
@@ -30,6 +35,7 @@ torch.set_float32_matmul_precision("high")
 import json
 import time
 import typing as tp
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
@@ -45,12 +51,14 @@ from tqdm import tqdm
 from humanoidverse.agents.base import BaseConfig
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
 from humanoidverse.agents.buffers.transition import DictBuffer, dtype_numpytotorch_lower_precision
+from humanoidverse.agents.fb.agent import RolloutContextState
 from humanoidverse.agents.fb_cpr.agent import FBcprAgentConfig
 from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentConfig
 from humanoidverse.agents.misc.loggers import CSVLogger
 from humanoidverse.agents.tldr_dist_aux.agent import TldrDistAuxAgentConfig
 from humanoidverse.agents.utils import EveryNStepsChecker, get_local_workdir, set_seed_everywhere
 from humanoidverse.distributed import (
+    all_gather_objects,
     barrier,
     broadcast_agent_state,
     broadcast_object,
@@ -70,6 +78,7 @@ CHECKPOINT_DIR_NAME = "checkpoint"
 Evaluation = tp.Annotated[
     tp.Union[
         HumanoidVerseMjlabTrackingEvaluationConfig,
+        SameZTerrainEvaluationConfig,
     ],
     pydantic.Field(discriminator="name"),
 ]
@@ -97,6 +106,52 @@ def make_flat_terrain_priority_eval_config(env_cfg: HumanoidVerseMjlabConfig) ->
     else:
         overrides[observation_mode_index] = "terrain.terrain_priv.mode=flat_zero"
     return env_cfg.model_copy(update={"hydra_overrides": overrides, "evaluation_fast_path": True})
+
+
+def make_canonical_plane_training_config(env_cfg: HumanoidVerseMjlabConfig) -> HumanoidVerseMjlabConfig:
+    """Copy the main training config while changing only terrain geometry.
+
+    Observation noise, physical/domain randomization, direct depth, reset yaw,
+    and action delays remain exactly as configured for the main collector.
+    """
+
+    plane_cfg = make_flat_terrain_priority_eval_config(env_cfg)
+    return plane_cfg.model_copy(update={"evaluation_fast_path": False})
+
+
+def clone_motion_lib_for_collector(motion_lib, *, num_envs: int):
+    """Create an independent runtime view over immutable loaded-FK tensors.
+
+    A second MotionLib construction would redo expensive FK preprocessing and
+    keep another tensor copy on the same GPU.  The plane collector only
+    reads motion/FK tensors, so it can share those immutable storages while
+    owning every mutable sampling field and all object-level bookkeeping.
+
+    Formal 1024-env G1 runs have all 862 LaFAN clips loaded. Small smoke runs
+    intentionally clone the main collector's smaller loaded subset so they
+    preserve the same reset distribution without forcing full preprocessing.
+    """
+
+    if int(getattr(motion_lib, "_num_motions", 0)) <= 0:
+        raise RuntimeError("Canonical-plane MotionLib cloning requires loaded FK motions")
+
+    cloned = copy.copy(motion_lib)
+    cloned.num_envs = int(num_envs)
+    mutable_tensor_fields = (
+        "_curr_motion_ids",
+        "_termination_history",
+        "_success_rate",
+        "_sampling_history",
+        "_sampling_prob",
+        "_sampling_batch_prob",
+    )
+    for field in mutable_tensor_fields:
+        value = getattr(motion_lib, field, None)
+        if isinstance(value, torch.Tensor):
+            setattr(cloned, field, value.clone())
+    cloned.curr_motion_keys = list(motion_lib.curr_motion_keys)
+    cloned._refresh_sampling_batch_prob()
+    return cloned
 
 
 def distributed_motion_ids(num_motions: int, rank: int, world_size: int) -> list[int]:
@@ -164,6 +219,30 @@ def _trajectory_output_keys(agent: Agent) -> list[str]:
     return keys
 
 
+def _prior_trajectory_output_keys() -> list[str]:
+    return [
+        "observation",
+        "action",
+        "z",
+        "episode_boundary",
+        "transition_terminated",
+        "transition_truncated",
+        "step_count",
+    ]
+
+
+def _assert_canonical_plane_terrain_priv(observation: tp.Mapping[str, tp.Any], *, label: str) -> None:
+    terrain_priv = observation.get("terrain_priv")
+    if terrain_priv is None:
+        raise RuntimeError(f"{label} is missing terrain_priv")
+    if isinstance(terrain_priv, torch.Tensor):
+        nonzero = int(torch.count_nonzero(terrain_priv).item())
+    else:
+        nonzero = int(np.count_nonzero(terrain_priv))
+    if nonzero:
+        raise RuntimeError(f"{label}.terrain_priv must be analytic zero, found {nonzero} nonzero values")
+
+
 def _accumulate_metrics(
     total_metrics: dict[str, torch.Tensor] | None,
     metric_update_counts: dict[str, int],
@@ -194,6 +273,9 @@ class TrainConfig(BaseConfig):
 
     seed: int = 0
     online_parallel_envs: int = 50
+    # Dedicated canonical-plane policy collector used only by D/Q_D. Zero
+    # preserves the legacy single-replay behavior for non-depth presets.
+    prior_plane_envs: int = 0
     # Note: this is in env steps (multiples of online_parallel_envs)
     log_every_updates: int = 100_000
     num_env_steps: int = 30_000_000
@@ -220,6 +302,7 @@ class TrainConfig(BaseConfig):
     # Buffer
     use_trajectory_buffer: bool = False
     buffer_size: int = 5_000_000
+    prior_buffer_size: int = 0
 
     # WANDB
     use_wandb: bool = False
@@ -266,6 +349,19 @@ class TrainConfig(BaseConfig):
             raise ValueError("Loading expert data from motion library is only supported for HumanoidVerseMjlabConfig")
         if self.ddp_bucket_cap_mb <= 0:
             raise ValueError("ddp_bucket_cap_mb must be positive")
+        if self.prior_plane_envs < 0:
+            raise ValueError("prior_plane_envs must be non-negative")
+        if self.prior_buffer_size < 0:
+            raise ValueError("prior_buffer_size must be non-negative")
+        if self.prior_plane_envs > 0:
+            if not isinstance(self.env, HumanoidVerseMjlabConfig):
+                raise ValueError("canonical-plane prior collection requires HumanoidVerseMjlabConfig")
+            if self.tags.get("agent") != "fb_depth":
+                raise ValueError("canonical-plane prior collection is currently defined only for fb_depth")
+            if not self.use_trajectory_buffer:
+                raise ValueError("canonical-plane direct-depth collection requires trajectory replay")
+            if self.prior_buffer_size < self.prior_plane_envs * 2:
+                raise ValueError("prior_buffer_size must hold at least two steps per plane environment")
         if self.distributed_gradient_sync == "ddp" and not self.distributed_sync:
             raise ValueError("distributed_gradient_sync='ddp' requires distributed_sync=True")
 
@@ -510,6 +606,15 @@ def init_wandb(cfg: TrainConfig):
     wandb.init(entity=cfg.wandb_ename, project=cfg.wandb_pname, group=cfg.wandb_gname, name=exp_name, config=wandb_config, dir="./_wandb")
 
 
+@dataclass
+class _PriorCollectorState:
+    td: dict[str, tp.Any]
+    info: dict[str, tp.Any]
+    terminated: np.ndarray
+    truncated: np.ndarray
+    rollout: RolloutContextState
+
+
 class Workspace:
     def __init__(self, cfg: TrainConfig) -> None:
         self.cfg = cfg
@@ -524,10 +629,37 @@ class Workspace:
             self.train_env, self.train_env_info = cfg.env.build(num_envs=cfg.online_parallel_envs)
             self.obs_space = self.train_env.single_observation_space
             self.action_space = self.train_env.single_action_space
+            self.prior_env = None
+            self.prior_env_info = None
+            if cfg.prior_plane_envs > 0:
+                prior_cfg = make_canonical_plane_training_config(cfg.env)
+                # Both collectors are live at the same time. Give the plane
+                # collector an independent sampling/runtime view while sharing
+                # only read-only full-FK tensor storage.
+                prior_motion_lib = clone_motion_lib_for_collector(
+                    self.train_env._env._motion_lib,
+                    num_envs=cfg.prior_plane_envs,
+                )
+                self.prior_env, self.prior_env_info = prior_cfg.build(
+                    num_envs=cfg.prior_plane_envs,
+                    motion_lib=prior_motion_lib,
+                )
+                if self.prior_env.single_observation_space != self.obs_space:
+                    raise RuntimeError("Canonical-plane and main collectors produced different observation spaces")
+                if self.prior_env.single_action_space != self.action_space:
+                    raise RuntimeError("Canonical-plane and main collectors produced different action spaces")
+                print(
+                    "[INFO] Built canonical-plane training collector: "
+                    f"num_envs={cfg.prior_plane_envs}, terrain=plane, terrain_priv=flat_zero, "
+                    "evaluation_fast_path=False, training_DR=preserved",
+                    flush=True,
+                )
         else:
             sample_env, _ = cfg.env.build(num_envs=1)
             self.obs_space = sample_env.observation_space
             self.action_space = sample_env.action_space
+            self.prior_env = None
+            self.prior_env_info = None
 
         assert "time" in self.obs_space.keys(), "Observation space must contain 'obs' and 'time' (TimeAwareObservation wrapper)"
         assert len(self.action_space.shape) == 1, "Only 1D action space is supported (first dim should be vector env)"
@@ -605,10 +737,12 @@ class Workspace:
 
         self.manager = None
 
-    def _checkpoint_buffer_path(self, checkpoint_dir: Path) -> Path:
+    def _checkpoint_buffer_path(self, checkpoint_dir: Path, name: str = "train") -> Path:
+        if name not in {"train", "prior"}:
+            raise ValueError(f"Unsupported replay buffer name: {name!r}")
         if self.cfg.checkpoint_rank_buffers and self.distributed_world_size > 1:
-            return checkpoint_dir / "buffers" / f"train_rank_{self.distributed_rank}"
-        return checkpoint_dir / "buffers" / "train"
+            return checkpoint_dir / "buffers" / f"{name}_rank_{self.distributed_rank}"
+        return checkpoint_dir / "buffers" / name
 
     def train(self):
         self.start_time = time.time()
@@ -616,6 +750,118 @@ class Workspace:
             self.train_online()
         finally:
             self._close_priority_eval_env()
+            self._close_prior_env()
+
+    def _close_prior_env(self) -> None:
+        if self.prior_env is not None:
+            self.prior_env.close()
+            self.prior_env = None
+
+    def _reset_prior_collector(self) -> _PriorCollectorState:
+        if self.prior_env is None:
+            raise RuntimeError("Canonical-plane collector is not enabled")
+        td, info = self.prior_env.reset()
+        _assert_canonical_plane_terrain_priv(td, label="prior.reset.obs")
+        zeros = np.zeros(self.cfg.prior_plane_envs, dtype=bool)
+        # The reset observation must not be joined to the preceding replay
+        # trajectory (startup, resume, and shared-motion-lib evaluation all
+        # pass through this path).  Marking the current slot as an episode
+        # boundary also makes compact depth reconstruction fill from the new
+        # reset frame instead of reading pre-reset history.
+        boundary = np.ones(self.cfg.prior_plane_envs, dtype=bool)
+        return _PriorCollectorState(
+            td=td,
+            info=info,
+            terminated=boundary,
+            truncated=zeros.copy(),
+            rollout=RolloutContextState(),
+        )
+
+    def _advance_rollout_state(
+        self,
+        state: RolloutContextState,
+        step_count: torch.Tensor,
+        replay_buffer: dict[str, tp.Any],
+    ) -> RolloutContextState:
+        advance = getattr(self.agent, "advance_rollout_context", None)
+        if callable(advance):
+            return advance(state, step_count, replay_buffer)
+        z = self.agent.maybe_update_rollout_context(
+            z=state.z,
+            step_count=step_count,
+            replay_buffer=replay_buffer,
+        )
+        return RolloutContextState(z=z)
+
+    def _step_prior_collector(
+        self,
+        state: _PriorCollectorState,
+        *,
+        replay_buffer: dict[str, tp.Any],
+        local_time: int,
+        global_time: int,
+        optimizer_steps: int,
+    ) -> tuple[_PriorCollectorState, float]:
+        if self.prior_env is None:
+            raise RuntimeError("Canonical-plane collector is not enabled")
+        collection_start = time.perf_counter()
+        with torch.no_grad():
+            obs = tree_map(
+                lambda x: torch.tensor(
+                    x,
+                    dtype=dtype_numpytotorch_lower_precision(x.dtype),
+                    device=self.agent.device,
+                ),
+                state.td,
+            )
+            step_count = obs.pop("time")
+            state.rollout = self._advance_rollout_state(
+                state.rollout,
+                step_count,
+                replay_buffer,
+            )
+            if state.rollout.z is None:
+                raise RuntimeError("Canonical-plane rollout did not produce z")
+            if local_time < self.cfg.num_seed_steps:
+                action = self.prior_env.action_space.sample().astype(np.float32)
+            else:
+                action = self.agent.act(obs=obs, z=state.rollout.z, mean=False)
+                action = action.cpu().detach().numpy()
+
+        new_td, _new_reward, new_terminated, new_truncated, new_info = self.prior_env.step(action)
+        _assert_canonical_plane_terrain_priv(new_td, label="prior.step.obs")
+        if self.cfg.fail_on_nonfinite:
+            _assert_finite(
+                new_td,
+                label="prior.env.step.obs",
+                rank=self.distributed_rank,
+                local_time=local_time,
+                global_time=global_time,
+                optimizer_steps=optimizer_steps,
+            )
+
+        episode_boundary = np.logical_or(state.terminated, state.truncated)
+        data = {
+            "observation": tree_map(lambda x: x[None, ...], obs),
+            "action": action[None, ...],
+            "z": state.rollout.z[None, ...],
+            "episode_boundary": episode_boundary[None, ..., None],
+            "transition_terminated": new_terminated[None, ..., None],
+            "transition_truncated": new_truncated[None, ..., None],
+            "step_count": step_count[None, ..., None],
+        }
+        data["observation"].pop("history", None)
+        replay_buffer["prior"].extend(data)
+        return (
+            _PriorCollectorState(
+                td=new_td,
+                info=new_info,
+                terminated=new_terminated,
+                truncated=new_truncated,
+                rollout=state.rollout,
+            ),
+            time.perf_counter() - collection_start,
+        )
 
     def _uses_fixed_flat_priority_eval(self, evaluation_name: str) -> bool:
         return (
@@ -900,8 +1146,9 @@ class Workspace:
         print("Allocating buffers")
         replay_buffer = {}
         checkpoint_dir = self.work_dir / CHECKPOINT_DIR_NAME
-        checkpoint_buffer_dir = self._checkpoint_buffer_path(checkpoint_dir)
+        checkpoint_buffer_dir = self._checkpoint_buffer_path(checkpoint_dir, "train")
         loaded_checkpoint_buffer = checkpoint_buffer_dir.exists()
+        loaded_prior_checkpoint_buffer = False
         if checkpoint_buffer_dir.exists():
             print("Loading checkpointed buffer")
             if self.cfg.use_trajectory_buffer:
@@ -930,6 +1177,44 @@ class Workspace:
                     )
             else:
                 replay_buffer["train"] = DictBuffer(capacity=self.cfg.buffer_size, device=self.cfg.buffer_device)
+        if self.prior_env is not None:
+            prior_checkpoint_buffer_dir = self._checkpoint_buffer_path(checkpoint_dir, "prior")
+            if prior_checkpoint_buffer_dir.exists():
+                loaded_prior_checkpoint_buffer = True
+                replay_buffer["prior"] = TrajectoryDictBufferMultiDim.load(
+                    prior_checkpoint_buffer_dir,
+                    device=self.cfg.buffer_device,
+                )
+                prior_env_axis = int(replay_buffer["prior"].storage[replay_buffer["prior"].end_key].shape[1])
+                if prior_env_axis != self.cfg.prior_plane_envs:
+                    raise RuntimeError(
+                        "Checkpointed canonical-plane replay env axis does not match the configured collector: "
+                        f"buffer={prior_env_axis} configured={self.cfg.prior_plane_envs}"
+                    )
+                print(f"Loaded canonical-plane buffer of size {len(replay_buffer['prior'])}")
+            else:
+                replay_buffer["prior"] = TrajectoryDictBufferMultiDim(
+                    capacity=self.cfg.prior_buffer_size // self.cfg.prior_plane_envs,
+                    device=self.cfg.buffer_device,
+                    n_dim=2,
+                    end_key="episode_boundary",
+                    output_key_t=_prior_trajectory_output_keys(),
+                    output_key_tp1=["observation"],
+                    compact_depth_history=True,
+                    depth_history_offsets=RP1DirectDepthConfig().sampled_ages,
+                )
+                print(
+                    "[INFO] Compact canonical-plane replay enabled: "
+                    f"envs={self.cfg.prior_plane_envs}, capacity={self.cfg.prior_buffer_size}, "
+                    f"time_slots={self.cfg.prior_buffer_size // self.cfg.prior_plane_envs}",
+                    flush=True,
+                )
+            prior_sizes = all_gather_objects(int(replay_buffer["prior"].size()))
+            if len(set(prior_sizes)) != 1:
+                raise RuntimeError(
+                    "Canonical-plane replay sizes differ across ranks; refusing to enter mismatched DDP update schedules: "
+                    f"{prior_sizes}"
+                )
         if self.training_with_expert_data:
             replay_buffer["expert_slicer"] = expert_buffer
 
@@ -989,7 +1274,18 @@ class Workspace:
         terminated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
         truncated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
         done = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
-        total_metrics, context = None, None
+        main_rollout_state = RolloutContextState()
+        prior_collector_state = self._reset_prior_collector() if self.prior_env is not None else None
+        completed_main_iterations = (
+            self._checkpoint_local_time // self.cfg.online_parallel_envs
+            if loaded_prior_checkpoint_buffer
+            else 0
+        )
+        prior_env_steps = completed_main_iterations * self.cfg.prior_plane_envs
+        prior_collection_seconds = 0.0
+        prior_log_start_steps = prior_env_steps
+        prior_log_start_seconds = 0.0
+        total_metrics = None
         metric_update_counts: dict[str, int] = {}
         start_time = time.time()
         fps_start_time = time.time()
@@ -998,16 +1294,18 @@ class Workspace:
         update_agent_time_checker = EveryNStepsChecker(self._checkpoint_local_time, self.cfg.update_agent_every)
         log_time_checker = EveryNStepsChecker(self._checkpoint_global_time, self.cfg.log_every_updates)
 
-        eval_instances = []
-        for evaluation_name in self.evaluations.keys():
-            evaluation = self.evaluations[evaluation_name]
-            eval_instances.append(isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation))
-        uses_humanoidverse_eval = True if any(eval_instances) else False
+        eval_instances = [
+            isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation)
+            for evaluation in self.evaluations.values()
+        ]
+        uses_humanoidverse_eval = any(
+            isinstance(evaluation, (HumanoidVerseMjlabTrackingEvaluation, SameZTerrainEvaluation))
+            for evaluation in self.evaluations.values()
+        )
         distributed_tracking_eval = (
             self.cfg.distributed_sync
             and self.distributed_world_size > 1
-            and bool(eval_instances)
-            and all(eval_instances)
+            and any(eval_instances)
         )
 
         for local_time in range(self._checkpoint_local_time, max_local_time + local_step_increment, local_step_increment):
@@ -1060,6 +1358,12 @@ class Workspace:
                     terminated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
                     truncated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
                     done = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
+                    main_rollout_state = RolloutContextState()
+                    # The priority evaluator temporarily switches the shared
+                    # motion library into evaluation mode.  Main and plane
+                    # collectors must both restart after it is restored.
+                    if self.prior_env is not None:
+                        prior_collector_state = self._reset_prior_collector()
 
                 if self.cfg.prioritization:
                     # priorities
@@ -1134,6 +1438,12 @@ class Workspace:
                     train_env._env._motion_lib.update_sampling_weight_by_id(
                         priorities=list(priorities), motions_id=motions_id, file_name=name_in_buffer
                     )
+                    if self.prior_env is not None:
+                        self.prior_env._env._motion_lib.update_sampling_weight_by_id(
+                            priorities=list(priorities),
+                            motions_id=motions_id,
+                            file_name=name_in_buffer,
+                        )
 
                     replay_buffer["expert_slicer"].update_priorities(
                         priorities=priorities.to(self.cfg.buffer_device), idxs=torch.tensor(np.array(idxs), device=self.cfg.buffer_device)
@@ -1163,7 +1473,14 @@ class Workspace:
                             :, -1
                         ].clone()
 
-                context = self.agent.maybe_update_rollout_context(z=context, step_count=step_count, replay_buffer=replay_buffer)
+                main_rollout_state = self._advance_rollout_state(
+                    main_rollout_state,
+                    step_count,
+                    replay_buffer,
+                )
+                context = main_rollout_state.z
+                if context is None:
+                    raise RuntimeError("Main rollout did not produce z")
                 if local_time < self.cfg.num_seed_steps:
                     action = train_env.action_space.sample().astype(np.float32)
                 else:
@@ -1314,6 +1631,17 @@ class Workspace:
                 )
             replay_buffer["train"].extend(data)
 
+            if prior_collector_state is not None:
+                prior_collector_state, prior_elapsed = self._step_prior_collector(
+                    prior_collector_state,
+                    replay_buffer=replay_buffer,
+                    local_time=local_time,
+                    global_time=global_time,
+                    optimizer_steps=self._optimizer_steps,
+                )
+                prior_env_steps += self.cfg.prior_plane_envs
+                prior_collection_seconds += prior_elapsed
+
             replay_warmup_complete = local_time >= replay_updates_start_local_time
             if replay_warmup_complete and not replay_warmup_complete_logged:
                 print(
@@ -1326,6 +1654,13 @@ class Workspace:
             if (
                 replay_warmup_complete
                 and len(replay_buffer["train"]) > 0
+                # Trajectory sampling draws slices with replacement, so the
+                # plane replay does not need batch_size distinct transitions.
+                # It only needs a real (s_t, s_{t+1}) segment after the
+                # administrative startup boundary. Main num_seed_steps is far
+                # longer than this in formal runs; the explicit guard keeps
+                # small smoke runs useful as well.
+                and ("prior" not in replay_buffer or len(replay_buffer["prior"]) >= 3)
                 and local_time > self.cfg.num_seed_steps
                 and update_agent_time_checker.check(local_time)
             ):
@@ -1393,6 +1728,18 @@ class Workspace:
                 m_dict["distributed/local_env_steps"] = int(local_time)
                 m_dict["distributed/global_env_steps"] = int(global_time)
                 m_dict["distributed/optimizer_steps"] = int(self._optimizer_steps)
+                if prior_collector_state is not None:
+                    prior_steps_since_log = prior_env_steps - prior_log_start_steps
+                    prior_seconds_since_log = prior_collection_seconds - prior_log_start_seconds
+                    prior_global_steps = prior_env_steps * global_step_scale
+                    m_dict["prior/plane_env_steps"] = int(prior_global_steps)
+                    m_dict["prior/total_sim_transitions"] = int(global_time + prior_global_steps)
+                    m_dict["prior/collection_fps"] = float(
+                        prior_steps_since_log * global_step_scale / max(prior_seconds_since_log, 1.0e-9)
+                    )
+                    m_dict["prior/replay_size_per_rank"] = int(replay_buffer["prior"].size())
+                    prior_log_start_steps = prior_env_steps
+                    prior_log_start_seconds = prior_collection_seconds
                 if self._write_shared_artifacts and self.cfg.use_wandb:
                     wandb.log(
                         {f"train/{k}": v for k, v in m_dict.items()},
@@ -1430,12 +1777,37 @@ class Workspace:
             logger = self.eval_loggers.get(evaluation_name) if write_outputs else None
             evaluation = self.evaluations[evaluation_name]
 
+            if (
+                distributed_shard
+                and self.distributed_rank != 0
+                and not isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation)
+            ):
+                continue
+
             # NOTE we have this inside the loop so that the agent is not moved to cpu if we don't evaluate
             if not isinstance(self.cfg.env, HumanoidVerseMjlabConfig):
                 self.agent._model.to("cpu")
             self.agent._model.train(False)
 
             if isinstance(self.cfg.env, HumanoidVerseMjlabConfig):
+                if isinstance(evaluation, SameZTerrainEvaluation):
+                    evaluation_metrics, wandb_dict = evaluation.run(
+                        timestep=t,
+                        agent_or_model=self.agent,
+                        replay_buffer=replay_buffer,
+                        logger=logger,
+                        base_env_config=self.cfg.env,
+                        write_outputs=write_outputs,
+                        motion_lib=self.train_env._env._motion_lib,
+                        expert_buffer=replay_buffer.get("expert_slicer"),
+                    )
+                    if write_outputs and self._write_shared_artifacts and self.cfg.use_wandb and wandb_dict is not None:
+                        wandb.log(
+                            {f"eval/{evaluation_name}/{k}": v for k, v in wandb_dict.items()},
+                            step=t,
+                        )
+                    evaluation_results[evaluation_name] = evaluation_metrics
+                    continue
                 eval_env = (
                     self._get_priority_eval_env()
                     if self._uses_fixed_flat_priority_eval(evaluation_name)
@@ -1503,7 +1875,9 @@ class Workspace:
             print(f"Checkpointing at local_time={local_time} global_time={global_time} optimizer_steps={optimizer_steps}")
             self.agent.save(str(checkpoint_dir))
         if self.cfg.checkpoint_buffer:
-            replay_buffer["train"].save(self._checkpoint_buffer_path(checkpoint_dir))
+            replay_buffer["train"].save(self._checkpoint_buffer_path(checkpoint_dir, "train"))
+            if "prior" in replay_buffer:
+                replay_buffer["prior"].save(self._checkpoint_buffer_path(checkpoint_dir, "prior"))
         if self.cfg.distributed_sync:
             barrier()
         if self._write_shared_artifacts:
