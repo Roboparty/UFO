@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
+import warp as wp
+from mjlab.sensor.raycast_sensor import RayCastSensor, RayCastSensorCfg
 
 CameraConvention = Literal["optical", "opencv", "ros", "opengl", "mujoco", "world", "flu", "camera_link"]
 
@@ -90,9 +92,7 @@ def convert_camera_quaternion_to_optical_xyzw(
 ) -> torch.Tensor:
     """Convert a camera-frame-to-world rotation into optical-to-world."""
     frame_xyzw = wxyz_to_xyzw(camera_frame_quat_w) if input_order == "wxyz" else camera_frame_quat_w
-    frame_from_optical = source_from_optical_rotation(convention).to(
-        device=frame_xyzw.device, dtype=frame_xyzw.dtype
-    )
+    frame_from_optical = source_from_optical_rotation(convention).to(device=frame_xyzw.device, dtype=frame_xyzw.dtype)
     mount_xyzw = rotation_matrix_to_xyzw(frame_from_optical)
     while mount_xyzw.ndim < frame_xyzw.ndim:
         mount_xyzw = mount_xyzw.unsqueeze(0)
@@ -106,17 +106,43 @@ def intrinsic_matrix_from_fov(
     horizontal_fov_deg: float,
     vertical_fov_deg: float,
 ) -> torch.Tensor:
-    """Build centered pinhole intrinsics using pixel-center coordinates."""
+    """Build edge-defined pinhole intrinsics for pixel-center sampling.
+
+    This is the same contract used by InstinctMJ's grouped camera: the
+    principal point is at ``(width / 2, height / 2)`` and integer pixel
+    indices are shifted by ``0.5`` before applying ``K^-1``.
+    """
     if width <= 0 or height <= 0:
         raise ValueError("image dimensions must be positive")
     if not 0.0 < horizontal_fov_deg < 180.0 or not 0.0 < vertical_fov_deg < 180.0:
         raise ValueError("camera FOV must lie in (0, 180) degrees")
-    fx = (width - 1) / (2.0 * math.tan(math.radians(horizontal_fov_deg) / 2.0))
-    fy = (height - 1) / (2.0 * math.tan(math.radians(vertical_fov_deg) / 2.0))
+    fx = width / (2.0 * math.tan(math.radians(horizontal_fov_deg) / 2.0))
+    fy = height / (2.0 * math.tan(math.radians(vertical_fov_deg) / 2.0))
     return torch.tensor(
-        [[fx, 0.0, (width - 1) / 2.0], [0.0, fy, (height - 1) / 2.0], [0.0, 0.0, 1.0]],
+        [[fx, 0.0, width / 2.0], [0.0, fy, height / 2.0], [0.0, 0.0, 1.0]],
         dtype=torch.float64,
     )
+
+
+def optical_rays_from_intrinsics(
+    camera: "DepthCameraConfig",
+    *,
+    device: str | torch.device,
+    dtype: torch.dtype,
+    normalize: bool = True,
+) -> torch.Tensor:
+    """Return raster-ordered optical rays using the canonical pixel centers."""
+    intrinsic = camera.intrinsics().to(device=device, dtype=dtype)
+    rows, columns = torch.meshgrid(
+        torch.arange(camera.height, device=device, dtype=dtype) + 0.5,
+        torch.arange(camera.width, device=device, dtype=dtype) + 0.5,
+        indexing="ij",
+    )
+    pixels = torch.stack((columns, rows, torch.ones_like(columns)), dim=-1)
+    optical = pixels @ torch.linalg.inv(intrinsic).transpose(0, 1)
+    if normalize:
+        optical = optical / torch.linalg.vector_norm(optical, dim=-1, keepdim=True)
+    return optical
 
 
 def torso_from_optical_rotation(down_pitch_deg: float) -> torch.Tensor:
@@ -193,43 +219,222 @@ class FullIntrinsicsDepthPatternCfg:
     """Full-K pinhole rays embedded in a torso attachment frame."""
 
     camera: DepthCameraConfig
+    ray_origin_shift: float = 0.0
 
     def generate_rays(self, mj_model, device: str) -> tuple[torch.Tensor, torch.Tensor]:
         del mj_model
         self.camera.validate()
-        intrinsic = self.camera.intrinsics().to(device=device, dtype=torch.float32)
-        rows, columns = torch.meshgrid(
-            torch.arange(self.camera.height, device=device, dtype=torch.float32),
-            torch.arange(self.camera.width, device=device, dtype=torch.float32),
-            indexing="ij",
+        optical = optical_rays_from_intrinsics(
+            self.camera,
+            device=device,
+            dtype=torch.float32,
         )
-        pixels = torch.stack((columns, rows, torch.ones_like(columns)), dim=-1)
-        optical = pixels @ torch.linalg.inv(intrinsic).transpose(0, 1)
-        optical = optical / torch.linalg.vector_norm(optical, dim=-1, keepdim=True)
-        torso_from_optical = self.camera.torso_from_optical().to(
-            device=device, dtype=torch.float32
-        )
+        torso_from_optical = self.camera.torso_from_optical().to(device=device, dtype=torch.float32)
         directions = optical.reshape(-1, 3) @ torso_from_optical.transpose(0, 1)
         origin = torch.tensor(self.camera.mount_pos_torso, device=device, dtype=torch.float32)
         offsets = origin.unsqueeze(0).expand(self.camera.width * self.camera.height, 3).clone()
+        if self.ray_origin_shift:
+            offsets += directions * float(self.ray_origin_shift)
         return offsets, directions
 
 
-def make_depth_camera_sensor_cfg(camera: DepthCameraConfig, *, torso_body_name: str | None = None):
+def _euler_xyz_matrix(euler: torch.Tensor) -> torch.Tensor:
+    """Convert batched XYZ Euler angles to rotation matrices."""
+    roll, pitch, yaw = euler.unbind(dim=-1)
+    cr, sr = torch.cos(roll), torch.sin(roll)
+    cp, sp = torch.cos(pitch), torch.sin(pitch)
+    cy, sy = torch.cos(yaw), torch.sin(yaw)
+    return torch.stack(
+        (
+            cy * cp,
+            cy * sp * sr - sy * cr,
+            cy * sp * cr + sy * sr,
+            sy * cp,
+            sy * sp * sr + cy * cr,
+            sy * sp * cr - cy * sr,
+            -sp,
+            cp * sr,
+            cp * cr,
+        ),
+        dim=-1,
+    ).reshape(*euler.shape[:-1], 3, 3)
+
+
+class InstallationRandomizedRayCastSensor(RayCastSensor):
+    """Raycast camera with a fixed installation error for each episode."""
+
+    cfg: "InstallationRandomizedRayCastSensorCfg"
+
+    def initialize(self, mj_model, model, data, device: str) -> None:
+        super().initialize(mj_model, model, data, device)
+        num_envs = int(data.nworld)
+        self._position_delta = torch.zeros((num_envs, 3), device=device)
+        self._rotation_delta = torch.eye(3, device=device).expand(num_envs, 3, 3).clone()
+        self._mount_rotation = torch.tensor(
+            self.cfg.mount_rotation_torso,
+            device=device,
+            dtype=self._position_delta.dtype,
+        ).reshape(3, 3)
+        self.randomize_installation(torch.arange(num_envs, device=device))
+
+    def randomize_installation(self, env_ids: torch.Tensor) -> None:
+        """Sample one camera mounting error per selected environment."""
+        env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self._position_delta.device).reshape(-1)
+        if env_ids.numel() == 0:
+            return
+        if self.cfg.position_error > 0.0:
+            self._position_delta[env_ids] = torch.empty(
+                (env_ids.numel(), 3), device=self._position_delta.device
+            ).uniform_(-self.cfg.position_error, self.cfg.position_error)
+        else:
+            self._position_delta[env_ids] = 0.0
+        if self.cfg.angle_error_rad > 0.0:
+            angle_delta = torch.empty(
+                (env_ids.numel(), 3), device=self._position_delta.device
+            ).uniform_(-self.cfg.angle_error_rad, self.cfg.angle_error_rad)
+            self._rotation_delta[env_ids] = _euler_xyz_matrix(angle_delta)
+        else:
+            self._rotation_delta[env_ids] = torch.eye(
+                3, device=self._position_delta.device, dtype=self._position_delta.dtype
+            )
+
+    def prepare_rays(self) -> None:
+        super().prepare_rays()
+        if self.cfg.position_error == 0.0 and self.cfg.angle_error_rad == 0.0:
+            return
+
+        assert self._cached_world_origins is not None
+        assert self._cached_world_rays is not None
+        assert self._cached_frame_mat is not None
+        assert self._ray_pnt is not None and self._ray_vec is not None
+
+        frame_mat = self._cached_frame_mat
+        aligned_parent = self._compute_alignment_rotation(frame_mat.reshape(-1, 3, 3)).reshape_as(frame_mat)
+        camera_mat = aligned_parent @ self._mount_rotation
+        delta_world = camera_mat @ self._rotation_delta[:, None] @ camera_mat.transpose(-1, -2)
+        translated = torch.einsum("bfij,bj->bfi", camera_mat, self._position_delta)
+
+        batch, frames = frame_mat.shape[:2]
+        rays_per_frame = self.num_rays_per_frame
+        origins = self._cached_world_origins.view(batch, frames, rays_per_frame, 3)
+        rays = self._cached_world_rays.view(batch, frames, rays_per_frame, 3)
+        self._cached_world_origins = (origins + translated[:, :, None, :]).reshape(batch, -1, 3)
+        self._cached_world_rays = torch.einsum("bfij,bfnj->bfni", delta_world, rays).reshape(batch, -1, 3)
+
+        wp.to_torch(self._ray_pnt).view_as(self._cached_world_origins).copy_(self._cached_world_origins)
+        wp.to_torch(self._ray_vec).view_as(self._cached_world_rays).copy_(self._cached_world_rays)
+
+
+@dataclass
+class InstallationRandomizedRayCastSensorCfg(RayCastSensorCfg):
+    """Configuration for per-episode depth-camera extrinsic randomization."""
+
+    position_error: float = 0.0
+    angle_error_rad: float = 0.0
+    mount_rotation_torso: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+
+    def build(self) -> InstallationRandomizedRayCastSensor:
+        if self.position_error < 0.0 or self.angle_error_rad < 0.0:
+            raise ValueError("camera installation error bounds must be non-negative")
+        mount_rotation = torch.tensor(self.mount_rotation_torso, dtype=torch.float64)
+        if mount_rotation.numel() != 9 or not torch.isfinite(mount_rotation).all():
+            raise ValueError("mount_rotation_torso must contain nine finite values")
+        return InstallationRandomizedRayCastSensor(self)
+
+
+class CameraHousingAwareRayCastSensor(RayCastSensor):
+    """Ray sensor that removes only the simulated shell containing its origin."""
+
+    cfg: "CameraHousingAwareRayCastSensorCfg"
+
+    def edit_spec(self, scene_spec, entities) -> None:
+        del entities
+        matched_geom_names: set[str] = set()
+        matched_mesh_names: set[str] = set()
+        for geom in scene_spec.geoms:
+            geom_name = str(geom.name)
+            mesh_name = str(geom.meshname)
+            for suffix in self.cfg.excluded_geom_name_suffixes:
+                if geom_name == suffix or geom_name.endswith(f"/{suffix}"):
+                    geom.group = self.cfg.excluded_geom_group
+                    matched_geom_names.add(suffix)
+            for suffix in self.cfg.excluded_mesh_name_suffixes:
+                if mesh_name == suffix or mesh_name.endswith(f"/{suffix}"):
+                    geom.group = self.cfg.excluded_geom_group
+                    matched_mesh_names.add(suffix)
+        missing_geoms = set(self.cfg.excluded_geom_name_suffixes) - matched_geom_names
+        missing_meshes = set(self.cfg.excluded_mesh_name_suffixes) - matched_mesh_names
+        if missing_geoms or missing_meshes:
+            raise RuntimeError(
+                "camera-housing geom exclusions did not resolve in the MJLab scene: "
+                f"missing_geom_names={sorted(missing_geoms)}, missing_mesh_names={sorted(missing_meshes)}"
+            )
+
+
+@dataclass
+class CameraHousingAwareRayCastSensorCfg(RayCastSensorCfg):
+    """Raycast configuration with explicit camera-housing-only exclusions."""
+
+    excluded_geom_name_suffixes: tuple[str, ...] = field(default_factory=tuple)
+    excluded_mesh_name_suffixes: tuple[str, ...] = field(default_factory=tuple)
+    excluded_geom_group: int = 4
+
+    def build(self) -> CameraHousingAwareRayCastSensor:
+        if self.include_geom_groups is None or self.excluded_geom_group in self.include_geom_groups:
+            raise ValueError("excluded camera-housing group must not be visible to this raycast")
+        return CameraHousingAwareRayCastSensor(self)
+
+
+def make_depth_camera_sensor_cfg(
+    camera: DepthCameraConfig,
+    *,
+    torso_body_name: str | None = None,
+    exclude_parent_body: bool = True,
+    ray_alignment: Literal["base", "yaw", "world"] = "base",
+    ray_origin_shift: float = 0.0,
+    position_error: float = 0.0,
+    angle_error_rad: float = 0.0,
+    excluded_geom_name_suffixes: tuple[str, ...] = (),
+    excluded_mesh_name_suffixes: tuple[str, ...] = (),
+    excluded_geom_group: int = 4,
+):
     """Create an MJLab terrain-only raycast sensor configuration."""
     from mjlab.sensor import ObjRef
-    from mjlab.sensor.raycast_sensor import RayCastSensorCfg
-
     camera.validate()
-    return RayCastSensorCfg(
+    installation_randomization = position_error > 0.0 or angle_error_rad > 0.0
+    housing_exclusions = bool(excluded_geom_name_suffixes or excluded_mesh_name_suffixes)
+    if installation_randomization and housing_exclusions:
+        raise ValueError("camera installation randomization cannot currently be combined with housing exclusions")
+    if installation_randomization:
+        cfg_type = InstallationRandomizedRayCastSensorCfg
+    elif housing_exclusions:
+        cfg_type = CameraHousingAwareRayCastSensorCfg
+    else:
+        cfg_type = RayCastSensorCfg
+    extra = {}
+    if cfg_type is CameraHousingAwareRayCastSensorCfg:
+        extra = {
+            "excluded_geom_name_suffixes": excluded_geom_name_suffixes,
+            "excluded_mesh_name_suffixes": excluded_mesh_name_suffixes,
+            "excluded_geom_group": excluded_geom_group,
+        }
+    elif cfg_type is InstallationRandomizedRayCastSensorCfg:
+        mount_rotation = camera.torso_from_optical().reshape(-1)
+        extra = {
+            "position_error": float(position_error),
+            "angle_error_rad": float(angle_error_rad),
+            "mount_rotation_torso": tuple(float(value) for value in mount_rotation),
+        }
+    return cfg_type(
         name=camera.name,
         frame=ObjRef(type="body", name=torso_body_name or camera.mount_body, entity="robot"),
-        pattern=FullIntrinsicsDepthPatternCfg(camera),
-        ray_alignment="base",
-        max_distance=camera.max_range,
-        exclude_parent_body=True,
+        pattern=FullIntrinsicsDepthPatternCfg(camera, ray_origin_shift=float(ray_origin_shift)),
+        ray_alignment=ray_alignment,
+        max_distance=camera.max_range - float(ray_origin_shift),
+        exclude_parent_body=exclude_parent_body,
         include_geom_groups=camera.include_geom_groups,
         debug_vis=False,
+        **extra,
     )
 
 
@@ -244,36 +449,35 @@ class DepthCameraFrame:
     valid: torch.Tensor
 
 
-def depth_frame_from_raycast(sensor, camera: DepthCameraConfig) -> DepthCameraFrame:
-    """Convert MJLab range rays and torso pose to optical-Z and optical pose."""
+def optical_depth_from_raycast(sensor, camera: DepthCameraConfig) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return optical-Z, range, and validity without reading any world pose."""
     data = sensor.data
     distances = data.distances.reshape(-1, camera.height, camera.width)
     device, dtype = distances.device, distances.dtype
-    intrinsic = camera.intrinsics().to(device=device, dtype=dtype)
-    rows, columns = torch.meshgrid(
-        torch.arange(camera.height, device=device, dtype=dtype),
-        torch.arange(camera.width, device=device, dtype=dtype),
-        indexing="ij",
-    )
-    pixels = torch.stack((columns, rows, torch.ones_like(columns)), dim=-1)
-    optical = pixels @ torch.linalg.inv(intrinsic).transpose(0, 1)
-    optical_unit = optical / torch.linalg.vector_norm(optical, dim=-1, keepdim=True)
+    optical_unit = optical_rays_from_intrinsics(camera, device=device, dtype=dtype)
     valid = torch.isfinite(distances) & (distances >= camera.min_range) & (distances <= camera.max_range)
     depth_z = distances * optical_unit[..., 2]
     depth_z = torch.where(valid, depth_z, torch.full_like(depth_z, float("nan")))
+    range_image = torch.where(valid, distances, torch.full_like(distances, float("nan")))
+    return depth_z, range_image, valid
+
+
+def depth_frame_from_raycast(sensor, camera: DepthCameraConfig) -> DepthCameraFrame:
+    """Convert MJLab range rays and torso pose to optical-Z and optical pose."""
+    depth_z, range_image, valid = optical_depth_from_raycast(sensor, camera)
+    data = sensor.data
+    device, dtype = depth_z.device, depth_z.dtype
 
     torso_pos_w = data.frame_pos_w[:, 0]
     torso_quat_w = wxyz_to_xyzw(data.frame_quat_w[:, 0])
     mount_pos = torch.tensor(camera.mount_pos_torso, device=device, dtype=dtype)
     camera_pos_w = torso_pos_w + rotate_xyzw(torso_quat_w, mount_pos.expand_as(torso_pos_w))
-    mount_quat = rotation_matrix_to_xyzw(
-        camera.torso_from_optical().to(device=device, dtype=dtype)
-    ).expand_as(torso_quat_w)
+    mount_quat = rotation_matrix_to_xyzw(camera.torso_from_optical().to(device=device, dtype=dtype)).expand_as(torso_quat_w)
     camera_optical_quat_w = quaternion_multiply_xyzw(torso_quat_w, mount_quat)
     return DepthCameraFrame(
         depth_z=depth_z,
         camera_pos_w=camera_pos_w,
         camera_optical_quat_w=camera_optical_quat_w,
-        range_image=torch.where(valid, distances, torch.full_like(distances, float("nan"))),
+        range_image=range_image,
         valid=valid,
     )

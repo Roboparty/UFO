@@ -98,6 +98,49 @@ class TrajectoryDictBuffer:
         self.priorities = torch.ones(len(self.lengths), device=self.device, dtype=torch.float32) / len(self.lengths)
         self._get_idxs = torch.compile(get_idxs, mode="reduce-overhead")
 
+    def cache_state_dict(self) -> dict:
+        """Return the immutable tensors and indexing metadata needed for disk caching."""
+        return {
+            "storage": self.storage,
+            "motion_ids": [int(motion_id) for motion_id in self.motion_ids],
+            "file_names": [str(name) for name in getattr(self, "file_names", [])],
+            "seq_length": int(self.seq_length),
+            "output_key_t": list(self.output_key_t),
+            "output_key_tp1": list(self.output_key_tp1),
+            "end_key": self.end_key,
+            "motion_id_key": self.motion_id_key,
+        }
+
+    @classmethod
+    def from_cache_state_dict(cls, state: dict, device: str = "cpu") -> "TrajectoryDictBuffer":
+        """Reconstruct a trajectory buffer without rebuilding per-motion episodes."""
+        buffer = cls.__new__(cls)
+        buffer._is_full = True
+        buffer.output_key_t = list(state["output_key_t"])
+        buffer.output_key_tp1 = list(state["output_key_tp1"])
+        buffer.seq_length = int(state["seq_length"])
+        buffer.device = str(device)
+        buffer.end_key = state["end_key"]
+        buffer.motion_id_key = state["motion_id_key"]
+        buffer.storage = tree_map(lambda value: value.to(device=device), state["storage"])
+        buffer.motion_ids = [int(motion_id) for motion_id in state["motion_ids"]]
+        buffer.file_names = [str(name) for name in state.get("file_names", [])]
+
+        done = get_key(buffer.storage, buffer.end_key)
+        if done.dtype != torch.bool:
+            raise ValueError(f"Cached expert buffer end tensor must be bool, got {done.dtype}")
+        buffer.start_idx, buffer.stop_idx, buffer.lengths = find_start_stop_traj(
+            done.squeeze()[: len(buffer)], at_capacity=True, cursor=None
+        )
+        if len(buffer.lengths) != len(buffer.motion_ids):
+            raise ValueError(
+                "Cached expert buffer trajectory count does not match motion IDs: "
+                f"trajectories={len(buffer.lengths)} motion_ids={len(buffer.motion_ids)}"
+            )
+        buffer.priorities = torch.ones(len(buffer.lengths), device=device, dtype=torch.float32) / len(buffer.lengths)
+        buffer._get_idxs = torch.compile(get_idxs, mode="reduce-overhead")
+        return buffer
+
     def sample(self, batch_size: int = 1, seq_length: int | None = None):
         seq_length = seq_length or self.seq_length
         if batch_size < seq_length:
@@ -157,6 +200,8 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
     output_key_t: List[str] = dataclasses.field(default_factory=lambda: ["observation"])
     output_key_tp1: List[str] = dataclasses.field(default_factory=lambda: ["observation"])
     end_key: Tuple[str] | str = "done"
+    compact_depth_history: bool = False
+    depth_history_offsets: Tuple[int, ...] = (35, 30, 25, 20, 15, 10, 5, 0)
 
     def __post_init__(self) -> None:
         self.storage = None
@@ -165,6 +210,15 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
         self._recompute_start_stop = True
         self._get_idxs = torch.compile(get_idxs, mode="reduce-overhead", fullgraph=True)
         assert self.n_dim == 1 or self.n_dim == 2, "n_dim must be either 1 or 2 for TrajectoryDictBufferMultiDim"
+        if self.compact_depth_history:
+            if self.n_dim != 2:
+                raise ValueError("Compact depth replay requires n_dim=2 trajectory storage")
+            if not self.depth_history_offsets or self.depth_history_offsets[-1] != 0:
+                raise ValueError("depth_history_offsets must be non-empty and end with current-frame offset 0")
+            if any(offset < 0 for offset in self.depth_history_offsets) or any(
+                older <= newer for older, newer in zip(self.depth_history_offsets, self.depth_history_offsets[1:])
+            ):
+                raise ValueError("depth_history_offsets must be strictly descending and non-negative")
 
     def _ndim(self) -> int:
         return self.n_dim
@@ -176,8 +230,67 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
     def extend(self, data: Dict) -> None:
         """Extend the buffer with new data.
         We use a dictionary representation for the storage."""
+        data = self._compact_depth_for_storage(data)
         super().extend(data)
         self._recompute_start_stop = True
+
+    def _compact_depth_for_storage(self, data: Dict) -> Dict:
+        if not self.compact_depth_history:
+            return data
+        if "observation" not in data or not isinstance(data["observation"], Mapping):
+            raise ValueError("Compact depth replay requires an observation mapping")
+        compact_data = dict(data)
+        observation = dict(data["observation"])
+        compact_data["observation"] = observation
+        if "depth_image" not in observation:
+            raise ValueError("compact_depth_history requires observation.depth_image")
+        depth = observation["depth_image"]
+        expected_ndim = self.n_dim + 3
+        if depth.ndim != expected_ndim or depth.shape[-3] != len(self.depth_history_offsets):
+            raise ValueError(
+                "Expected depth_image shape [time, env, frames, height, width] with "
+                f"frames={len(self.depth_history_offsets)}, got {tuple(depth.shape)}"
+            )
+        observation["depth_image"] = depth.select(dim=-3, index=depth.shape[-3] - 1)
+        return compact_data
+
+    def _available_depth_history(self, idxs: tuple[torch.Tensor, ...]) -> torch.Tensor:
+        """Return available same-episode history for each sampled observation."""
+        if self.n_dim != 2 or len(idxs) != 2:
+            raise ValueError("Depth history reconstruction requires [time, env] indices")
+        time_idx, env_idx = (index.to(torch.long) for index in idxs)
+        max_lookback = max(self.depth_history_offsets)
+        logical_start = int(self._idx) if self._is_full else 0
+        available = torch.remainder(time_idx - logical_start, self.capacity).clamp_max(max_lookback)
+
+        offsets = torch.arange(max_lookback + 1, device=time_idx.device, dtype=torch.long)
+        lookback_time = torch.remainder(time_idx[:, None] - offsets[None, :], self.capacity)
+        lookback_env = env_idx[:, None].expand_as(lookback_time)
+        boundary = get_key(self.storage, self.end_key)[lookback_time, lookback_env]
+        boundary = boundary.reshape(boundary.shape[0], boundary.shape[1], -1).any(dim=-1)
+        if key_exists(self.storage, "terminated"):
+            terminated = self.storage["terminated"][lookback_time, lookback_env]
+            boundary |= terminated.reshape(terminated.shape[0], terminated.shape[1], -1).any(dim=-1)
+        sentinel = torch.full_like(lookback_time, max_lookback + 1)
+        nearest_boundary = torch.where(boundary, offsets[None, :], sentinel).amin(dim=1).clamp_max(max_lookback)
+        return torch.minimum(available, nearest_boundary)
+
+    def _restore_depth_history(
+        self,
+        observation: dict[str, torch.Tensor],
+        idxs: tuple[torch.Tensor, ...],
+    ) -> dict[str, torch.Tensor]:
+        if not self.compact_depth_history:
+            return observation
+        restored = dict(observation)
+        time_idx, env_idx = (index.to(torch.long) for index in idxs)
+        offsets = torch.as_tensor(self.depth_history_offsets, device=time_idx.device, dtype=torch.long)
+        available_history = self._available_depth_history(idxs)
+        effective_offsets = torch.minimum(offsets[None, :], available_history[:, None])
+        source_time = torch.remainder(time_idx[:, None] - effective_offsets, self.capacity)
+        source_env = env_idx[:, None].expand_as(source_time)
+        restored["depth_image"] = self.storage["observation"]["depth_image"][source_time, source_env]
+        return restored
 
     def sample(self, batch_size: int = 1, seq_length: int | None = None):
         seq_length = seq_length or self.seq_length
@@ -193,8 +306,9 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
 
         if self._recompute_start_stop:
             done = get_key(self.storage, self.end_key)
+            done = done.reshape(*done.shape[: self.n_dim], -1).any(dim=-1)
             self.start_idx, self.stop_idx, self.lengths = find_start_stop_traj(
-                done.squeeze()[: len(self)], at_capacity=self._is_full, cursor=self._idx - 1
+                done[: len(self)], at_capacity=self._is_full, cursor=self._idx - 1
             )
             self._recompute_start_stop = False
 
@@ -217,10 +331,14 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
         idxs = idxs.to(torch.long).unbind(-1)
         for k in self.output_key_t:
             output[k] = tree_map(lambda x: x[idxs], self.storage[k])
+        if "observation" in output:
+            output["observation"] = self._restore_depth_history(output["observation"], idxs)
         # increment the time index to get the next states
         idxs = ((idxs[0] + 1) % self.capacity, *idxs[1:])
         for k in self.output_key_tp1:
             output["next"][k] = tree_map(lambda x: x[idxs], self.storage[k])
+        if "observation" in output.get("next", {}):
+            output["next"]["observation"] = self._restore_depth_history(output["next"]["observation"], idxs)
         return output
 
     def get_full_buffer(self) -> Dict:
@@ -228,8 +346,9 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
 
         if self._recompute_start_stop:
             done = get_key(self.storage, self.end_key)
+            done = done.reshape(*done.shape[: self.n_dim], -1).any(dim=-1)
             self.start_idx, self.stop_idx, self.lengths = find_start_stop_traj(
-                done.squeeze()[: len(self)], at_capacity=self._is_full, cursor=self._idx - 1
+                done[: len(self)], at_capacity=self._is_full, cursor=self._idx - 1
             )
             self._recompute_start_stop = False
 
@@ -238,16 +357,24 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
             output["next"] = {}
             offset = 1
         for start, length in zip(self.start_idx, self.lengths):
-            idxs = (start[0] + torch.arange(length - offset, device=self.device)) % self.capacity
+            time_idxs = (start[0] + torch.arange(length - offset, device=self.device)) % self.capacity
+            idxs = (time_idxs, torch.full_like(time_idxs, start[1]))
             for k in self.output_key_t:
                 if k not in output:
                     output[k] = []
-                output[k].append(tree_map(lambda x: x[idxs, start[1]], self.storage[k]))
-            idxs = (start[0] + 1 + torch.arange(length - offset, device=self.device)) % self.capacity
+                value = tree_map(lambda x: x[idxs], self.storage[k])
+                if k == "observation":
+                    value = self._restore_depth_history(value, idxs)
+                output[k].append(value)
+            time_idxs = (start[0] + 1 + torch.arange(length - offset, device=self.device)) % self.capacity
+            idxs = (time_idxs, torch.full_like(time_idxs, start[1]))
             for k in self.output_key_tp1:
                 if k not in output["next"]:
                     output["next"][k] = []
-                output["next"][k].append(tree_map(lambda x: x[idxs, start[1]], self.storage[k]))
+                value = tree_map(lambda x: x[idxs], self.storage[k])
+                if k == "observation":
+                    value = self._restore_depth_history(value, idxs)
+                output["next"][k].append(value)
         for k in self.output_key_t:
             output[k] = tree_concat(output[k])
         for k in self.output_key_tp1:

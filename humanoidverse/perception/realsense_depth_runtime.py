@@ -12,12 +12,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 
+from humanoidverse.perception.depth_augmentation import (
+    MetricDepthAugmentation,
+    MetricDepthAugmentationConfig,
+)
 from humanoidverse.perception.depth_camera import quaternion_multiply_xyzw, rotate_xyzw
+from humanoidverse.perception.depth_preprocessing import resize_full_fov_depth, scale_full_fov_intrinsics
 from humanoidverse.perception.depth_terrain_adapter import DepthTerrainAdapter
 from humanoidverse.perception.depth_terrain_runtime import load_temporal_perception
-from humanoidverse.perception.temporal_terrain import TerrainHistoryBuffer
+from humanoidverse.perception.temporal_terrain import (
+    resolve_terrain_output_mode,
+    select_terrain_actor_clearance,
+    TerrainHistoryBuffer,
+)
 from humanoidverse.utils.torch_utils import get_euler_xyz
 
 
@@ -72,17 +80,13 @@ class RealSenseCalibration:
 
     def target_intrinsics(self) -> torch.Tensor:
         self.validate()
-        native = self.native_intrinsics()
-        scale_x = self.target_width / self.native_width
-        scale_y = self.target_height / self.native_height
-        # Pixel-center scaling preserves the calibrated full-FOV projection.
-        target = native.clone()
-        target[0, 0] *= scale_x
-        target[0, 1] *= scale_x
-        target[0, 2] = (native[0, 2] + 0.5) * scale_x - 0.5
-        target[1, 1] *= scale_y
-        target[1, 2] = (native[1, 2] + 0.5) * scale_y - 0.5
-        return target
+        return scale_full_fov_intrinsics(
+            self.native_intrinsics(),
+            native_height=self.native_height,
+            native_width=self.native_width,
+            target_height=self.target_height,
+            target_width=self.target_width,
+        )
 
     @classmethod
     def from_json(cls, path: Path) -> "RealSenseCalibration":
@@ -106,25 +110,6 @@ def depth_to_meters(depth: torch.Tensor, *, depth_scale_m: float) -> torch.Tenso
     return torch.where(valid, meters, torch.full_like(meters, float("nan")))
 
 
-def resize_full_fov_depth(depth_m: torch.Tensor, *, target_height: int, target_width: int) -> torch.Tensor:
-    """Area-downsample depth without cropping and without turning invalid into zero."""
-    depth_m = torch.as_tensor(depth_m)
-    squeeze = depth_m.ndim == 2
-    if squeeze:
-        depth_m = depth_m.unsqueeze(0)
-    if depth_m.ndim != 3 or min(target_height, target_width) <= 0:
-        raise ValueError("depth_m must have shape [H, W] or [B, H, W]")
-    if tuple(depth_m.shape[-2:]) == (target_height, target_width):
-        return depth_m.squeeze(0) if squeeze else depth_m
-    valid = torch.isfinite(depth_m) & (depth_m > 0.0)
-    values = torch.where(valid, depth_m, torch.zeros_like(depth_m))
-    values = F.interpolate(values.unsqueeze(1), (target_height, target_width), mode="area").squeeze(1)
-    weights = F.interpolate(valid.to(values.dtype).unsqueeze(1), (target_height, target_width), mode="area").squeeze(1)
-    result = values / weights.clamp_min(1.0e-8)
-    result = torch.where(weights > 0.0, result, torch.full_like(result, float("nan")))
-    return result.squeeze(0) if squeeze else result
-
-
 @dataclass
 class RealSenseTerrainOutput:
     partial_map: torch.Tensor
@@ -145,6 +130,7 @@ class RealSenseDepthRuntime:
         perception_checkpoint: Path | None,
         device: str | torch.device = "cpu",
         batch_size: int = 1,
+        depth_augmentation: MetricDepthAugmentationConfig | None = None,
     ) -> None:
         calibration.validate()
         if batch_size <= 0:
@@ -152,6 +138,7 @@ class RealSenseDepthRuntime:
         self.calibration = calibration
         self.device = torch.device(device)
         self.batch_size = batch_size
+        self.depth_augmentation = MetricDepthAugmentation(depth_augmentation, seed=0) if depth_augmentation is not None else None
         self.adapter = DepthTerrainAdapter(
             calibration.target_intrinsics(),
             calibration.target_height,
@@ -160,13 +147,12 @@ class RealSenseDepthRuntime:
         self.perception = None
         self.perception_config: dict = {"config": {"sequence_steps": 1, "history_seconds": 0.6, "proprio_dim": 0}}
         if perception_checkpoint is not None:
-            self.perception, self.perception_config = load_temporal_perception(
-                Path(perception_checkpoint), str(self.device)
-            )
+            self.perception, self.perception_config = load_temporal_perception(Path(perception_checkpoint), str(self.device))
         config = self.perception_config["config"]
         self.sequence_steps = int(config["sequence_steps"])
         self.history_seconds = float(config["history_seconds"])
         self.proprio_dim = int(config["proprio_dim"])
+        self.terrain_output_mode = resolve_terrain_output_mode(config)
         self.history = TerrainHistoryBuffer(
             batch_size=batch_size,
             time_steps=self.sequence_steps,
@@ -225,6 +211,8 @@ class RealSenseDepthRuntime:
         reset_mask = torch.as_tensor(reset_mask, device=self.device, dtype=torch.bool).reshape(self.batch_size)
         self.reset(reset_mask)
         depth_m = depth_to_meters(depth_native, depth_scale_m=self.calibration.depth_scale_m)
+        if self.depth_augmentation is not None:
+            depth_m, _valid_depth, _sigma_px = self.depth_augmentation(depth_m)
         depth_m = resize_full_fov_depth(
             depth_m,
             target_height=self.calibration.target_height,
@@ -257,7 +245,10 @@ class RealSenseDepthRuntime:
             terrain_actor = partial_map
         else:
             warped = self.history.warp(history_seconds=self.history_seconds, interpolation="bilinear")
-            terrain_actor = self.perception(warped, proprio=self.history.proprio).completed_clearance
+            terrain_actor = select_terrain_actor_clearance(
+                self.perception(warped, proprio=self.history.proprio),
+                mode=self.terrain_output_mode,
+            )
         if self.perception is not None and not torch.isfinite(terrain_actor).all():
             raise RuntimeError("RealSense terrain runtime produced non-finite terrain_actor")
         return RealSenseTerrainOutput(

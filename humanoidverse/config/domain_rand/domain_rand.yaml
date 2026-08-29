@@ -15,9 +15,9 @@ domain_rand:
     y : [-0.02, 0.02]
     z : [-0.02, 0.02]
 
-  # link mass
+  # Physics-consistent per-link density: mass and inertia scale together.
   randomize_link_mass : True
-  link_mass_range : [0.95, 1.05]
+  link_mass_range : [0.90, 1.10]
 
   # pd gain
   randomize_pd_gain : False
@@ -39,8 +39,8 @@ domain_rand:
 
 
   # control delay
-  randomize_ctrl_delay : False
-  ctrl_delay_step_range : [0, 1] # integer max real delay is 90ms
+  randomize_ctrl_delay : True
+  ctrl_delay_step_range : [0, 2] # inclusive policy steps: 0/20/40ms at 50Hz
 
   # Mimicing BeyondMimic: https://github.com/HybridRobotics/whole_body_tracking/blob/dcecabd8c24c68f59d143fdf8e3a670f420c972d/source/whole_body_tracking/whole_body_tracking/tasks/tracking/tracking_env_cfg.py#L170
   randomize_default_dof_pos : True

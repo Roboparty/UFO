@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import statistics
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 import torch
 
+from humanoidverse.actor_override import load_actor_override as _load_actor_override
+from humanoidverse.actor_override import state_dict_checksum as _state_dict_checksum
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
 from humanoidverse.depth_terrain_evaluation import (
     TERRAIN_NAMES,
@@ -20,14 +21,45 @@ from humanoidverse.depth_terrain_evaluation import (
     synchronize_depth_and_gt,
 )
 from humanoidverse.mjlab_inference_utils import checkpoint_load_device, load_mjlab_env_cfg, replace_hydra_override
-from humanoidverse.perception.depth_camera import DepthCameraConfig, depth_frame_from_raycast
+from humanoidverse.perception.depth_augmentation import (
+    CameraFrameScheduler,
+    DepthCalibrationAugmentationConfig,
+    DepthTimingAugmentationConfig,
+    LocalCalibrationAugmentation,
+    MetricDepthAugmentation,
+    MetricDepthAugmentationConfig,
+)
+from humanoidverse.perception.depth_camera import (
+    DepthCameraConfig,
+    depth_frame_from_raycast,
+    optical_depth_from_raycast,
+    rotation_matrix_to_xyzw,
+)
 from humanoidverse.perception.depth_noise import (
     DepthNoiseConfig,
     DepthNoisePipeline,
     depth_noise_preset,
 )
+from humanoidverse.perception.depth_preprocessing import (
+    DepthCropConfig,
+    crop_and_resize_depth,
+    crop_and_resize_depth_with_conservative_invalid_mask,
+    crop_and_scale_intrinsics,
+)
 from humanoidverse.perception.depth_terrain_adapter import DepthTerrainAdapter
-from humanoidverse.perception.temporal_terrain import TemporalTerrainCompletion, TerrainHistoryBuffer
+from humanoidverse.perception.local_depth_terrain_adapter import LocalDepthTerrainAdapter
+from humanoidverse.perception.self_occluding_depth import (
+    SelfOcclusionDepthConfig,
+    make_self_occlusion_camera_pair,
+    self_occluding_depth_from_sensors,
+)
+from humanoidverse.perception.temporal_terrain import (
+    OdometryFreeTerrainHistoryBuffer,
+    resolve_terrain_output_mode,
+    select_terrain_actor_clearance,
+    TemporalTerrainCompletion,
+    TerrainHistoryBuffer,
+)
 from humanoidverse.terrain_transfer import tensor_checksum
 from humanoidverse.terrain_transfer_inference import _separated_stairs_progress_metrics
 from humanoidverse.utils.torch_utils import calc_heading_quat, get_euler_xyz
@@ -125,38 +157,14 @@ def _load_perception(path: Path, device: str) -> tuple[TemporalTerrainCompletion
     model = TemporalTerrainCompletion(
         hidden_channels=int(config["hidden_channels"]),
         proprio_dim=int(config["proprio_dim"]),
+        proprio_channels=int(config.get("proprio_channels", 8)),
+        motion_feature_dim=int(config.get("motion_feature_dim", 6)),
+        use_grid_coordinates=bool(config.get("use_grid_coordinates", False)),
+        global_context_dim=int(config.get("global_context_dim", 0)),
     )
     model.load_state_dict(checkpoint["model"])
     model.to(device).eval()
     return model, checkpoint
-
-
-def _state_dict_checksum(state_dict: dict[str, torch.Tensor]) -> str:
-    digest = hashlib.sha256()
-    for name, value in sorted(state_dict.items()):
-        tensor = value.detach().contiguous().cpu()
-        digest.update(name.encode("utf-8"))
-        digest.update(str(tensor.dtype).encode("ascii"))
-        digest.update(str(tuple(tensor.shape)).encode("ascii"))
-        digest.update(tensor.numpy().tobytes())
-    return digest.hexdigest()
-
-
-def _load_actor_override(model, path: Path) -> dict[str, Any]:
-    resolved = path.expanduser().resolve()
-    payload = torch.load(resolved, map_location="cpu", weights_only=True)
-    actor_state = payload.get("actor") if isinstance(payload, dict) else None
-    if not isinstance(actor_state, dict) or not actor_state:
-        raise ValueError(f"invalid Actor milestone checkpoint: {resolved}")
-    if any(not isinstance(value, torch.Tensor) or not torch.isfinite(value).all() for value in actor_state.values()):
-        raise ValueError(f"Actor milestone contains non-finite or non-tensor state: {resolved}")
-    model._actor.load_state_dict(actor_state, strict=True)
-    model.eval().requires_grad_(False)
-    return {
-        "path": str(resolved),
-        "step": int(payload["step"]),
-        "checksum": _state_dict_checksum(actor_state),
-    }
 
 
 def _default_target_states(wrapped_env) -> dict[str, torch.Tensor]:
@@ -237,29 +245,174 @@ def _rollout_mode(
 ) -> tuple[list[dict[str, Any]], torch.Tensor, dict[str, Any]]:
     if mode not in OBSERVATION_MODES:
         raise ValueError(f"Unknown observation mode: {mode}")
-    wrapped_env, _ = build_depth_evaluation_env(env_config, num_envs=num_envs, camera=camera)
+    history_mode = str(perception_config.get("history_mode", "egomotion_warp"))
+    terrain_output_mode = resolve_terrain_output_mode(perception_config)
+    dataset_metadata = dict(perception_config.get("dataset_metadata", {}))
+    semantic_config = None
+    scene_camera = None
+    if history_mode == "no_odometry" and dataset_metadata.get("self_occlusion"):
+        semantic_contract = dataset_metadata.get("self_occlusion_contract")
+        if not isinstance(semantic_contract, dict):
+            raise ValueError("self-occluding checkpoint is missing its semantic contract")
+        semantic_config = SelfOcclusionDepthConfig.from_metadata(semantic_contract)
+        camera, scene_camera = make_self_occlusion_camera_pair(camera, semantic_config)
+        wrapped_env, _ = build_depth_evaluation_env(
+            env_config,
+            num_envs=num_envs,
+            camera=camera,
+            extra_cameras=(
+                (
+                    scene_camera,
+                    False,
+                    semantic_config.camera_housing_geom_names,
+                    semantic_config.camera_housing_mesh_names,
+                    semantic_config.camera_housing_geom_group,
+                ),
+            ),
+        )
+    else:
+        wrapped_env, _ = build_depth_evaluation_env(env_config, num_envs=num_envs, camera=camera)
     core = wrapped_env._env
-    adapter = DepthTerrainAdapter(camera.intrinsics(), camera.height, camera.width).to(device)
-    history = TerrainHistoryBuffer(
-        batch_size=num_envs,
-        time_steps=int(perception_config["sequence_steps"]),
-        proprio_dim=int(perception_config["proprio_dim"]),
-        device=device,
-    )
-    clean_history = TerrainHistoryBuffer(
-        batch_size=num_envs,
-        time_steps=int(perception_config["sequence_steps"]),
-        proprio_dim=int(perception_config["proprio_dim"]),
-        device=device,
-    )
-    noise_pipeline = DepthNoisePipeline(
-        noise_config,
-        batch_size=num_envs,
-        image_height=camera.height,
-        image_width=camera.width,
-        device=device,
-        noise_seed=noise_seed,
-    )
+    if history_mode == "no_odometry":
+        camera_quat_torso = rotation_matrix_to_xyzw(camera.torso_from_optical().to(device=device, dtype=torch.float32))
+        target_image = dict(dataset_metadata.get("target_image", {}))
+        target_width = int(target_image.get("width", camera.width))
+        target_height = int(target_image.get("height", camera.height))
+        depth_crop = DepthCropConfig.from_metadata(dataset_metadata.get("depth_crop"))
+        target_intrinsics = crop_and_scale_intrinsics(
+            camera.intrinsics(),
+            native_width=camera.width,
+            native_height=camera.height,
+            target_width=target_width,
+            target_height=target_height,
+            crop=depth_crop,
+        )
+        adapter = LocalDepthTerrainAdapter(
+            target_intrinsics,
+            target_height,
+            target_width,
+            camera_pos_torso=camera.mount_pos_torso,
+            camera_optical_quat_torso_xyzw=tuple(float(value) for value in camera_quat_torso),
+        ).to(device)
+        augmentation_metadata = dict(dataset_metadata.get("depth_augmentation") or {})
+        deployment_preprocessing = dict(dataset_metadata.get("deployment_depth_preprocessing") or {})
+        clean_augmentation_config = MetricDepthAugmentationConfig(
+            max_depth_m=float(deployment_preprocessing.get("max_depth_m", 2.0)),
+            blur_probability=1.0,
+            sigma_min_px=float(deployment_preprocessing.get("blur_sigma_px", 1.5)),
+            sigma_max_px=float(deployment_preprocessing.get("blur_sigma_px", 1.5)),
+        )
+        if noise_config.is_identity():
+            noisy_augmentation_config = clean_augmentation_config
+        elif noise_config.condition == "combined" and augmentation_metadata:
+            noisy_augmentation_config = MetricDepthAugmentationConfig(**augmentation_metadata)
+        else:
+            noisy_augmentation_config = replace(
+                clean_augmentation_config,
+                measurement_base_std_m=noise_config.measurement.base_std_m,
+                measurement_quadratic_std_m_per_m2=noise_config.measurement.quadratic_std_m_per_m2,
+                edge_depth_threshold_m=noise_config.edge.depth_threshold_m,
+                edge_corruption_probability=noise_config.edge.corruption_probability,
+                edge_invalid_probability=noise_config.edge.invalid_probability,
+                pixel_dropout_probability=noise_config.dropout.probability,
+            )
+        local_depth_augmentation = MetricDepthAugmentation(
+            noisy_augmentation_config,
+            seed=noise_seed + 17_003,
+        )
+        clean_depth_augmentation = MetricDepthAugmentation(
+            clean_augmentation_config,
+            seed=noise_seed + 17_103,
+        )
+        calibration_metadata = dict(dataset_metadata.get("depth_calibration") or {})
+        if noise_config.is_identity():
+            local_calibration_config = DepthCalibrationAugmentationConfig()
+        elif noise_config.condition == "combined" and calibration_metadata:
+            local_calibration_config = DepthCalibrationAugmentationConfig(**calibration_metadata)
+        else:
+            local_calibration_config = DepthCalibrationAugmentationConfig(
+                translation_bound_m=noise_config.extrinsic.translation_bound_m,
+                rotation_bound_deg=noise_config.extrinsic.rotation_bound_deg,
+            )
+        local_calibration = LocalCalibrationAugmentation(
+            local_calibration_config,
+            intrinsic_matrix=target_intrinsics,
+            camera_pos_torso=camera.mount_pos_torso,
+            camera_optical_quat_torso_xyzw=tuple(float(value) for value in camera_quat_torso),
+            batch_size=num_envs,
+            device=device,
+            seed=noise_seed + 19_009,
+        )
+        timing_metadata = dict(dataset_metadata.get("depth_timing") or {})
+        base_camera_frequency = float(timing_metadata.get("camera_frequency_hz", 30.0))
+        clean_timing_config = DepthTimingAugmentationConfig(
+            camera_frequency_hz=base_camera_frequency,
+            control_frequency_hz=1.0 / float(core.dt),
+        )
+        if not noise_config.is_identity() and noise_config.condition in {"latency", "combined"} and timing_metadata:
+            noisy_timing_config = DepthTimingAugmentationConfig(**timing_metadata)
+        else:
+            noisy_timing_config = clean_timing_config
+        local_frame_scheduler = CameraFrameScheduler(
+            noisy_timing_config,
+            batch_size=num_envs,
+            device=device,
+            seed=noise_seed + 23_011,
+        )
+        clean_frame_scheduler = CameraFrameScheduler(
+            clean_timing_config,
+            batch_size=num_envs,
+            device=device,
+            seed=noise_seed + 23_111,
+        )
+        waist_indices = torch.tensor(
+            [core.dof_names.index(name) for name in core.config.robot.waist_dof_names],
+            device=device,
+            dtype=torch.long,
+        )
+        history = OdometryFreeTerrainHistoryBuffer(
+            batch_size=num_envs,
+            time_steps=int(perception_config["sequence_steps"]),
+            proprio_dim=int(perception_config["proprio_dim"]),
+            device=device,
+        )
+        clean_history = OdometryFreeTerrainHistoryBuffer(
+            batch_size=num_envs,
+            time_steps=int(perception_config["sequence_steps"]),
+            proprio_dim=int(perception_config["proprio_dim"]),
+            device=device,
+        )
+        noise_pipeline = None
+    else:
+        adapter = DepthTerrainAdapter(camera.intrinsics(), camera.height, camera.width).to(device)
+        waist_indices = None
+        history = TerrainHistoryBuffer(
+            batch_size=num_envs,
+            time_steps=int(perception_config["sequence_steps"]),
+            proprio_dim=int(perception_config["proprio_dim"]),
+            device=device,
+        )
+        clean_history = TerrainHistoryBuffer(
+            batch_size=num_envs,
+            time_steps=int(perception_config["sequence_steps"]),
+            proprio_dim=int(perception_config["proprio_dim"]),
+            device=device,
+        )
+        noise_pipeline = DepthNoisePipeline(
+            noise_config,
+            batch_size=num_envs,
+            image_height=camera.height,
+            image_width=camera.width,
+            device=device,
+            noise_seed=noise_seed,
+        )
+        local_depth_augmentation = None
+        clean_depth_augmentation = None
+        depth_crop = None
+        local_calibration = None
+        local_frame_scheduler = None
+        clean_frame_scheduler = None
+        target_height, target_width = camera.height, camera.width
     env_ids = torch.arange(num_envs, device=device, dtype=torch.int64)
     identity_noise = noise_config.is_identity()
     episode_time = torch.zeros(num_envs, device=device)
@@ -314,77 +467,221 @@ def _rollout_mode(
 
         with torch.inference_mode():
             for _step in range(episode_steps):
-                synchronize_depth_and_gt(core, camera.name)
-                frame = depth_frame_from_raycast(core.mjlab_env.scene.sensors[camera.name], camera)
-                noisy_frame = noise_pipeline(
-                    depth_z=frame.depth_z,
-                    camera_pos_w=frame.camera_pos_w,
-                    camera_optical_quat_w=frame.camera_optical_quat_w,
-                    timestamp_s=episode_time,
-                    env_ids=env_ids,
-                    reset_mask=pending_reset,
-                )
-                heading_quat = calc_heading_quat(core.base_quat, w_last=True)
-                partial_map, visible_mask = adapter(
-                    noisy_frame.depth_z,
-                    noisy_frame.camera_pos_w,
-                    noisy_frame.camera_optical_quat_w,
-                    core.robot_root_states[:, :3],
-                    heading_quat,
-                )
-                if identity_noise:
-                    clean_partial_map, clean_visible_mask = partial_map, visible_mask
+                sensor_names = (camera.name, scene_camera.name) if scene_camera is not None else camera.name
+                synchronize_depth_and_gt(core, sensor_names)
+                sensor = core.mjlab_env.scene.sensors[camera.name]
+                if history_mode == "no_odometry":
+                    assert isinstance(adapter, LocalDepthTerrainAdapter)
+                    assert waist_indices is not None
+                    assert local_depth_augmentation is not None
+                    assert clean_depth_augmentation is not None and depth_crop is not None
+                    assert local_calibration is not None
+                    assert local_frame_scheduler is not None and clean_frame_scheduler is not None
+                    local_calibration.reset(pending_reset)
+                    local_frame_scheduler.reset(pending_reset)
+                    clean_frame_scheduler.reset(pending_reset)
+                    frame_valid, frame_timestamp, _timing = local_frame_scheduler.step(episode_time)
+                    clean_frame_valid, clean_frame_timestamp, _clean_timing = clean_frame_scheduler.step(episode_time)
+                    if semantic_config is not None:
+                        assert scene_camera is not None
+                        semantic_frame = self_occluding_depth_from_sensors(
+                            sensor,
+                            core.mjlab_env.scene.sensors[scene_camera.name],
+                            camera,
+                            semantic_config,
+                            local_depth_augmentation,
+                        )
+                        if torch.any(semantic_frame.ambiguous_mask):
+                            raise RuntimeError("scene/terrain raycasts produced ambiguous first hits")
+                        depth_z, resized_self_mask = crop_and_resize_depth_with_conservative_invalid_mask(
+                            semantic_frame.final_depth_z,
+                            semantic_frame.dilated_self_mask,
+                            target_height=target_height,
+                            target_width=target_width,
+                            crop=depth_crop,
+                        )
+                        if torch.any(torch.isfinite(depth_z) & resized_self_mask):
+                            raise RuntimeError("conservative self mask was lost before terrain projection")
+                        noisy_valid = semantic_frame.valid_terrain_mask
+                        if identity_noise:
+                            clean_depth_z = depth_z
+                            clean_valid = noisy_valid
+                        else:
+                            clean_semantic_frame = self_occluding_depth_from_sensors(
+                                sensor,
+                                core.mjlab_env.scene.sensors[scene_camera.name],
+                                camera,
+                                semantic_config,
+                                clean_depth_augmentation,
+                            )
+                            clean_depth_z, clean_self_mask = crop_and_resize_depth_with_conservative_invalid_mask(
+                                clean_semantic_frame.final_depth_z,
+                                clean_semantic_frame.dilated_self_mask,
+                                target_height=target_height,
+                                target_width=target_width,
+                                crop=depth_crop,
+                            )
+                            if torch.any(torch.isfinite(clean_depth_z) & clean_self_mask):
+                                raise RuntimeError("clean conservative self mask was lost before terrain projection")
+                            clean_valid = clean_semantic_frame.valid_terrain_mask
+                    else:
+                        raw_depth_z, _range_image, _ray_valid = optical_depth_from_raycast(sensor, camera)
+                        depth_z, noisy_valid, _sigma_px = local_depth_augmentation(raw_depth_z)
+                        depth_z = crop_and_resize_depth(
+                            depth_z,
+                            target_height=target_height,
+                            target_width=target_width,
+                            crop=depth_crop,
+                        )
+                        if identity_noise:
+                            clean_depth_z = depth_z
+                            clean_valid = noisy_valid
+                        else:
+                            clean_depth_z, clean_valid, _clean_sigma = clean_depth_augmentation(raw_depth_z)
+                            clean_depth_z = crop_and_resize_depth(
+                                clean_depth_z,
+                                target_height=target_height,
+                                target_width=target_width,
+                                crop=depth_crop,
+                            )
+                    partial_map, visible_mask = adapter(
+                        depth_z,
+                        core.projected_gravity,
+                        core.dof_pos[:, waist_indices],
+                        intrinsic_matrix=local_calibration.intrinsics,
+                        camera_pos_torso=local_calibration.camera_pos_torso,
+                        camera_optical_quat_torso_xyzw=local_calibration.camera_quat_torso,
+                    )
+                    if identity_noise:
+                        clean_partial_map, clean_visible_mask = partial_map, visible_mask
+                        clean_frame_valid = frame_valid
+                        clean_frame_timestamp = frame_timestamp
+                    else:
+                        clean_partial_map, clean_visible_mask = adapter(
+                            clean_depth_z,
+                            core.projected_gravity,
+                            core.dof_pos[:, waist_indices],
+                        )
+                    translation_error = local_calibration.camera_pos_torso - adapter.camera_pos_torso
+                    base_quaternion = adapter.camera_optical_quat_torso_xyzw.expand(num_envs, -1)
+                    quaternion_dot = (local_calibration.camera_quat_torso * base_quaternion).sum(dim=-1).abs()
+                    zero = torch.zeros(num_envs, device=device)
+                    sensor_diagnostics = {
+                        "clean_valid_fraction": clean_valid.float().mean(dim=(1, 2)),
+                        "noisy_valid_fraction": noisy_valid.float().mean(dim=(1, 2)),
+                        "latency_frames": zero,
+                        "latency_seconds": zero,
+                        "extrinsic_translation_norm_m": torch.linalg.vector_norm(translation_error, dim=-1),
+                        "extrinsic_rotation_deg": torch.rad2deg(2.0 * torch.acos(quaternion_dot.clamp(max=1.0))),
+                    }
                 else:
-                    clean_partial_map, clean_visible_mask = adapter(
-                        frame.depth_z,
-                        frame.camera_pos_w,
-                        frame.camera_optical_quat_w,
+                    assert isinstance(adapter, DepthTerrainAdapter)
+                    assert noise_pipeline is not None
+                    frame = depth_frame_from_raycast(sensor, camera)
+                    noisy_frame = noise_pipeline(
+                        depth_z=frame.depth_z,
+                        camera_pos_w=frame.camera_pos_w,
+                        camera_optical_quat_w=frame.camera_optical_quat_w,
+                        timestamp_s=episode_time,
+                        env_ids=env_ids,
+                        reset_mask=pending_reset,
+                    )
+                    heading_quat = calc_heading_quat(core.base_quat, w_last=True)
+                    partial_map, visible_mask = adapter(
+                        noisy_frame.depth_z,
+                        noisy_frame.camera_pos_w,
+                        noisy_frame.camera_optical_quat_w,
                         core.robot_root_states[:, :3],
                         heading_quat,
                     )
+                    if identity_noise:
+                        clean_partial_map, clean_visible_mask = partial_map, visible_mask
+                    else:
+                        clean_partial_map, clean_visible_mask = adapter(
+                            frame.depth_z,
+                            frame.camera_pos_w,
+                            frame.camera_optical_quat_w,
+                            core.robot_root_states[:, :3],
+                            heading_quat,
+                        )
+                    frame_timestamp = noisy_frame.timestamp_s
+                    sensor_diagnostics = noisy_frame.diagnostics
                 gt = core._terrain_actor_obs().clone()
-                yaw = get_euler_xyz(core.base_quat, w_last=True)[2]
                 history.reset(pending_reset)
                 clean_history.reset(pending_reset)
-                history.append(
-                    partial_map=partial_map,
-                    visible_mask=visible_mask,
-                    pelvis_pos_w=core.robot_root_states[:, :3],
-                    heading_yaw_w=yaw,
-                    timestamp_s=noisy_frame.timestamp_s,
-                    proprio=observation["state"],
-                )
-                clean_history.append(
-                    partial_map=clean_partial_map,
-                    visible_mask=clean_visible_mask,
-                    pelvis_pos_w=core.robot_root_states[:, :3],
-                    heading_yaw_w=yaw,
-                    timestamp_s=episode_time,
-                    proprio=observation["state"],
-                )
+                if history_mode == "no_odometry":
+                    assert isinstance(history, OdometryFreeTerrainHistoryBuffer)
+                    assert isinstance(clean_history, OdometryFreeTerrainHistoryBuffer)
+                    history.append(
+                        partial_map=partial_map,
+                        visible_mask=visible_mask,
+                        timestamp_s=frame_timestamp,
+                        proprio=observation["state"],
+                        append_mask=frame_valid,
+                    )
+                    clean_history.append(
+                        partial_map=clean_partial_map,
+                        visible_mask=clean_visible_mask,
+                        timestamp_s=clean_frame_timestamp,
+                        proprio=observation["state"],
+                        append_mask=clean_frame_valid,
+                    )
+                    visible_mask = history.visible_masks[:, -1]
+                    clean_visible_mask = clean_history.visible_masks[:, -1]
+                else:
+                    assert isinstance(history, TerrainHistoryBuffer)
+                    assert isinstance(clean_history, TerrainHistoryBuffer)
+                    yaw = get_euler_xyz(core.base_quat, w_last=True)[2]
+                    history.append(
+                        partial_map=partial_map,
+                        visible_mask=visible_mask,
+                        pelvis_pos_w=core.robot_root_states[:, :3],
+                        heading_yaw_w=yaw,
+                        timestamp_s=frame_timestamp,
+                        proprio=observation["state"],
+                    )
+                    clean_history.append(
+                        partial_map=clean_partial_map,
+                        visible_mask=clean_visible_mask,
+                        pelvis_pos_w=core.robot_root_states[:, :3],
+                        heading_yaw_w=yaw,
+                        timestamp_s=episode_time,
+                        proprio=observation["state"],
+                    )
                 if mode == "gt":
                     terrain_input = gt
                     clean_terrain_input = gt
                     history_visible = visible_mask
                 else:
                     selected = history.single_frame_view() if mode == "single" else history
-                    warped = selected.warp(
-                        history_seconds=float(perception_config["history_seconds"]),
-                        interpolation="bilinear",
+                    warped = (
+                        selected.history(history_seconds=float(perception_config["history_seconds"]))
+                        if isinstance(selected, OdometryFreeTerrainHistoryBuffer)
+                        else selected.warp(
+                            history_seconds=float(perception_config["history_seconds"]),
+                            interpolation="bilinear",
+                        )
                     )
                     completion = perception(warped, proprio=selected.proprio)
-                    terrain_input = completion.completed_clearance
+                    terrain_input = select_terrain_actor_clearance(completion, mode=terrain_output_mode)
                     if not torch.isfinite(terrain_input).all():
                         raise RuntimeError(f"{mode} terrain completion produced non-finite Actor input")
                     if identity_noise:
                         clean_terrain_input = terrain_input
                     else:
                         clean_selected = clean_history.single_frame_view() if mode == "single" else clean_history
-                        clean_warped = clean_selected.warp(
-                            history_seconds=float(perception_config["history_seconds"]),
-                            interpolation="bilinear",
+                        clean_warped = (
+                            clean_selected.history(history_seconds=float(perception_config["history_seconds"]))
+                            if isinstance(clean_selected, OdometryFreeTerrainHistoryBuffer)
+                            else clean_selected.warp(
+                                history_seconds=float(perception_config["history_seconds"]),
+                                interpolation="bilinear",
+                            )
                         )
-                        clean_terrain_input = perception(clean_warped, proprio=clean_selected.proprio).completed_clearance
+                        clean_terrain_input = select_terrain_actor_clearance(
+                            perception(clean_warped, proprio=clean_selected.proprio),
+                            mode=terrain_output_mode,
+                        )
                     history_visible = warped.visible_masks.any(dim=1)
                 observation["terrain_actor"] = terrain_input
                 map_metrics = _per_env_map_metrics(
@@ -407,7 +704,7 @@ def _rollout_mode(
                     clean_action = model.act(clean_observation, z, mean=True)
                 action_deviation = torch.linalg.vector_norm(action - clean_action, dim=-1)
                 action_deviation_sum[active] += action_deviation[active]
-                for name, values in noisy_frame.diagnostics.items():
+                for name, values in sensor_diagnostics.items():
                     if name in sensor_diagnostic_sums:
                         sensor_diagnostic_sums[name][active] += values[active]
                 observation, _reward, terminated, truncated, info = wrapped_env.step(action, to_numpy=False)
@@ -558,6 +855,13 @@ def evaluate_closed_loop(
     perception, perception_checkpoint_data = _load_perception(perception_checkpoint, device)
     perception_checksum = _state_dict_checksum(perception.state_dict())
     perception_config = perception_checkpoint_data["config"]
+    perception_dataset_metadata = dict(perception_config.get("dataset_metadata", {}))
+    if perception_config.get("history_mode") == "no_odometry":
+        if perception_config.get("dataset_schema") != "odometry_free_local":
+            raise ValueError("no-odometry perception checkpoint has an incompatible dataset schema")
+        if not perception_dataset_metadata.get("camera"):
+            raise ValueError("no-odometry perception checkpoint does not record its native camera")
+        camera = DepthCameraConfig(**dict(perception_dataset_metadata["camera"]))
     latent, latent_payload = _load_latent(latent_path, device)
     latent_checksum = str(latent_payload["z_checksum"])
     env_config, _ = load_mjlab_env_cfg(
@@ -621,6 +925,22 @@ def evaluate_closed_loop(
         "perception_checkpoint": str(perception_checkpoint.expanduser().resolve()),
         "perception_epoch": int(perception_checkpoint_data["epoch"]),
         "perception_checksum": perception_checksum,
+        "perception_input_contract": {
+            "history_mode": perception_config.get("history_mode", "egomotion_warp"),
+            "terrain_output_mode": resolve_terrain_output_mode(perception_config),
+            "dataset_schema": perception_config.get("dataset_schema"),
+            "uses_odometry": perception_dataset_metadata.get("uses_odometry"),
+            "deployment_inputs": perception_dataset_metadata.get("deployment_inputs"),
+            "native_camera": perception_dataset_metadata.get("camera"),
+            "target_image": perception_dataset_metadata.get("target_image"),
+            "depth_augmentation": perception_dataset_metadata.get("depth_augmentation"),
+            "depth_crop": perception_dataset_metadata.get("depth_crop"),
+            "depth_timing": perception_dataset_metadata.get("depth_timing"),
+            "depth_calibration": perception_dataset_metadata.get("depth_calibration"),
+            "deployment_depth_preprocessing": perception_dataset_metadata.get("deployment_depth_preprocessing"),
+            "self_occlusion": perception_dataset_metadata.get("self_occlusion", False),
+            "self_occlusion_contract": perception_dataset_metadata.get("self_occlusion_contract"),
+        },
         "latent_path": str(latent_path.expanduser().resolve()),
         "latent_prompt_type": latent_payload.get("prompt_type"),
         "latent_prompt_identifier": latent_payload.get("prompt_identifier"),

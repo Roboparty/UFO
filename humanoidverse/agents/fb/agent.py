@@ -5,6 +5,7 @@
 
 import json
 import pickle
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Literal, Tuple
 
@@ -14,12 +15,45 @@ import torch.nn.functional as F
 from torch.amp import autocast
 from torch.utils._pytree import tree_map
 
+from ...distributed import average_gradients, wrap_distributed_stage
 from ..base import BaseConfig
 from ..envs.utils.gym_spaces import json_to_space, space_to_json
 from ..misc.zbuffer import ZBuffer
 from ..nn_models import _soft_update_params, eval_mode, weight_init
-from ...distributed import average_gradients
 from .model import FBModel, FBModelConfig
+
+
+class _FBTrainingStage(torch.nn.Module):
+    def __init__(self, forward_map: torch.nn.Module, backward_map: torch.nn.Module) -> None:
+        super().__init__()
+        self.forward_map = forward_map
+        self.backward_map = backward_map
+
+    def forward(self, obs, z, action, goal):
+        return self.forward_map(obs, z, action), self.backward_map(goal)
+
+
+class _MethodTrainingStage(torch.nn.Module):
+    def __init__(self, module: torch.nn.Module, method_name: str = "forward") -> None:
+        super().__init__()
+        self.wrapped_module = module
+        self.method_name = method_name
+
+    def forward(self, *args, **kwargs):
+        return getattr(self.wrapped_module, self.method_name)(*args, **kwargs)
+
+
+@contextmanager
+def _without_parameter_gradients(*modules: torch.nn.Module):
+    parameters = tuple(parameter for module in modules for parameter in module.parameters())
+    requires_grad = tuple(parameter.requires_grad for parameter in parameters)
+    try:
+        for parameter in parameters:
+            parameter.requires_grad_(False)
+        yield
+    finally:
+        for parameter, enabled in zip(parameters, requires_grad):
+            parameter.requires_grad_(enabled)
 
 
 class FBAgentTrainConfig(BaseConfig):
@@ -75,6 +109,44 @@ class FBAgent:
         self._model.to(self.device)
 
         self.env_idx_with_expert_rollout = None
+        self._distributed_training_stages: dict[str, torch.nn.Module] = {}
+
+    def enable_distributed_gradient_sync(self, *, bucket_cap_mb: float = 25.0) -> None:
+        """Enable DDP reducer hooks separately for every optimizer stage."""
+        if getattr(self, "_distributed_training_stages", None):
+            return
+        stages: dict[str, torch.nn.Module] = {
+            "fb": _FBTrainingStage(self._model._forward_map, self._model._backward_map),
+            "actor": _MethodTrainingStage(self._model._actor),
+        }
+        if hasattr(self._model, "_discriminator"):
+            stages["discriminator"] = _MethodTrainingStage(self._model._discriminator, "compute_logits")
+        if hasattr(self._model, "_critic"):
+            stages["critic"] = _MethodTrainingStage(self._model._critic)
+        if hasattr(self._model, "_aux_critic"):
+            stages["aux_critic"] = _MethodTrainingStage(self._model._aux_critic)
+        self._distributed_training_stages = {
+            name: wrap_distributed_stage(stage, bucket_cap_mb=bucket_cap_mb)
+            for name, stage in stages.items()
+        }
+
+    def _training_stage(self, name: str) -> torch.nn.Module | None:
+        return getattr(self, "_distributed_training_stages", {}).get(name)
+
+    def _sync_gradients_if_manual(self, parameters) -> None:
+        if not getattr(self, "_distributed_training_stages", None):
+            average_gradients(parameters)
+
+    def _run_actor_update(self, *args, **kwargs):
+        if not getattr(self, "_distributed_training_stages", None):
+            return self.update_actor(*args, **kwargs)
+        dependencies = [self._model._forward_map]
+        if hasattr(self._model, "_critic"):
+            dependencies.append(self._model._critic)
+        if hasattr(self._model, "_aux_critic"):
+            dependencies.append(self._model._aux_critic)
+        with _without_parameter_gradients(*dependencies):
+            return self.update_actor(*args, **kwargs)
 
     @property
     def device(self):
@@ -194,7 +266,7 @@ class FBAgent:
             clip_grad_norm=clip_grad_norm,
         )
         metrics.update(
-            self.update_actor(
+            self._run_actor_update(
                 obs=obs,
                 action=action,
                 z=z,
@@ -236,8 +308,12 @@ class FBAgent:
                 _, _, target_M = self.get_targets_uncertainty(target_Ms, self.cfg.train.fb_pessimism_penalty)  # batch x batch
 
             # compute FB loss
-            Fs = self._model._forward_map(obs, z, action)  # num_parallel x batch x z_dim
-            B = self._model._backward_map(goal)  # batch x z_dim
+            fb_stage = self._training_stage("fb")
+            if fb_stage is None:
+                Fs = self._model._forward_map(obs, z, action)  # num_parallel x batch x z_dim
+                B = self._model._backward_map(goal)  # batch x z_dim
+            else:
+                Fs, B = fb_stage(obs, z, action, goal)
             Ms = torch.matmul(Fs, B.T)  # num_parallel x batch x batch
 
             diff = Ms - discount * target_M  # num_parallel x batch x batch
@@ -273,7 +349,9 @@ class FBAgent:
         self.forward_optimizer.zero_grad(set_to_none=True)
         self.backward_optimizer.zero_grad(set_to_none=True)
         fb_loss.backward()
-        average_gradients((*self._model._forward_map.parameters(), *self._model._backward_map.parameters()))
+        self._sync_gradients_if_manual(
+            (*self._model._forward_map.parameters(), *self._model._backward_map.parameters())
+        )
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(self._model._forward_map.parameters(), clip_grad_norm)
             torch.nn.utils.clip_grad_norm_(self._model._backward_map.parameters(), clip_grad_norm)
@@ -310,8 +388,10 @@ class FBAgent:
     def update_td3_actor(
         self, obs: torch.Tensor | dict[str, torch.Tensor], z: torch.Tensor, clip_grad_norm: float | None
     ) -> Dict[str, torch.Tensor]:
+        actor_stage = self._training_stage("actor")
+        actor = self._model._actor if actor_stage is None else actor_stage
         with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
-            dist = self._model._actor(obs, z, self._model.cfg.actor_std)
+            dist = actor(obs, z, self._model.cfg.actor_std)
             action = dist.sample(clip=self.cfg.train.stddev_clip)
             Fs = self._model._forward_map(obs, z, action)  # num_parallel x batch x z_dim
             Qs = (Fs * z).sum(-1)  # num_parallel x batch
@@ -321,7 +401,7 @@ class FBAgent:
         # optimize actor
         self.actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
-        average_gradients(self._model._actor.parameters())
+        self._sync_gradients_if_manual(self._model._actor.parameters())
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm)
         self.actor_optimizer.step()
@@ -401,7 +481,11 @@ class FBAgent:
             obs_space = json_to_space(args["obs_space"])
             action_dim = args["action_dim"]
 
-        config = cls.config_class(**loaded_config)
+        # JSON has no tuple type, so strict construction cannot reload fields
+        # such as direct_depth.proprio_keys after a checkpoint save. Keep
+        # strict validation for newly-built configs and coerce JSON containers
+        # only at this serialization boundary.
+        config = cls.config_class.model_validate(loaded_config, strict=False)
         agent = config.build(obs_space, action_dim)
         optimizers = torch.load(str(path / "optimizers.pth"), weights_only=True, map_location=device)
         for k, v in optimizers.items():

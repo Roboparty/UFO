@@ -39,6 +39,7 @@ class _FakePolicyModel(nn.Module):
         state_dim: int,
         last_action_dim: int,
         history_actor_dim: int = 0,
+        terrain_actor_dim: int = 273,
         z_dim: int = 16,
         action_dim: int = 29,
         actor_input_keys: list[str] | None = None,
@@ -50,6 +51,7 @@ class _FakePolicyModel(nn.Module):
             "state": _FakeSpace(state_dim),
             "last_action": _FakeSpace(last_action_dim),
             "history_actor": _FakeSpace(history_actor_dim),
+            "terrain_actor": _FakeSpace(terrain_actor_dim),
         }
         self.action_dim = int(action_dim)
         actor_input_dim = sum(int(self.obs_space[key].shape[0]) for key in actor_input_keys)
@@ -140,6 +142,24 @@ class RobotConfigOnnxExportTest(unittest.TestCase):
         wrapper = onnx_export.call_args.args[0]
         wrapper(torch.randn(3, metadata["actor_obs_dim"]))
         self.assertEqual(wrapper.actor.last_actor_dict_shapes["history_actor"], (3, 112))
+
+    def test_terrain_actor_key_is_exported_in_policy_input(self) -> None:
+        model = _FakePolicyModel(
+            state_dim=64,
+            last_action_dim=29,
+            history_actor_dim=116,
+            terrain_actor_dim=273,
+            z_dim=256,
+            action_dim=29,
+            actor_input_keys=["state", "last_action", "history_actor", "terrain_actor"],
+        )
+        metadata, onnx_export = self._export_with_mock(model)
+
+        self.assertEqual(metadata["actor_input_dims"]["terrain_actor"], 273)
+        self.assertEqual(metadata["actor_obs_dim"], 64 + 29 + 116 + 273 + 256)
+        wrapper = onnx_export.call_args.args[0]
+        wrapper(torch.randn(2, metadata["actor_obs_dim"]))
+        self.assertEqual(wrapper.actor.last_actor_dict_shapes["terrain_actor"], (2, 273))
 
     def test_missing_actor_input_key_errors_clearly(self) -> None:
         model = _FakePolicyModel(

@@ -17,6 +17,7 @@ import numpy as np
 import torch
 from torch.utils._pytree import tree_map
 
+from humanoidverse.actor_override import load_actor_override
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
 from humanoidverse.export.backward_encoder import (
     UnsupportedBackwardEncoderExport,
@@ -29,10 +30,10 @@ from humanoidverse.mjlab_inference_utils import (
     load_mjlab_env_cfg,
     policy_qpos_from_env,
 )
+from humanoidverse.perception.depth_terrain_runtime import TemporalDepthTerrainRuntime
 from humanoidverse.utils.helpers import export_meta_policy_as_onnx, get_backward_observation
 from humanoidverse.utils.motion_data import prepare_manifest_dataset_path, prepare_manifest_robot_config_path
 from humanoidverse.utils.robot_spec import assert_robot_configs_compatible, load_robot_training_spec, resolve_robot_config_path
-
 
 DEFAULT_ROBOT_CONFIG = "configs/robots/g1_29dof.yaml"
 
@@ -107,8 +108,12 @@ def _center_target_states_on_terrain(target_states: dict[str, torch.Tensor], env
 @torch.no_grad()
 def _tracking_z(model: torch.nn.Module, obs: Any) -> torch.Tensor:
     z = model.backward_map(obs)
+    seq_length = int(getattr(getattr(model, "cfg", None), "seq_length", 1))
+    if seq_length < 1:
+        raise ValueError(f"model.cfg.seq_length must be positive, got {seq_length}")
     for step in range(z.shape[0]):
-        z[step] = z[step : step + 1].mean(dim=0)
+        end_idx = min(step + seq_length, z.shape[0])
+        z[step] = z[step:end_idx].mean(dim=0)
     return model.project_z(z)
 
 
@@ -186,6 +191,8 @@ def run_tracking_inference(
     log_every_steps: int,
     max_episode_length_s: float,
     export_onnx: bool,
+    actor_override: Path | None = None,
+    perception_checkpoint: Path | None = None,
 ) -> None:
     model_folder = model_folder.expanduser().resolve()
     checkpoint_dir = model_folder / "checkpoint"
@@ -205,6 +212,9 @@ def run_tracking_inference(
     model = load_model_from_checkpoint_dir(checkpoint_dir, device=model_load_device)
     model.to(device)
     model.eval()
+    actor_override_info = load_actor_override(model, actor_override) if actor_override is not None else None
+    if actor_override_info is not None:
+        print(f"[INFO] Loaded read-only Actor override: {actor_override_info}")
 
     if export_onnx:
         _export_tracking_onnx(model, model_folder / "exported", robot_training)
@@ -219,7 +229,16 @@ def run_tracking_inference(
         disable_obs_noise=disable_obs_noise,
         max_episode_length_s=max_episode_length_s,
     )
-    wrapped_env, _ = env_cfg.build(num_envs=1)
+    perception_runtime = (
+        TemporalDepthTerrainRuntime(
+            env_cfg,
+            perception_checkpoint=perception_checkpoint,
+            device=device,
+        )
+        if perception_checkpoint is not None
+        else None
+    )
+    wrapped_env = perception_runtime.wrapped_env if perception_runtime is not None else env_cfg.build(num_envs=1)[0]
     env = wrapped_env._env
 
     output_dir = model_folder / "tracking_inference"
@@ -272,6 +291,8 @@ def run_tracking_inference(
             target_states = _target_states_from_obs(obs_dict, device=device, num_dof=num_dof)
             target_states = _center_target_states_on_terrain(target_states, env)
             observation, _ = wrapped_env.reset(to_numpy=False, target_states=target_states)
+            if perception_runtime is not None:
+                perception_runtime.reset()
             episode_len = int(z.shape[0])
             if max_steps is not None:
                 episode_len = min(episode_len, int(max_steps))
@@ -284,8 +305,16 @@ def run_tracking_inference(
 
             print(f"[INFO] Running policy rollout for motion_id={motion_id}, steps={episode_len}", flush=True)
             for step in range(episode_len):
+                if perception_runtime is not None:
+                    observation["terrain_actor"] = perception_runtime.terrain_actor(
+                        observation,
+                        reset_mask=torch.ones(1, device=device, dtype=torch.bool) if step == 0 else None,
+                    )
                 action = model.act(observation, z[step].unsqueeze(0), mean=True)
                 observation, _reward, terminated, truncated, _info = wrapped_env.step(action, to_numpy=False)
+                if perception_runtime is not None:
+                    reset = torch.as_tensor(terminated, device=device).bool() | torch.as_tensor(truncated, device=device).bool()
+                    perception_runtime.after_step(reset)
 
                 if save_mp4:
                     policy_qpos = policy_qpos_from_env(
@@ -315,7 +344,10 @@ def run_tracking_inference(
             expert_renderer.close()
         if policy_renderer is not None:
             policy_renderer.close()
-        wrapped_env.close()
+        if perception_runtime is not None:
+            perception_runtime.close()
+        else:
+            wrapped_env.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -338,8 +370,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-elevation", type=float, default=-18.0)
     parser.add_argument("--fps", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=None, help="Optional cap on rollout/video frames for quick previews.")
-    parser.add_argument("--log-every-steps", type=int, default=100, help="Print rollout/render progress every N steps; 0 disables periodic logs.")
+    parser.add_argument(
+        "--log-every-steps", type=int, default=100, help="Print rollout/render progress every N steps; 0 disables periodic logs."
+    )
     parser.add_argument("--max-episode-length-s", type=float, default=10000.0)
+    parser.add_argument(
+        "--actor-override",
+        type=Path,
+        default=None,
+        help="Actor-only milestone to load in memory; the source full checkpoint is never modified.",
+    )
+    parser.add_argument(
+        "--perception-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional temporal terrain checkpoint. When set, clean depth replaces GT terrain_actor.",
+    )
     add_bool_arg(parser, "--export-onnx", True, "Export ONNX next to the checkpoint before inference.")
     args = parser.parse_args()
     manifest_robot_config = None
@@ -382,6 +428,8 @@ def main() -> None:
         log_every_steps=args.log_every_steps,
         max_episode_length_s=args.max_episode_length_s,
         export_onnx=args.export_onnx,
+        actor_override=args.actor_override,
+        perception_checkpoint=args.perception_checkpoint,
     )
 
 

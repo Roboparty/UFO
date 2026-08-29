@@ -7,9 +7,11 @@ MJLab owns batched physics stepping; this wrapper reconstructs the observation,
 reward, reset and info dictionaries expected by the original UFO code.
 """
 
+import math
 import os
 import random
 import typing as tp
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Union
 
@@ -28,7 +30,25 @@ import humanoidverse
 from humanoidverse.agents.base import BaseConfig
 from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHistoryHandler
 from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
+from humanoidverse.perception.depth_camera import (
+    convert_camera_quaternion_to_optical_xyzw,
+    make_depth_camera_sensor_cfg,
+)
+from humanoidverse.perception.instinct_direct_depth import (
+    BASELINE_TYPE as DIRECT_DEPTH_BASELINE_TYPE,
+)
+from humanoidverse.perception.instinct_direct_depth import (
+    REFERENCE_COMMIT as DIRECT_DEPTH_REFERENCE_COMMIT,
+)
+from humanoidverse.perception.instinct_direct_depth import (
+    REFERENCE_PROJECT as DIRECT_DEPTH_REFERENCE_PROJECT,
+)
+from humanoidverse.perception.instinct_direct_depth import (
+    RP1DirectDepthConfig,
+    RP1DirectDepthRuntime,
+)
 from humanoidverse.terrains import make_terrain_entity_cfg, terrain_component_names
+from humanoidverse.terrains.rp1_simple import add_rp1_nonflat_guard_ring, add_rp1_outer_walls
 from humanoidverse.terrains.terrain_height_sensor import PbfmTerrainHeightSensorCfg
 from humanoidverse.terrains.terrain_observation import (
     RobotCentricGridPatternCfg,
@@ -72,10 +92,57 @@ RESET_REGION_NAMES = (
     "rough_center",
     "rough_patch",
     "platforms_center",
-    "platforms_band",
+    "platforms_patch",
     "tile_seam",
 )
 RESET_REGION_ID = {name: index for index, name in enumerate(RESET_REGION_NAMES)}
+
+
+def _rp1_direct_depth_config(config) -> RP1DirectDepthConfig | None:
+    """Parse and validate the RP1-compatible direct-depth Hydra block."""
+    if not bool(config.terrain.get("enabled", False)):
+        return None
+    raw = config.terrain.get("direct_depth", None)
+    if raw is None or not bool(raw.get("enabled", False)):
+        return None
+    metadata = {
+        "reference_project": DIRECT_DEPTH_REFERENCE_PROJECT,
+        "reference_commit": DIRECT_DEPTH_REFERENCE_COMMIT,
+        "baseline_type": DIRECT_DEPTH_BASELINE_TYPE,
+        "replay_storage_dtype": "compact_uint8",
+    }
+    for key, expected in metadata.items():
+        actual = str(raw.get(key, ""))
+        if actual != expected:
+            raise ValueError(f"terrain.direct_depth.{key}={actual!r}, expected frozen value {expected!r}")
+    camera_frame_quat = torch.tensor(tuple(float(v) for v in raw.camera_frame_quat_wxyz), dtype=torch.float64)
+    optical_quat = convert_camera_quaternion_to_optical_xyzw(
+        camera_frame_quat,
+        convention="world",
+        input_order="wxyz",
+    )
+    cfg = RP1DirectDepthConfig(
+        width=int(raw.width),
+        height=int(raw.height),
+        horizontal_fov_deg=float(raw.horizontal_fov_deg),
+        vertical_fov_deg=float(raw.vertical_fov_deg),
+        min_distance=float(raw.min_distance),
+        max_distance=float(raw.max_distance),
+        crop=tuple(int(v) for v in raw.crop),
+        history_length=int(raw.history_length),
+        history_skip_frames=int(raw.history_skip_frames),
+        num_output_frames=int(raw.num_output_frames),
+        delayed_frame_ranges=tuple(int(v) for v in raw.delayed_frame_ranges),
+        position_error=float(raw.get("position_error", 0.05)),
+        angle_error_rad=math.radians(float(raw.get("angle_error_deg", 5.0))),
+        include_geom_groups=tuple(int(v) for v in raw.include_geom_groups),
+        exclude_parent_body=bool(raw.exclude_parent_body),
+        mount_body=str(raw.mount_body),
+        mount_pos=tuple(float(v) for v in raw.mount_pos),
+        optical_quat_torso_xyzw=tuple(float(v) for v in optical_quat),
+    )
+    cfg.validate()
+    return cfg
 
 
 def peak_contact_force(force_history: torch.Tensor) -> torch.Tensor:
@@ -328,7 +395,7 @@ def sample_terrain_reset_regions(
 
     platforms = terrain_mask("platforms")
     region_ids[platforms] = RESET_REGION_ID["platforms_center"]
-    region_ids[platforms & (samples < platforms_random_prob)] = RESET_REGION_ID["platforms_band"]
+    region_ids[platforms & (samples < platforms_random_prob)] = RESET_REGION_ID["platforms_patch"]
     return region_ids
 
 
@@ -384,21 +451,6 @@ def stairs_transition_reset_positions(
         platform_width / 2.0 + 2 * num_steps * step_depth + 2 * plateau_width - edge_margin
     )
     return patch_centers + directions * offsets.unsqueeze(-1)
-
-
-def square_ring_positions(
-    patch_centers: torch.Tensor,
-    angles: torch.Tensor,
-    square_radius: torch.Tensor,
-) -> torch.Tensor:
-    """Sample points at a requested radius in a concentric square band."""
-    if patch_centers.ndim != 2 or patch_centers.shape[1] != 2:
-        raise ValueError("patch_centers must have shape [B, 2]")
-    if angles.shape != (len(patch_centers),) or square_radius.shape != angles.shape:
-        raise ValueError("angles and square_radius must have shape [B]")
-    direction = torch.stack((torch.cos(angles), torch.sin(angles)), dim=-1)
-    direction = direction / direction.abs().amax(dim=-1, keepdim=True).clamp_min(1.0e-6)
-    return patch_centers + direction * square_radius.unsqueeze(-1)
 
 
 def terrain_grid_coordinates(
@@ -521,6 +573,20 @@ def _to_list(value) -> list:
     if value is None:
         return []
     return list(OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value)
+
+
+def _mass_scale_range_to_pseudo_inertia_alpha(value) -> tuple[float, float]:
+    """Convert an intuitive mass scale into MJLab's log-density parameter."""
+    scale_range = [float(item) for item in _to_list(value)]
+    if len(scale_range) != 2:
+        raise ValueError(f"domain_rand.link_mass_range must have two entries, got {scale_range}")
+    lower, upper = scale_range
+    if lower <= 0.0 or upper < lower:
+        raise ValueError(
+            "domain_rand.link_mass_range must satisfy 0 < min <= max, "
+            f"got {scale_range}"
+        )
+    return 0.5 * math.log(lower), 0.5 * math.log(upper)
 
 
 def _to_float_dict(value) -> dict[str, float]:
@@ -674,6 +740,64 @@ def _small_random_quaternions(n: int, max_angle: float, device: str) -> torch.Te
     return torch.cat([sin_half_angle * axis, cos_half_angle], dim=1)
 
 
+def _random_yaw_quaternions(n: int, device: str) -> torch.Tensor:
+    """Sample independent world-yaw rotations uniformly from [-pi, pi]."""
+    angles = (torch.rand(n, device=device) * 2.0 - 1.0) * torch.pi
+    half = 0.5 * angles
+    return torch.stack(
+        (torch.zeros_like(half), torch.zeros_like(half), torch.sin(half), torch.cos(half)),
+        dim=1,
+    )
+
+
+def _yaw_from_xyzw(quaternion: torch.Tensor) -> torch.Tensor:
+    """Return world yaw from an xyzw quaternion batch."""
+    if quaternion.ndim != 2 or quaternion.shape[1] != 4:
+        raise ValueError("quaternion must have shape [B, 4]")
+    x, y, z, w = quaternion.unbind(dim=-1)
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y.square() + z.square()))
+
+
+def rotate_root_motion_by_yaw(
+    root_rotation: torch.Tensor,
+    root_velocity: torch.Tensor,
+    root_angular_velocity: torch.Tensor,
+    yaw_rotation: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Rotate a root pose and its world-frame velocities by the same yaw."""
+    batch_size = root_rotation.shape[0]
+    if root_rotation.shape != (batch_size, 4) or yaw_rotation.shape != (batch_size, 4):
+        raise ValueError("root_rotation and yaw_rotation must have matching [B, 4] shapes")
+    if root_velocity.shape != (batch_size, 3) or root_angular_velocity.shape != (batch_size, 3):
+        raise ValueError("root velocities must have matching [B, 3] shapes")
+    return (
+        quat_mul(yaw_rotation, root_rotation, w_last=True),
+        my_quat_rotate(yaw_rotation, root_velocity),
+        my_quat_rotate(yaw_rotation, root_angular_velocity),
+    )
+
+
+def reference_heading_alignment(
+    root_rotation: torch.Tensor,
+    reference_root_rotation: torch.Tensor,
+    motion_heading_offset: torch.Tensor,
+) -> torch.Tensor:
+    """Cosine reward for following the reset-rotated reference heading."""
+    batch_size = root_rotation.shape[0]
+    if root_rotation.shape != (batch_size, 4) or reference_root_rotation.shape != (batch_size, 4):
+        raise ValueError("root rotations must have matching [B, 4] shapes")
+    if motion_heading_offset.shape != (batch_size,):
+        raise ValueError("motion_heading_offset must have shape [B]")
+    forward = torch.zeros((batch_size, 3), device=root_rotation.device, dtype=root_rotation.dtype)
+    forward[:, 0] = 1.0
+    root_forward = my_quat_rotate(root_rotation, forward)
+    reference_forward = my_quat_rotate(reference_root_rotation, forward)
+    root_heading = torch.atan2(root_forward[:, 1], root_forward[:, 0])
+    reference_heading = torch.atan2(reference_forward[:, 1], reference_forward[:, 0])
+    target_heading = reference_heading + motion_heading_offset
+    return 0.5 * (torch.cos(wrap_to_pi(root_heading - target_heading)) + 1.0)
+
+
 def _compose_humanoidverse_config(
     *,
     num_envs: int,
@@ -723,6 +847,10 @@ def _compose_humanoidverse_config(
         cfg.domain_rand.randomize_push_robots = False
         cfg.domain_rand.push_robots = False
         cfg.domain_rand.randomize_default_dof_pos = False
+        direct_depth = cfg.terrain.get("direct_depth", None)
+        if direct_depth is not None:
+            direct_depth.position_error = 0.0
+            direct_depth.angle_error_deg = 0.0
 
     assert cfg.env.config.termination.terminate_when_close_to_dof_pos_limit is False
     assert cfg.env.config.termination.terminate_when_close_to_dof_vel_limit is False
@@ -867,6 +995,7 @@ def make_mjlab_ufo_env_cfg(
     ]
     terrain_enabled = bool(config.terrain.get("enabled", False))
     terrain_mode = str(config.terrain.get("terrain_type", "plane")) if terrain_enabled else "plane"
+    direct_depth_cfg = _rp1_direct_depth_config(config)
     terrain_observation_mode = str(config.terrain.terrain_priv.get("mode", "raycast")) if terrain_enabled else "raycast"
     if terrain_observation_mode not in {"raycast", "flat_zero"}:
         raise ValueError(f"Unsupported terrain observation mode: {terrain_observation_mode!r}")
@@ -889,17 +1018,54 @@ def make_mjlab_ufo_env_cfg(
                     pattern=grid_pattern,
                     ray_alignment="yaw",
                     max_distance=float(terrain_priv_cfg.max_ray_distance),
-                    include_geom_groups=(5,),
+                    include_geom_groups=(0,) if terrain_mode == "rp1_simple" else (5,),
+                    padding_ray_group=0 if terrain_mode == "rp1_simple" else 5,
                     reduction="none",
                     debug_vis=bool(terrain_priv_cfg.get("debug_vis", False)),
                 )
             )
+        if direct_depth_cfg is not None:
+            sensors.append(
+                make_depth_camera_sensor_cfg(
+                    direct_depth_cfg.camera_config(),
+                    torso_body_name=direct_depth_cfg.mount_body,
+                    exclude_parent_body=direct_depth_cfg.exclude_parent_body,
+                    ray_alignment="base",
+                    ray_origin_shift=direct_depth_cfg.min_distance,
+                    position_error=direct_depth_cfg.position_error,
+                    angle_error_rad=direct_depth_cfg.angle_error_rad,
+                )
+            )
+            if bool(config.terrain.direct_depth.get("debug_terrain_reference", False)):
+                terrain_reference_camera = replace(
+                    direct_depth_cfg.camera_config(),
+                    name="g1_direct_depth_terrain_reference",
+                    include_geom_groups=(0, 5) if terrain_mode == "rp1_simple" else (5,),
+                )
+                sensors.append(
+                    make_depth_camera_sensor_cfg(
+                        terrain_reference_camera,
+                        torso_body_name=direct_depth_cfg.mount_body,
+                        exclude_parent_body=direct_depth_cfg.exclude_parent_body,
+                        ray_alignment="base",
+                        ray_origin_shift=direct_depth_cfg.min_distance,
+                    )
+                )
 
     terrain_entity_cfg = (
         make_terrain_entity_cfg(terrain_mode, env_spacing=float(config.env_spacing), config=config.terrain)
         if terrain_enabled
         else make_terrain_entity_cfg("plane", env_spacing=float(config.env_spacing))
     )
+    scene_spec_fn = None
+    if terrain_mode == "rp1_simple":
+        terrain_generator = terrain_entity_cfg.terrain_generator
+        if terrain_generator is None:
+            raise ValueError("rp1_simple terrain requires a terrain generator")
+
+        def scene_spec_fn(spec: mujoco.MjSpec) -> None:
+            add_rp1_nonflat_guard_ring(spec, terrain_generator)
+            add_rp1_outer_walls(spec, terrain_generator)
     observations = {
         "actor": ObservationGroupCfg(
             terms={"joint_pos": ObservationTermCfg(func=_obs_joint_pos)},
@@ -944,6 +1110,19 @@ def make_mjlab_ufo_env_cfg(
             interval_range_s=tuple(float(x) for x in _to_list(domain_rand.push_interval_s)),
             params={"velocity_range": velocity_range},
         )
+    # pseudo_inertia reconstructs body_ipos from the model defaults, so it
+    # must run before the independent torso COM-offset event below.
+    if bool(domain_rand.get("randomize_link_mass", False)):
+        events["random_link_pseudo_inertia"] = EventTermCfg(
+            mode="startup",
+            func=mjlab_dr.pseudo_inertia,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+                "alpha_range": _mass_scale_range_to_pseudo_inertia_alpha(
+                    domain_rand.link_mass_range
+                ),
+            },
+        )
     if bool(domain_rand.get("randomize_base_com", False)):
         base_com_range = domain_rand.base_com_range
         events["random_base_com"] = EventTermCfg(
@@ -957,16 +1136,6 @@ def make_mjlab_ufo_env_cfg(
                     1: tuple(float(x) for x in _to_list(base_com_range.y)),
                     2: tuple(float(x) for x in _to_list(base_com_range.z)),
                 },
-            },
-        )
-    if bool(domain_rand.get("randomize_link_mass", False)):
-        events["random_link_mass"] = EventTermCfg(
-            mode="startup",
-            func=mjlab_dr.body_mass,
-            params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                "operation": "scale",
-                "ranges": tuple(float(x) for x in _to_list(domain_rand.link_mass_range)),
             },
         )
     if bool(domain_rand.get("randomize_friction", False)):
@@ -989,6 +1158,7 @@ def make_mjlab_ufo_env_cfg(
             terrain=terrain_entity_cfg,
             entities={"robot": robot_cfg},
             sensors=tuple(sensors),
+            spec_fn=scene_spec_fn,
         ),
         observations=observations,
         actions=actions,
@@ -1036,7 +1206,14 @@ class _MjlabSimulatorView:
 
 
 class HumanoidVerseMjlabCore:
-    def __init__(self, hv_config, mjlab_env, *, creation_config: "HumanoidVerseMjlabConfig") -> None:
+    def __init__(
+        self,
+        hv_config,
+        mjlab_env,
+        *,
+        creation_config: "HumanoidVerseMjlabConfig",
+        motion_lib_override=None,
+    ) -> None:
         self.config = hv_config
         self.mjlab_env = mjlab_env
         self.robot = mjlab_env.scene["robot"]
@@ -1055,6 +1232,18 @@ class HumanoidVerseMjlabCore:
         self.env_origins = mjlab_env.scene.env_origins
         self.terrain_enabled = bool(hv_config.terrain.get("enabled", False))
         self.terrain_mode = str(hv_config.terrain.get("terrain_type", "plane")) if self.terrain_enabled else "plane"
+        self.direct_depth_config = _rp1_direct_depth_config(hv_config)
+        self.direct_depth_enabled = self.direct_depth_config is not None
+        self._direct_depth_runtime = (
+            RP1DirectDepthRuntime(
+                self.num_envs,
+                self.device,
+                self.direct_depth_config,
+                enable_noise=not bool(creation_config.disable_obs_noise),
+            )
+            if self.direct_depth_config is not None
+            else None
+        )
         self.terrain_observation_mode = (
             str(hv_config.terrain.terrain_priv.get("mode", "raycast")) if self.terrain_enabled else "raycast"
         )
@@ -1082,6 +1271,7 @@ class HumanoidVerseMjlabCore:
             else 0
         )
         self._terrain_motion_offsets = torch.zeros(self.num_envs, 3, device=self.device)
+        self.motion_heading_offsets = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self._reset_region_ids = torch.full(
             (self.num_envs,), RESET_REGION_ID["flat_center"], device=self.device, dtype=torch.long
         )
@@ -1181,6 +1371,29 @@ class HumanoidVerseMjlabCore:
 
         self.actions = torch.zeros(self.num_envs, self.num_dof, device=self.device)
         self.last_actions = torch.zeros_like(self.actions)
+        self.applied_actions = torch.zeros_like(self.actions)
+        self._ctrl_delay_enabled = bool(self.config.domain_rand.get("randomize_ctrl_delay", False))
+        delay_range = _to_list(self.config.domain_rand.get("ctrl_delay_step_range", [0, 0]))
+        if len(delay_range) != 2:
+            raise ValueError(f"domain_rand.ctrl_delay_step_range must have two entries, got {delay_range}")
+        self._ctrl_delay_min_step = int(delay_range[0]) if self._ctrl_delay_enabled else 0
+        self._ctrl_delay_max_step = int(delay_range[1]) if self._ctrl_delay_enabled else 0
+        if self._ctrl_delay_min_step < 0 or self._ctrl_delay_max_step < self._ctrl_delay_min_step:
+            raise ValueError(f"domain_rand.ctrl_delay_step_range must satisfy 0 <= min <= max, got {delay_range}")
+        self._ctrl_delay_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._ctrl_delay_env_indices = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+        self._ctrl_delay_buffer = torch.zeros(
+            self._ctrl_delay_max_step + 1,
+            self.num_envs,
+            self.num_dof,
+            device=self.device,
+        )
+        if self._ctrl_delay_enabled:
+            print(
+                "[INFO] MJLab motor action delay randomization enabled: "
+                f"ctrl_delay_step_range=[{self._ctrl_delay_min_step}, {self._ctrl_delay_max_step}]",
+                flush=True,
+            )
         self.torques = torch.zeros_like(self.actions)
         self.last_dof_vel = torch.zeros_like(self.actions)
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -1213,7 +1426,7 @@ class HumanoidVerseMjlabCore:
         self.num_compute_average_epl = float(self.config.rewards.num_compute_average_epl)
         self.add_noise_currculum = bool(self.config.obs.get("add_noise_currculum", False))
         self.current_noise_curriculum_value = float(self.config.obs.get("noise_initial_value", 1.0))
-        self._init_motion_lib()
+        self._init_motion_lib(motion_lib_override)
         self.history_handler = HVHistoryHandler(self.num_envs, hv_config.obs.obs_auxiliary, hv_config.obs.obs_dims, self.device)
         self.use_contact_in_obs_max = bool(hv_config.get("use_contact_in_obs_max", False))
         self.simulator = _MjlabSimulatorView(self)
@@ -1296,10 +1509,13 @@ class HumanoidVerseMjlabCore:
             value = value + (torch.rand_like(value) * 2.0 - 1.0) * noise_scale
         return value * scale
 
-    def _init_motion_lib(self) -> None:
+    def _init_motion_lib(self, motion_lib_override=None) -> None:
         self.config.robot.motion.step_dt = self.dt
-        self._motion_lib = MotionLibRobot(self.config.robot.motion, num_envs=self.num_envs, device=self.device)
-        self._motion_lib.load_motions_for_training(max_num_seqs=self.num_envs)
+        if motion_lib_override is None:
+            self._motion_lib = MotionLibRobot(self.config.robot.motion, num_envs=self.num_envs, device=self.device)
+            self._motion_lib.load_motions_for_training(max_num_seqs=self.num_envs)
+        else:
+            self._motion_lib = motion_lib_override
         self.motion_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.motion_start_times = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.motion_len = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -1466,7 +1682,8 @@ class HumanoidVerseMjlabCore:
         self._max_local_self = torch.cat([v for v in obs_dict.values()], dim=-1)
 
     def _raw_actor_obs(self) -> dict[str, torch.Tensor]:
-        self._compute_reference_and_privileged_obs()
+        if not self._creation_config.evaluation_fast_path:
+            self._compute_reference_and_privileged_obs()
         dof_pos_rel = self.dof_pos - (self.default_dof_pos + self.default_dof_pos_offset)
         obs_data = {
             "actions": self._apply_obs_scale_noise("actions", self.actions),
@@ -1474,8 +1691,9 @@ class HumanoidVerseMjlabCore:
             "dof_pos": self._apply_obs_scale_noise("dof_pos", dof_pos_rel),
             "dof_vel": self._apply_obs_scale_noise("dof_vel", self.dof_vel),
             "projected_gravity": self._apply_obs_scale_noise("projected_gravity", self.projected_gravity),
-            "max_local_self": self._apply_obs_scale_noise("max_local_self", self._max_local_self),
         }
+        if not self._creation_config.evaluation_fast_path:
+            obs_data["max_local_self"] = self._apply_obs_scale_noise("max_local_self", self._max_local_self)
         history_config = self.config.obs.obs_auxiliary["history_actor"]
         history_tensors = []
         for key in sorted(history_config.keys()):
@@ -1637,20 +1855,20 @@ class HumanoidVerseMjlabCore:
             option_ids = torch.randint(options.shape[1], (len(selected_env_ids),), device=self.device)
             positions[rough_patch] = options[torch.arange(len(selected_env_ids), device=self.device), option_ids, :2]
 
-        platforms_band = region_ids == RESET_REGION_ID["platforms_band"]
-        if torch.any(platforms_band):
-            platforms_cfg = self.config.terrain.platforms
-            edge_margin = float(reset_cfg.platforms_edge_margin)
-            inner_radius = float(platforms_cfg.center_width) / 2.0 + edge_margin
-            outer_radius = float(platforms_cfg.center_width) / 2.0 + float(platforms_cfg.band_width) - edge_margin
-            if not inner_radius < outer_radius:
-                raise ValueError("platforms reset edge margin leaves no safe band interior")
-            count = int(platforms_band.sum().item())
-            angles = torch.rand(count, device=self.device) * (2.0 * torch.pi)
-            radii = inner_radius + torch.rand(count, device=self.device) * (outer_radius - inner_radius)
-            positions[platforms_band] = square_ring_positions(
-                patch_centers[platforms_band], angles, radii
-            )
+        platforms_patch = region_ids == RESET_REGION_ID["platforms_patch"]
+        if torch.any(platforms_patch):
+            patch_options = terrain_entity.flat_patches.get("platform_spawn")
+            if patch_options is None:
+                raise RuntimeError("platform reset sampling requires terrain flat_patches['platform_spawn']")
+            selected_env_ids = env_ids[platforms_patch]
+            options = patch_options[
+                terrain_entity.terrain_levels[selected_env_ids],
+                terrain_entity.terrain_types[selected_env_ids],
+            ]
+            option_ids = torch.randint(options.shape[1], (len(selected_env_ids),), device=self.device)
+            positions[platforms_patch] = options[
+                torch.arange(len(selected_env_ids), device=self.device), option_ids, :2
+            ]
 
         seam_mask = sample_terrain_seam_reset_mask(
             terrain_ids,
@@ -1782,21 +2000,30 @@ class HumanoidVerseMjlabCore:
         raw_obs = self._raw_actor_obs()
         obs = {
             "state": torch.cat([raw_obs["dof_pos"], raw_obs["dof_vel"], raw_obs["projected_gravity"], raw_obs["base_ang_vel"]], dim=-1),
-            "privileged_state": raw_obs["max_local_self"],
         }
+        if not self._creation_config.evaluation_fast_path:
+            obs["privileged_state"] = raw_obs["max_local_self"]
         if include_last_action:
             obs["last_action"] = raw_obs["actions"]
         obs["time"] = self.episode_length_buf.unsqueeze(-1)
         if include_history_actor:
             obs["history_actor"] = raw_obs["history_actor"]
         if self.terrain_enabled:
-            terrain_observations = self._latest_terrain_observations or self._terrain_observations()
-            _root_clearance, terrain_actor, terrain_priv = terrain_observations
-            obs["terrain_actor"] = terrain_actor
-            obs["terrain_priv"] = terrain_priv
-            if not self._terrain_stats_logged:
-                self._log_terrain_priv_stats(terrain_priv)
-                self._terrain_stats_logged = True
+            if self.direct_depth_enabled:
+                if self._direct_depth_runtime is None:
+                    raise RuntimeError("direct-depth runtime was not initialized")
+                obs["depth_image"] = self._direct_depth_runtime.observation()
+            else:
+                terrain_observations = self._latest_terrain_observations or self._terrain_observations()
+                _root_clearance, terrain_actor, terrain_priv = terrain_observations
+                obs["terrain_actor"] = terrain_actor
+            if not self._creation_config.evaluation_fast_path:
+                terrain_observations = self._latest_terrain_observations or self._terrain_observations()
+                _root_clearance, _terrain_actor, terrain_priv = terrain_observations
+                obs["terrain_priv"] = terrain_priv
+                if not self._terrain_stats_logged:
+                    self._log_terrain_priv_stats(terrain_priv)
+                    self._terrain_stats_logged = True
         if to_numpy:
             obs = tree_map(lambda x: x.detach().cpu().numpy(), obs)
         return obs
@@ -1857,6 +2084,11 @@ class HumanoidVerseMjlabCore:
         aux["feet_heading_alignment"] = torch.abs(wrap_to_pi(torch.atan2(forward_left[:, 1], forward_left[:, 0]) - heading_root)) + torch.abs(
             wrap_to_pi(torch.atan2(forward_right[:, 1], forward_right[:, 0]) - heading_root)
         )
+        aux["heading_reference_alignment"] = reference_heading_alignment(
+            self.base_quat,
+            self.ref_body_rot_extend[:, 0],
+            self.motion_heading_offsets,
+        )
 
         reward = torch.zeros(self.num_envs, device=self.device)
         for name, scale in self.reward_scales.items():
@@ -1873,26 +2105,59 @@ class HumanoidVerseMjlabCore:
             actions = actions * float(self.config.robot.control.normalize_action_to) / float(self.config.robot.control.normalize_action_from)
         return torch.clamp(actions, -float(self.config.robot.control.action_clip_value), float(self.config.robot.control.action_clip_value))
 
-    def _mjlab_action_input(self) -> torch.Tensor:
+    def _mjlab_action_input(self, actions: torch.Tensor | None = None) -> torch.Tensor:
         action_indices = self._action_term_dof_indices
-        return self.actions[:, action_indices] + self.default_dof_pos_offset[:, action_indices] / torch.clamp(
+        action_source = self.actions if actions is None else actions
+        return action_source[:, action_indices] + self.default_dof_pos_offset[:, action_indices] / torch.clamp(
             self.action_target_scale[:, action_indices], min=1.0e-6
         )
 
+    def _sample_ctrl_delay(self, env_ids: torch.Tensor) -> None:
+        """Sample one integer motor-command delay per episode and clear stale commands."""
+        if self._ctrl_delay_enabled:
+            self._ctrl_delay_steps[env_ids] = torch.randint(
+                self._ctrl_delay_min_step,
+                self._ctrl_delay_max_step + 1,
+                (len(env_ids),),
+                device=self.device,
+            )
+        else:
+            self._ctrl_delay_steps[env_ids] = 0
+        self._ctrl_delay_buffer[:, env_ids] = 0.0
+
+    def _apply_ctrl_delay(self, actions: torch.Tensor) -> torch.Tensor:
+        """Return each environment's command from its sampled FIFO delay."""
+        if not self._ctrl_delay_enabled or self._ctrl_delay_max_step == 0:
+            return actions
+        self._ctrl_delay_buffer = torch.roll(self._ctrl_delay_buffer, shifts=1, dims=0)
+        self._ctrl_delay_buffer[0] = actions
+        return self._ctrl_delay_buffer[self._ctrl_delay_steps, self._ctrl_delay_env_indices]
+
     def step(self, actions: torch.Tensor):
         actions = actions.to(self.device, dtype=torch.float32)
-        pre_body_vel = self.body_vel.clone() if self.terrain_aware_auxiliary else None
+        pre_body_vel = (
+            self.body_vel.clone()
+            if self.terrain_aware_auxiliary and not self._creation_config.evaluation_fast_path
+            else None
+        )
         self.last_actions[:] = self.actions
         self.last_dof_vel[:] = self.dof_vel
         self.actions[:] = self._normalized_action(actions)
-        mjlab_actions = self._mjlab_action_input()
+        self.applied_actions[:] = self._apply_ctrl_delay(self.actions)
+        mjlab_actions = self._mjlab_action_input(self.applied_actions)
         _, _, terminated, time_outs, _ = self.mjlab_env.step(mjlab_actions)
+        if self._direct_depth_runtime is not None:
+            self._direct_depth_runtime.append_from_sensor(self.mjlab_env.scene.sensors["g1_direct_depth"])
         self._refresh_state()
         boundary_resets = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         if self.terrain_enabled:
             self._update_terrain_tile_transitions()
             boundary_resets = self._check_terrain_boundary()
-        reward, aux = self._compute_reward(pre_body_vel=pre_body_vel)
+        if self._creation_config.evaluation_fast_path:
+            reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+            aux = {}
+        else:
+            reward, aux = self._compute_reward(pre_body_vel=pre_body_vel)
         # The global map boundary is an artificial domain limit, not a behavior failure.
         # Truncate and reset before an invalid off-terrain transition can continue.
         time_outs = torch.logical_or(time_outs.bool(), boundary_resets)
@@ -2027,6 +2292,7 @@ class HumanoidVerseMjlabCore:
                     "terrain.reset.ground_probe_clearance must be positive and below max_ray_distance"
                 )
             ground_probe_z = self.env_origins[env_ids, 2] + generic_probe_clearance
+        reference_root_rot = None
         if target_states is not None:
             self._terrain_motion_offsets[env_ids] = 0.0
             root_xyzw = target_states["root_states"][env_ids].to(self.device, dtype=torch.float32)
@@ -2042,14 +2308,22 @@ class HumanoidVerseMjlabCore:
             root_rot = motion_res["root_rot"]
             root_vel = motion_res["root_vel"]
             root_ang_vel = motion_res["root_ang_vel"]
+            reference_root_rot = root_rot
+            yaw_rotation = _random_yaw_quaternions(len(env_ids), self.device)
+            root_rot, root_vel, root_ang_vel = rotate_root_motion_by_yaw(
+                root_rot,
+                root_vel,
+                root_ang_vel,
+                yaw_rotation,
+            )
             desired_clearance = root_pos[:, 2] - self.env_origins[env_ids, 2]
             reset_region_ids = torch.full(
                 (len(env_ids),), RESET_REGION_ID["flat_center"], device=self.device, dtype=torch.long
             )
             elevated_reset_mask = torch.zeros(len(env_ids), device=self.device, dtype=torch.bool)
             if self.terrain_enabled:
-                # LaFAN world XY is arbitrary. Move the sampled frame to a
-                # terrain-aware reset region without rotating the motion.
+                # LaFAN world XY is arbitrary. Move the yaw-randomized sampled
+                # frame to a terrain-aware reset region.
                 terrain_shift_xy = self.env_origins[env_ids, :2] - root_pos[:, :2]
                 self._terrain_motion_offsets[env_ids] = 0.0
                 self._terrain_motion_offsets[env_ids, :2] = terrain_shift_xy
@@ -2132,6 +2406,13 @@ class HumanoidVerseMjlabCore:
                 self.config.noise_to_initial_level
             )
 
+        if reference_root_rot is None:
+            self.motion_heading_offsets[env_ids] = 0.0
+        else:
+            self.motion_heading_offsets[env_ids] = wrap_to_pi(
+                _yaw_from_xyzw(root_xyzw[:, 3:7]) - _yaw_from_xyzw(reference_root_rot)
+            )
+
         if self.terrain_enabled:
             root_xyzw, ground_z = self._place_reset_on_local_ground(
                 env_ids,
@@ -2150,14 +2431,30 @@ class HumanoidVerseMjlabCore:
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, joint_ids=self._joint_ids, env_ids=env_ids)
         self.mjlab_env.scene.write_data_to_sim()
         self.mjlab_env.sim.forward()
+        sensors_invalidated = False
         if self.terrain_enabled and self.terrain_observation_mode == "raycast":
             # The ground probe above populated Sensor.data's per-step cache.
             # Invalidate it before sensing the final reset pose.
             self.mjlab_env.scene.sensors["terrain_height"].update(0.0)
+            sensors_invalidated = True
+        if self._direct_depth_runtime is not None:
+            depth_sensor = self.mjlab_env.scene.sensors["g1_direct_depth"]
+            randomize_installation = getattr(depth_sensor, "randomize_installation", None)
+            if randomize_installation is not None:
+                randomize_installation(env_ids)
+            depth_sensor.update(0.0)
+            sensors_invalidated = True
+        if sensors_invalidated:
             self.mjlab_env.sim.sense()
+        if self._direct_depth_runtime is not None:
+            self._direct_depth_runtime.reset_from_sensor(
+                self.mjlab_env.scene.sensors["g1_direct_depth"], env_ids
+            )
         self.mjlab_env._manual_reset_pending[env_ids] = False
         self.actions[env_ids] = 0.0
         self.last_actions[env_ids] = 0.0
+        self.applied_actions[env_ids] = 0.0
+        self._sample_ctrl_delay(env_ids)
         self.history_handler.reset(env_ids)
         self._refresh_state()
         if self.terrain_enabled and self._terrain_patch_size is not None:
@@ -2223,7 +2520,12 @@ class HumanoidVerseMjlabVectorEnv(VectorEnv):
         example_observation, _ = self.reset()
         observation_spaces = {}
         for key, value in example_observation.items():
-            observation_spaces[key] = gymnasium.spaces.Box(low=-float("inf"), high=float("inf"), shape=value.shape, dtype=value.dtype)
+            if np.issubdtype(value.dtype, np.unsignedinteger):
+                bounds = np.iinfo(value.dtype)
+                low, high = bounds.min, bounds.max
+            else:
+                low, high = -float("inf"), float("inf")
+            observation_spaces[key] = gymnasium.spaces.Box(low=low, high=high, shape=value.shape, dtype=value.dtype)
         self.observation_space = gymnasium.spaces.Dict(observation_spaces)
 
     @property
@@ -2324,8 +2626,9 @@ class HumanoidVerseMjlabConfig(BaseConfig):
     root_height_obs: bool = False
     auto_reset: bool = False
     seed: int | None = None
+    evaluation_fast_path: bool = False
 
-    def build(self, num_envs: int = 1) -> tp.Tuple[HumanoidVerseMjlabVectorEnv, tp.Any]:
+    def build(self, num_envs: int = 1, *, motion_lib=None) -> tp.Tuple[HumanoidVerseMjlabVectorEnv, tp.Any]:
         assert num_envs >= 1
         from mjlab.envs import ManagerBasedRlEnv
 
@@ -2350,7 +2653,12 @@ class HumanoidVerseMjlabConfig(BaseConfig):
             robot_training=self.robot_training,
         )
         mjlab_env = ManagerBasedRlEnv(mjlab_cfg, device=self.device)
-        core = HumanoidVerseMjlabCore(hv_config, mjlab_env, creation_config=self)
+        core = HumanoidVerseMjlabCore(
+            hv_config,
+            mjlab_env,
+            creation_config=self,
+            motion_lib_override=motion_lib,
+        )
         env = HumanoidVerseMjlabVectorEnv(
             core,
             include_last_action=self.include_last_action,

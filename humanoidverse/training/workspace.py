@@ -5,14 +5,20 @@
 
 import os
 
-from humanoidverse.agents.evaluations.humanoidverse_mjlab import (
-    HumanoidVerseMjlabTrackingEvaluation,
-    HumanoidVerseMjlabTrackingEvaluationConfig,
+from humanoidverse.agents.envs.expert_motion_loader import (
+    expert_buffer_cache_spec,
+    find_compatible_expert_buffer_cache,
+    load_expert_buffer_cache,
+    load_expert_trajectories_from_motion_lib,
+    save_expert_buffer_cache,
 )
-from humanoidverse.agents.envs.expert_motion_loader import load_expert_trajectories_from_motion_lib
 from humanoidverse.agents.envs.humanoidverse_mjlab import (
     RESET_REGION_NAMES,
     HumanoidVerseMjlabConfig,
+)
+from humanoidverse.agents.evaluations.humanoidverse_mjlab import (
+    HumanoidVerseMjlabTrackingEvaluation,
+    HumanoidVerseMjlabTrackingEvaluationConfig,
 )
 
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -24,10 +30,8 @@ torch.set_float32_matmul_precision("high")
 import json
 import time
 import typing as tp
-import warnings
 from pathlib import Path
 from typing import Dict, List
-from torch.utils._pytree import tree_map
 
 import gymnasium
 import numpy as np
@@ -35,8 +39,8 @@ import pydantic
 import torch  # better to use scoped import if we use processes
 import wandb
 from packaging.version import Version
+from torch.utils._pytree import tree_map
 from tqdm import tqdm
-
 
 from humanoidverse.agents.base import BaseConfig
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
@@ -46,7 +50,15 @@ from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentConfig
 from humanoidverse.agents.misc.loggers import CSVLogger
 from humanoidverse.agents.tldr_dist_aux.agent import TldrDistAuxAgentConfig
 from humanoidverse.agents.utils import EveryNStepsChecker, get_local_workdir, set_seed_everywhere
-from humanoidverse.distributed import average_metrics, barrier, broadcast_agent_state, broadcast_object, module_sync_report, sync_floating_buffers
+from humanoidverse.distributed import (
+    barrier,
+    broadcast_agent_state,
+    broadcast_object,
+    module_sync_report,
+    reduce_metric_accumulators,
+    sync_floating_buffers,
+)
+from humanoidverse.perception.instinct_direct_depth import RP1DirectDepthConfig
 
 TRAIN_LOG_FILENAME = "train_log.txt"
 REWARD_EVAL_LOG_FILENAME = "reward_eval_log.csv"
@@ -84,7 +96,48 @@ def make_flat_terrain_priority_eval_config(env_cfg: HumanoidVerseMjlabConfig) ->
         overrides.append("terrain.terrain_priv.mode=flat_zero")
     else:
         overrides[observation_mode_index] = "terrain.terrain_priv.mode=flat_zero"
-    return env_cfg.model_copy(update={"hydra_overrides": overrides})
+    return env_cfg.model_copy(update={"hydra_overrides": overrides, "evaluation_fast_path": True})
+
+
+def distributed_motion_ids(num_motions: int, rank: int, world_size: int) -> list[int]:
+    if num_motions <= 0:
+        raise ValueError("num_motions must be positive")
+    if world_size <= 0:
+        raise ValueError("world_size must be positive")
+    if not 0 <= rank < world_size:
+        raise ValueError(f"rank must be in [0, {world_size}), got {rank}")
+    return list(range(rank, num_motions, world_size))
+
+
+def merge_distributed_evaluation_results(
+    shards: list[dict[str, dict[str, dict[str, tp.Any]]]],
+) -> dict[str, dict[str, dict[str, tp.Any]]]:
+    merged: dict[str, dict[str, dict[str, tp.Any]]] = {}
+    motion_owners: dict[str, dict[int, int]] = {}
+    for rank, shard in enumerate(shards):
+        for evaluation_name, metrics in shard.items():
+            evaluation_metrics = merged.setdefault(evaluation_name, {})
+            evaluation_motion_owners = motion_owners.setdefault(evaluation_name, {})
+            for metric_name, metric in metrics.items():
+                if metric_name in evaluation_metrics:
+                    raise RuntimeError(
+                        f"Distributed evaluation produced duplicate metric {metric_name!r} "
+                        f"for {evaluation_name!r}"
+                    )
+                motion_id = int(metric["motion_id"])
+                if motion_id in evaluation_motion_owners:
+                    raise RuntimeError(
+                        f"Distributed evaluation produced motion_id={motion_id} on both "
+                        f"rank {evaluation_motion_owners[motion_id]} and rank {rank}"
+                    )
+                evaluation_metrics[metric_name] = metric
+                evaluation_motion_owners[motion_id] = rank
+
+    for evaluation_name, metrics in merged.items():
+        merged[evaluation_name] = dict(
+            sorted(metrics.items(), key=lambda item: (int(item[1]["motion_id"]), item[0]))
+        )
+    return merged
 
 
 def _trajectory_output_keys(agent: Agent) -> list[str]:
@@ -139,6 +192,10 @@ class TrainConfig(BaseConfig):
     update_agent_every: int = 500
     # Note: this is in env steps (multiples of online_parallel_envs)
     num_seed_steps: int = 50_000
+    # Recovery-only policy rollout steps per rank. When resuming a checkpoint
+    # without replay buffers, collect with the loaded policy and defer all
+    # optimizer updates until this many new local env steps are available.
+    resume_replay_warmup_steps: int = 0
     num_agent_updates: int = 50
     # Note: this is in env steps (multiples of online_parallel_envs)
     checkpoint_every_steps: int = 5_000_000
@@ -165,6 +222,9 @@ class TrainConfig(BaseConfig):
     # misc
     load_expert_data_from_motion_lib: bool = True
     buffer_device: str = "cpu"
+    cache_expert_buffer: bool = True
+    rebuild_expert_buffer_cache: bool = False
+    expert_buffer_cache_root: str | None = None
     # Default to True; otherwise you will spam the console with tqdm
     disable_tqdm: bool = True
     log_torso_contact_forces: bool = True
@@ -176,6 +236,8 @@ class TrainConfig(BaseConfig):
     distributed_sync: bool = True
     distributed_global_steps: bool = True
     distributed_average_metrics: bool = True
+    distributed_gradient_sync: tp.Literal["manual", "ddp"] = "manual"
+    ddp_bucket_cap_mb: float = 25.0
     fail_on_nonfinite: bool = True
     nonfinite_check_model_every_updates: int = 0
     nonfinite_check_rollout_every_local_steps: int = 0
@@ -193,6 +255,10 @@ class TrainConfig(BaseConfig):
         # TODO prioritization needs tracking eval to work, but this is bit hacky to check for it
         if self.load_expert_data_from_motion_lib and not isinstance(self.env, HumanoidVerseMjlabConfig):
             raise ValueError("Loading expert data from motion library is only supported for HumanoidVerseMjlabConfig")
+        if self.ddp_bucket_cap_mb <= 0:
+            raise ValueError("ddp_bucket_cap_mb must be positive")
+        if self.distributed_gradient_sync == "ddp" and not self.distributed_sync:
+            raise ValueError("distributed_gradient_sync='ddp' requires distributed_sync=True")
 
         if self.prioritization:
             has_prioritization_eval = False
@@ -482,6 +548,21 @@ class Workspace:
         self._optimizer_steps = int(self._checkpoint_status["optimizer_steps"])
         if self.cfg.distributed_sync:
             broadcast_agent_state(self.agent, src=0)
+            if self.cfg.distributed_gradient_sync == "ddp":
+                enable_ddp = getattr(self.agent, "enable_distributed_gradient_sync", None)
+                if not callable(enable_ddp):
+                    raise RuntimeError(
+                        f"Agent {type(self.agent).__name__} does not support DDP gradient overlap; "
+                        "use distributed_gradient_sync='manual'."
+                    )
+                enable_ddp(bucket_cap_mb=self.cfg.ddp_bucket_cap_mb)
+                if self._write_shared_artifacts:
+                    print(
+                        "[INFO] Gradient synchronization: "
+                        f"mode=ddp bucket_cap_mb={self.cfg.ddp_bucket_cap_mb:g} "
+                        "gradient_as_bucket_view=True",
+                        flush=True,
+                    )
         self.agent._model.train()
 
         if isinstance(self.cfg.evaluations, list):
@@ -530,20 +611,32 @@ class Workspace:
     def _uses_fixed_flat_priority_eval(self, evaluation_name: str) -> bool:
         return (
             self.cfg.prioritization
-            and self.cfg.tags.get("agent") == "fb_terrain"
+            and self.cfg.tags.get("agent") in {"fb_terrain", "fb_depth"}
             and evaluation_name == self.priorization_eval_name
         )
 
     def _get_priority_eval_env(self):
         if self._priority_eval_env is None:
-            if self.cfg.distributed_sync and self.distributed_rank != 0:
-                raise RuntimeError("fixed-flat priority evaluation environment may only be built on rank 0")
             eval_cfg = make_flat_terrain_priority_eval_config(self.cfg.env)
-            self._priority_eval_env, _ = eval_cfg.build(num_envs=self.cfg.online_parallel_envs)
+            eval_num_envs = int(self.cfg.online_parallel_envs)
+            local_motion_count = None
+            if self.cfg.distributed_sync and self.distributed_world_size > 1:
+                num_motions = int(self.train_env._env._motion_lib._num_unique_motions)
+                local_motion_count = len(
+                    distributed_motion_ids(num_motions, self.distributed_rank, self.distributed_world_size)
+                )
+                eval_num_envs = max(1, local_motion_count)
+            self._priority_eval_env, _ = eval_cfg.build(
+                num_envs=eval_num_envs,
+                motion_lib=self.train_env._env._motion_lib,
+            )
+            tags = getattr(self.cfg, "tags", {})
             print(
-                "[INFO] Built persistent fb_terrain priority evaluation environment: "
-                f"terrain=plane, observation=flat_zero, sensor=off, "
-                f"num_envs={self.cfg.online_parallel_envs}, rank={self.distributed_rank}",
+                "[INFO] Built persistent terrain-aware priority evaluation environment: "
+                f"terrain=plane, terrain_height_observation=flat_zero, "
+                f"direct_depth_sensor={'on' if tags.get('agent') == 'fb_depth' else 'off'}, "
+                f"num_envs={eval_num_envs}, rank={self.distributed_rank}, "
+                f"motion_shard_size={local_motion_count}",
                 flush=True,
             )
         return self._priority_eval_env
@@ -675,15 +768,113 @@ class Workspace:
             metrics["reset/lie_down"] = int(lie_down_resets.item())
             return metrics
 
-    def train_online(self) -> None:
-        if self.training_with_expert_data:
-            if self.cfg.load_expert_data_from_motion_lib:
-                expert_buffer = load_expert_trajectories_from_motion_lib(self.train_env._env, self.cfg.agent, device=self.cfg.buffer_device)
-            else:
-                raise RuntimeError(
-                    "This MJLab-focused build only supports expert data loaded from the motion library. "
-                    "Set load_expert_data_from_motion_lib=True."
+    def _load_expert_buffer(self):
+        if not self.training_with_expert_data:
+            return None
+        if not self.cfg.load_expert_data_from_motion_lib:
+            raise RuntimeError(
+                "This MJLab-focused build only supports expert data loaded from the motion library. "
+                "Set load_expert_data_from_motion_lib=True."
+            )
+
+        started_at = time.time()
+        if self.cfg.cache_expert_buffer:
+            expert_buffer = self._load_or_build_cached_expert_buffer()
+        else:
+            if self._write_shared_artifacts:
+                print(f"[INFO] Building expert motion buffer on {self.cfg.buffer_device}; cache disabled", flush=True)
+            expert_buffer = load_expert_trajectories_from_motion_lib(
+                self.train_env._env,
+                self.cfg.agent,
+                device=self.cfg.buffer_device,
+            )
+        if self._write_shared_artifacts:
+            print(
+                f"[INFO] Expert motion buffer ready: motions={len(expert_buffer.motion_ids)} "
+                f"frames={len(expert_buffer)} elapsed={time.time() - started_at:.1f}s",
+                flush=True,
+            )
+        return expert_buffer
+
+    def _load_or_build_cached_expert_buffer(self):
+        cache_dir, fingerprint, metadata = expert_buffer_cache_spec(
+            self.train_env._env,
+            self.cfg.agent,
+            cache_root=self.cfg.expert_buffer_cache_root,
+        )
+        existing = None
+        if not self.cfg.rebuild_expert_buffer_cache:
+            existing = find_compatible_expert_buffer_cache(cache_dir, fingerprint, metadata)
+        if existing is not None:
+            cache_dir, fingerprint = existing
+
+        expert_buffer = None
+        rank0_builder = self.distributed_rank == 0 or not self.cfg.distributed_sync
+        if rank0_builder:
+            if existing is not None:
+                if self._write_shared_artifacts:
+                    print(f"[INFO] Loading cached expert buffer: {cache_dir}", flush=True)
+                try:
+                    expert_buffer = load_expert_buffer_cache(
+                        self.train_env._env,
+                        cache_dir,
+                        fingerprint,
+                        device=self.cfg.buffer_device,
+                    )
+                except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+                    if self._write_shared_artifacts:
+                        print(f"[WARN] Expert buffer cache could not be loaded; rebuilding: {exc}", flush=True)
+                    existing = None
+            if existing is None:
+                if self._write_shared_artifacts:
+                    print(
+                        f"[INFO] Rank 0 building expert buffer and full-FK cache: {cache_dir}",
+                        flush=True,
+                    )
+                expert_buffer = load_expert_trajectories_from_motion_lib(
+                    self.train_env._env,
+                    self.cfg.agent,
+                    device=self.cfg.buffer_device,
                 )
+                save_expert_buffer_cache(
+                    self.train_env._env,
+                    expert_buffer,
+                    cache_dir,
+                    fingerprint,
+                    metadata,
+                )
+                if self._write_shared_artifacts:
+                    cache_bytes = sum(
+                        path.stat().st_size
+                        for path in (cache_dir / "expert_buffer.pt", cache_dir / "motion_lib_fk.pt")
+                    )
+                    print(
+                        f"[INFO] Expert/full-FK cache atomically published: {cache_dir} "
+                        f"size={cache_bytes / (1024**3):.2f} GiB",
+                        flush=True,
+                    )
+
+        if self.cfg.distributed_sync:
+            selection = broadcast_object(
+                {"cache_dir": str(cache_dir), "fingerprint": fingerprint},
+                src=0,
+            )
+            cache_dir = Path(selection["cache_dir"])
+            fingerprint = str(selection["fingerprint"])
+            barrier()
+        if self.distributed_rank != 0 and self.cfg.distributed_sync:
+            expert_buffer = load_expert_buffer_cache(
+                self.train_env._env,
+                cache_dir,
+                fingerprint,
+                device=self.cfg.buffer_device,
+            )
+        if expert_buffer is None:
+            raise RuntimeError("Expert buffer cache initialization did not produce a buffer")
+        return expert_buffer
+
+    def train_online(self) -> None:
+        expert_buffer = self._load_expert_buffer()
         print("Creating the training environment")
 
         if isinstance(self.cfg.env, HumanoidVerseMjlabConfig):
@@ -696,6 +887,7 @@ class Workspace:
         replay_buffer = {}
         checkpoint_dir = self.work_dir / CHECKPOINT_DIR_NAME
         checkpoint_buffer_dir = self._checkpoint_buffer_path(checkpoint_dir)
+        loaded_checkpoint_buffer = checkpoint_buffer_dir.exists()
         if checkpoint_buffer_dir.exists():
             print("Loading checkpointed buffer")
             if self.cfg.use_trajectory_buffer:
@@ -705,6 +897,7 @@ class Workspace:
             print(f"Loaded buffer of size {len(replay_buffer['train'])}")
         else:
             if self.cfg.use_trajectory_buffer:
+                compact_depth_history = self.cfg.tags.get("agent") == "fb_depth"
                 replay_buffer["train"] = TrajectoryDictBufferMultiDim(
                     capacity=self.cfg.buffer_size // self.cfg.online_parallel_envs,  # make sure to divide by num_envs
                     device=self.cfg.buffer_device,
@@ -712,13 +905,40 @@ class Workspace:
                     end_key="truncated",
                     output_key_t=_trajectory_output_keys(self.cfg.agent),
                     output_key_tp1=["observation", "terminated"],
+                    compact_depth_history=compact_depth_history,
+                    depth_history_offsets=RP1DirectDepthConfig().sampled_ages,
                 )
+                if compact_depth_history:
+                    print(
+                        "[INFO] Compact RP1 depth replay enabled: storing one uint8 frame per transition "
+                        "and reconstructing the 8-frame history when sampling",
+                        flush=True,
+                    )
             else:
                 replay_buffer["train"] = DictBuffer(capacity=self.cfg.buffer_size, device=self.cfg.buffer_device)
         if self.training_with_expert_data:
             replay_buffer["expert_slicer"] = expert_buffer
 
         print("Starting training")
+        replay_updates_start_local_time = self._checkpoint_local_time
+        if self.cfg.resume_replay_warmup_steps > 0:
+            if self._checkpoint_local_time <= 0:
+                raise RuntimeError("resume_replay_warmup_steps requires a nonzero checkpoint step")
+            if loaded_checkpoint_buffer:
+                raise RuntimeError(
+                    "resume_replay_warmup_steps was requested but a checkpoint replay buffer exists; "
+                    "remove or quarantine the buffer explicitly before recovery"
+                )
+            replay_updates_start_local_time += int(self.cfg.resume_replay_warmup_steps)
+            print(
+                "[RECOVERY] Rebuilding replay with the loaded policy and no optimizer updates: "
+                f"start_local_time={self._checkpoint_local_time}, "
+                f"warmup_local_steps={self.cfg.resume_replay_warmup_steps}, "
+                f"updates_start_local_time={replay_updates_start_local_time}, "
+                f"updates_start_global_time={replay_updates_start_local_time * _global_step_scale(self.cfg)}",
+                flush=True,
+            )
+        replay_warmup_complete_logged = self.cfg.resume_replay_warmup_steps <= 0
         global_step_scale = _global_step_scale(self.cfg)
         local_step_increment = self.cfg.online_parallel_envs
         global_step_increment = local_step_increment * global_step_scale
@@ -769,6 +989,12 @@ class Workspace:
             evaluation = self.evaluations[evaluation_name]
             eval_instances.append(isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation))
         uses_humanoidverse_eval = True if any(eval_instances) else False
+        distributed_tracking_eval = (
+            self.cfg.distributed_sync
+            and self.distributed_world_size > 1
+            and bool(eval_instances)
+            and all(eval_instances)
+        )
 
         for local_time in range(self._checkpoint_local_time, max_local_time + local_step_increment, local_step_increment):
             global_time = local_time * global_step_scale
@@ -785,9 +1011,23 @@ class Workspace:
                 self.evaluate and global_time == self._checkpoint_global_time
             ):
                 eval_metrics = {}
-                run_eval_on_this_rank = (not self.cfg.distributed_sync) or self.distributed_rank == 0
+                run_eval_on_this_rank = (
+                    distributed_tracking_eval
+                    or (not self.cfg.distributed_sync)
+                    or self.distributed_rank == 0
+                )
                 if run_eval_on_this_rank:
-                    eval_metrics = self.eval(global_time, replay_buffer=replay_buffer)
+                    eval_metrics = self.eval(
+                        global_time,
+                        replay_buffer=replay_buffer,
+                        distributed_shard=distributed_tracking_eval,
+                        write_outputs=not distributed_tracking_eval,
+                    )
+                if distributed_tracking_eval:
+                    if self.distributed_rank == 0:
+                        self._record_evaluation_results(global_time, eval_metrics)
+                    else:
+                        eval_metrics = {}
                 if self.cfg.distributed_sync:
                     barrier()
                 eval_time_checker.update_last_step(global_time)
@@ -810,7 +1050,13 @@ class Workspace:
                 if self.cfg.prioritization:
                     # priorities
                     priority_payload = None
-                    if run_eval_on_this_rank:
+                    # Distributed tracking evaluation runs on every rank, but the
+                    # merged metrics only exist on rank 0. Compute priorities once
+                    # there, then broadcast the unchanged payload to all ranks.
+                    compute_priority_on_this_rank = (
+                        not self.cfg.distributed_sync or self.distributed_rank == 0
+                    )
+                    if compute_priority_on_this_rank:
                         assert len(eval_metrics[self.priorization_eval_name]) == len(replay_buffer["expert_slicer"].motion_ids), (
                             "Mismatch in number of motions returned by the eval"
                         )
@@ -824,6 +1070,16 @@ class Workspace:
                             motions_id.append(metr["motion_id"])
                             priorities.append(metr["emd"])
                             idxs.append(index_in_buffer[metr["motion_id"]])
+                        non_finite_priorities = [
+                            (motion_id, priority)
+                            for motion_id, priority in zip(motions_id, priorities)
+                            if not np.isfinite(priority)
+                        ]
+                        if non_finite_priorities:
+                            raise RuntimeError(
+                                "Priority evaluation produced non-finite EMD values; refusing to update "
+                                f"motion sampling weights: {non_finite_priorities[:8]}"
+                            )
                         priorities = (
                             torch.clamp(
                                 torch.tensor(priorities, dtype=torch.float32, device=self.agent.device),
@@ -848,6 +1104,7 @@ class Workspace:
                             raise ValueError(f"Unsupported prioritization mode {self.cfg.prioritization_mode}")
                         priority_payload = {
                             "priorities": priorities.detach().cpu(),
+                            "motion_ids": motions_id,
                             "idxs": idxs,
                             "file_name": name_in_buffer,
                         }
@@ -856,11 +1113,12 @@ class Workspace:
                     if priority_payload is None:
                         raise RuntimeError("Prioritization requires evaluation metrics, but no priority payload was produced.")
                     priorities = priority_payload["priorities"].to(self.agent.device)
+                    motions_id = priority_payload["motion_ids"]
                     idxs = priority_payload["idxs"]
                     name_in_buffer = priority_payload["file_name"]
 
                     train_env._env._motion_lib.update_sampling_weight_by_id(
-                        priorities=list(priorities), motions_id=idxs, file_name=name_in_buffer
+                        priorities=list(priorities), motions_id=motions_id, file_name=name_in_buffer
                     )
 
                     replay_buffer["expert_slicer"].update_priorities(
@@ -1042,7 +1300,21 @@ class Workspace:
                 )
             replay_buffer["train"].extend(data)
 
-            if len(replay_buffer["train"]) > 0 and local_time > self.cfg.num_seed_steps and update_agent_time_checker.check(local_time):
+            replay_warmup_complete = local_time >= replay_updates_start_local_time
+            if replay_warmup_complete and not replay_warmup_complete_logged:
+                print(
+                    "[RECOVERY] Replay warmup complete; optimizer updates are enabled at "
+                    f"local_time={local_time} global_time={global_time} "
+                    f"replay_time_steps={len(replay_buffer['train'])}",
+                    flush=True,
+                )
+                replay_warmup_complete_logged = True
+            if (
+                replay_warmup_complete
+                and len(replay_buffer["train"]) > 0
+                and local_time > self.cfg.num_seed_steps
+                and update_agent_time_checker.check(local_time)
+            ):
                 update_agent_time_checker.update_last_step(local_time)
                 for _ in range(self.cfg.num_agent_updates):
                     metrics = self.agent.update(replay_buffer, local_time)
@@ -1069,8 +1341,6 @@ class Workspace:
                             )
                     if self.cfg.distributed_sync:
                         sync_floating_buffers(self.agent._model)
-                    if self.cfg.distributed_sync and self.cfg.distributed_average_metrics:
-                        metrics = average_metrics(metrics)
                     total_metrics, metric_update_counts = _accumulate_metrics(
                         total_metrics,
                         metric_update_counts,
@@ -1080,9 +1350,16 @@ class Workspace:
             if log_time_checker.check(global_time) and total_metrics is not None:
                 log_time_checker.update_last_step(global_time)
                 m_dict = {}
-                for k in sorted(list(total_metrics.keys())):
-                    tmp = total_metrics[k] / metric_update_counts[k]
-                    m_dict[k] = np.round(tmp.mean().item(), 6)
+                reduced_metrics = (
+                    reduce_metric_accumulators(total_metrics, metric_update_counts)
+                    if self.cfg.distributed_average_metrics
+                    else {
+                        key: (total_metrics[key] / metric_update_counts[key]).mean()
+                        for key in sorted(total_metrics)
+                    }
+                )
+                for key, value in reduced_metrics.items():
+                    m_dict[key] = np.round(value.item(), 6)
                 m_dict.update(self._get_torso_contact_force_metrics(train_env))
                 m_dict.update(self._get_terrain_metrics(train_env))
                 m_dict["duration [minutes]"] = (time.time() - start_time) / 60
@@ -1097,6 +1374,8 @@ class Workspace:
                     m_dict["distributed/effective_replay_capacity"] = _effective_replay_capacity(self.cfg)
                     m_dict["distributed/trajectory_steps_per_rank"] = _trajectory_steps_per_rank(self.cfg)
                     m_dict["distributed/compile"] = int(bool(self.cfg.agent.compile))
+                    m_dict["distributed/gradient_sync"] = self.cfg.distributed_gradient_sync
+                    m_dict["distributed/ddp_bucket_cap_mb"] = float(self.cfg.ddp_bucket_cap_mb)
                 m_dict["distributed/local_env_steps"] = int(local_time)
                 m_dict["distributed/global_env_steps"] = int(global_time)
                 m_dict["distributed/optimizer_steps"] = int(self._optimizer_steps)
@@ -1123,14 +1402,18 @@ class Workspace:
             info = new_info
         train_env.close()
 
-    def eval(self, t, replay_buffer):
-        print(f"Starting evaluation at time {t}")
+    def eval(self, t, replay_buffer, *, distributed_shard: bool = False, write_outputs: bool = True):
+        print(
+            f"Starting evaluation at time {t} on rank {self.distributed_rank}"
+            + (" (distributed motion shard)" if distributed_shard else ""),
+            flush=True,
+        )
         evaluation_results = {}
 
         # This will contain the results, mapping evaluation.cfg.name --> dict of metrics
         evaluation_results = {}
         for evaluation_name in self.evaluations.keys():
-            logger = self.eval_loggers.get(evaluation_name)
+            logger = self.eval_loggers.get(evaluation_name) if write_outputs else None
             evaluation = self.evaluations[evaluation_name]
 
             # NOTE we have this inside the loop so that the agent is not moved to cpu if we don't evaluate
@@ -1145,7 +1428,15 @@ class Workspace:
                     else self.train_env
                 )
                 evaluation_metrics, wandb_dict = evaluation.run(
-                    timestep=t, agent_or_model=self.agent, replay_buffer=replay_buffer, logger=logger, env=eval_env
+                    timestep=t,
+                    agent_or_model=self.agent,
+                    replay_buffer=replay_buffer,
+                    logger=logger,
+                    env=eval_env,
+                    write_outputs=write_outputs,
+                    motion_lib=self.train_env._env._motion_lib,
+                    expert_buffer=replay_buffer.get("expert_slicer"),
+                    distributed=distributed_shard,
                 )
             else:
                 evaluation_metrics, wandb_dict = evaluation.run(
@@ -1155,7 +1446,7 @@ class Workspace:
                     logger=logger,
                 )
             # For wandb dict, put it on wandb
-            if self._write_shared_artifacts and self.cfg.use_wandb and wandb_dict is not None:
+            if write_outputs and self._write_shared_artifacts and self.cfg.use_wandb and wandb_dict is not None:
                 wandb.log(
                     {f"eval/{evaluation_name}/{k}": v for k, v in wandb_dict.items()},
                     step=t,
@@ -1171,6 +1462,20 @@ class Workspace:
         self.agent._model.train()
 
         return evaluation_results
+
+    def _record_evaluation_results(self, timestep: int, evaluation_results: dict[str, dict[str, dict]]) -> None:
+        if not self._write_shared_artifacts:
+            return
+        for evaluation_name, metrics in evaluation_results.items():
+            evaluation = self.evaluations[evaluation_name]
+            logger = self.eval_loggers.get(evaluation_name)
+            evaluation.record_results(metrics, timestep=timestep, logger=logger)
+            if self.cfg.use_wandb:
+                wandb_dict = evaluation.summarize(metrics)
+                wandb.log(
+                    {f"eval/{evaluation_name}/{key}": value for key, value in wandb_dict.items()},
+                    step=timestep,
+                )
 
     def save(self, *, local_time: int, global_time: int, optimizer_steps: int, replay_buffer: Dict[str, tp.Any]) -> None:
         checkpoint_dir = self.work_dir / CHECKPOINT_DIR_NAME

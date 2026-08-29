@@ -5,7 +5,9 @@ can be validated before a robot is allowed to move. Required arrays are:
 ``depth`` (T,H,W), ``torso_pos_w`` (T,3), ``torso_quat_w_xyzw`` (T,4),
 ``pelvis_pos_w`` (T,3), ``pelvis_heading_quat_w_xyzw`` (T,4), and
 ``timestamp_s`` (T,). ``depth`` is native uint16 unless ``--depth-in-meters``
-is supplied. All poses use world-frame xyzw quaternions.
+is supplied. All poses use world-frame xyzw quaternions. Live-logger NPZs also
+contain ``runtime_frame_index``; replay applies it so a 60 Hz raw stream is
+consumed on the timestamp-derived 50 Hz runtime cadence.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from humanoidverse.perception.depth_augmentation import MetricDepthAugmentationConfig
 from humanoidverse.perception.realsense_depth_runtime import RealSenseCalibration, RealSenseDepthRuntime
 
 
@@ -37,6 +40,7 @@ def run_replay(
     perception_checkpoint: Path | None,
     device: str,
     depth_in_meters: bool,
+    depth_augmentation: MetricDepthAugmentationConfig | None = None,
 ) -> dict[str, object]:
     calibration = RealSenseCalibration.from_json(calibration_path)
     with np.load(input_path, allow_pickle=False) as payload:
@@ -48,6 +52,41 @@ def run_replay(
         timestamps = _array(payload, "timestamp_s", ()).float().reshape(-1)
         proprio = torch.from_numpy(np.asarray(payload["proprio"])).float() if "proprio" in payload else None
         reset = torch.from_numpy(np.asarray(payload["reset_mask"]).astype(bool)) if "reset_mask" in payload else None
+        source_frame_count = int(depth.shape[0])
+        runtime_selection: dict[str, object] = {"mode": "all_input_frames"}
+        if "runtime_frame_index" in payload:
+            raw_indices = np.asarray(payload["runtime_frame_index"])
+            if raw_indices.ndim != 1 or raw_indices.size == 0 or not np.issubdtype(raw_indices.dtype, np.integer):
+                raise ValueError("runtime_frame_index must be a non-empty integer vector")
+            indices = raw_indices.astype(np.int64, copy=False)
+            if np.any(indices < 0) or np.any(indices >= source_frame_count) or np.any(np.diff(indices) < 0):
+                raise ValueError("runtime_frame_index must be ordered and within the raw frame range")
+            index = torch.from_numpy(indices)
+            # PyTorch has no CPU advanced-index kernel for uint16. Int32 keeps
+            # native Z16 values exact and depth_to_meters handles it normally.
+            depth = depth.to(torch.int32)[index]
+            torso_pos = torso_pos[index]
+            torso_quat = torso_quat[index]
+            pelvis_pos = pelvis_pos[index]
+            heading_quat = heading_quat[index]
+            timestamps = timestamps[index]
+            if proprio is not None:
+                proprio = proprio[index]
+            if reset is not None:
+                reset = reset[index]
+                if reset.numel() > 1:
+                    reset[1:] &= index[1:] != index[:-1]
+            runtime_selection = {
+                "mode": "npz_runtime_frame_index",
+                "runtime_ticks": int(indices.size),
+                "unique_camera_frames": int(np.unique(indices).size),
+            }
+            if "runtime_camera_age_s" in payload:
+                camera_age_s = np.asarray(payload["runtime_camera_age_s"], dtype=np.float64)
+                if camera_age_s.shape != indices.shape or not np.isfinite(camera_age_s).all():
+                    raise ValueError("runtime_camera_age_s must be finite and match runtime_frame_index")
+                runtime_selection["camera_age_p95_ms"] = float(np.percentile(camera_age_s, 95) * 1.0e3)
+                runtime_selection["camera_age_max_ms"] = float(np.max(camera_age_s) * 1.0e3)
 
     frame_count = int(depth.shape[0])
     if any(int(value.shape[0]) != frame_count for value in (torso_pos, torso_quat, pelvis_pos, heading_quat, timestamps)):
@@ -64,6 +103,7 @@ def run_replay(
         perception_checkpoint=perception_checkpoint,
         device=device,
         batch_size=1,
+        depth_augmentation=depth_augmentation,
     )
     partial_maps: list[np.ndarray] = []
     visible_masks: list[np.ndarray] = []
@@ -98,7 +138,9 @@ def run_replay(
         "output_npz": str(output_path.with_suffix(".npz").resolve()),
         "calibration": str(calibration_path.expanduser().resolve()),
         "perception_checkpoint": None if perception_checkpoint is None else str(perception_checkpoint.expanduser().resolve()),
+        "source_frames": source_frame_count,
         "frames": frame_count,
+        "runtime_frame_selection": runtime_selection,
         "native_depth_shape": list(depth.shape[1:]),
         "target_depth_shape": [calibration.target_height, calibration.target_width],
         "full_fov_downsample": True,
@@ -126,11 +168,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--perception-checkpoint", type=Path, default=None)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--depth-in-meters", action="store_true")
+    parser.add_argument("--depth-gate-max", type=float, default=None)
+    parser.add_argument("--blur-probability", type=float, default=0.0)
+    parser.add_argument("--blur-sigma-min-px", type=float, default=0.0)
+    parser.add_argument("--blur-sigma-max-px", type=float, default=0.0)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    depth_augmentation = None
+    if args.depth_gate_max is not None or args.blur_probability > 0.0 or args.blur_sigma_max_px > 0.0:
+        depth_augmentation = MetricDepthAugmentationConfig(
+            max_depth_m=2.0 if args.depth_gate_max is None else args.depth_gate_max,
+            blur_probability=args.blur_probability,
+            sigma_min_px=args.blur_sigma_min_px,
+            sigma_max_px=args.blur_sigma_max_px,
+        )
     summary = run_replay(
         input_path=args.input_npz,
         output_path=args.output,
@@ -138,6 +192,7 @@ def main() -> None:
         perception_checkpoint=args.perception_checkpoint,
         device=args.device,
         depth_in_meters=args.depth_in_meters,
+        depth_augmentation=depth_augmentation,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
 

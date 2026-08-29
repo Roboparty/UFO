@@ -39,7 +39,16 @@ TERRAIN_NAMES = ("flat", "slope", "stairs_up", "stairs_down", "rough", "platform
 STAIR_TERRAIN_NAMES = frozenset(("stairs", "stairs_up", "stairs_down"))
 
 
-def build_depth_evaluation_env(env_config, *, num_envs: int, camera: DepthCameraConfig):
+def build_depth_evaluation_env(
+    env_config,
+    *,
+    num_envs: int,
+    camera: DepthCameraConfig,
+    extra_cameras: tuple[
+        tuple[DepthCameraConfig, bool, tuple[str, ...], tuple[str, ...], int], ...
+    ] = (),
+    camera_exclude_parent_body: bool = True,
+):
     """Build the normal UFO env with one evaluation-only raycast camera."""
     from mjlab.envs import ManagerBasedRlEnv
 
@@ -66,8 +75,29 @@ def build_depth_evaluation_env(env_config, *, num_envs: int, camera: DepthCamera
     camera_sensor_cfg = make_depth_camera_sensor_cfg(
         camera,
         torso_body_name=camera.mount_body,
+        exclude_parent_body=camera_exclude_parent_body,
     )
-    mjlab_cfg.scene.sensors = tuple(mjlab_cfg.scene.sensors) + (camera_sensor_cfg,)
+    extra_sensor_cfgs = tuple(
+        make_depth_camera_sensor_cfg(
+            extra_camera,
+            torso_body_name=extra_camera.mount_body,
+            exclude_parent_body=exclude_parent_body,
+            excluded_geom_name_suffixes=excluded_geom_names,
+            excluded_mesh_name_suffixes=excluded_mesh_names,
+            excluded_geom_group=excluded_geom_group,
+        )
+        for (
+            extra_camera,
+            exclude_parent_body,
+            excluded_geom_names,
+            excluded_mesh_names,
+            excluded_geom_group,
+        ) in extra_cameras
+    )
+    names = [camera.name, *(extra_camera.name for extra_camera, *_rest in extra_cameras)]
+    if len(names) != len(set(names)):
+        raise ValueError(f"depth camera sensor names must be unique: {names}")
+    mjlab_cfg.scene.sensors = tuple(mjlab_cfg.scene.sensors) + (camera_sensor_cfg, *extra_sensor_cfgs)
     mjlab_env = ManagerBasedRlEnv(mjlab_cfg, device=env_config.device)
     core = HumanoidVerseMjlabCore(hv_config, mjlab_env, creation_config=env_config)
     wrapped = HumanoidVerseMjlabVectorEnv(
@@ -81,9 +111,11 @@ def build_depth_evaluation_env(env_config, *, num_envs: int, camera: DepthCamera
     return wrapped, {"unresolved_conf": unresolved, "mjlab_env_cfg": mjlab_cfg}
 
 
-def synchronize_depth_and_gt(core, camera_name: str) -> None:
+def synchronize_depth_and_gt(core, camera_name: str | tuple[str, ...]) -> None:
     """Force both side-channel and teacher rays to observe one simulator state."""
-    core.mjlab_env.scene.sensors[camera_name].update(0.0)
+    camera_names = (camera_name,) if isinstance(camera_name, str) else tuple(camera_name)
+    for name in camera_names:
+        core.mjlab_env.scene.sensors[name].update(0.0)
     if "terrain_height" in core.mjlab_env.scene.sensors:
         core.mjlab_env.scene.sensors["terrain_height"].update(0.0)
     core.mjlab_env.sim.sense()
@@ -98,17 +130,17 @@ def terrain_names_for_envs(core) -> list[str]:
 
 
 def elevated_platform_probe_xy(core) -> tuple[float, float]:
-    """Return a deterministic point inside the first raised platforms band."""
+    """Return a deterministic point inside a generated raised platform."""
     if core._terrain_patch_size is None or "platforms" not in core.terrain_component_names:
         raise RuntimeError("elevated-platform probe requires the connected platforms terrain")
     row = core._terrain_grid_rows // 2
     column = core.terrain_component_names.index("platforms")
-    patch_x, patch_y = (float(value) for value in core._terrain_patch_size.tolist())
-    center_x = (row + 0.5 - core._terrain_grid_rows / 2.0) * patch_x
-    center_y = (column + 0.5 - core._terrain_grid_cols / 2.0) * patch_y
-    platforms_cfg = core.config.terrain.platforms
-    raised_band_center = 0.5 * (float(platforms_cfg.center_width) + float(platforms_cfg.band_width))
-    return center_x + raised_band_center, center_y
+    terrain = core.mjlab_env.scene["terrain"]
+    patches = terrain.flat_patches.get("platform_spawn")
+    if patches is None:
+        raise RuntimeError("elevated-platform probe requires platform_spawn flat patches")
+    point = patches[row, column, 0, :2].detach().cpu().tolist()
+    return float(point[0]), float(point[1])
 
 
 def validate_geometry_sample(

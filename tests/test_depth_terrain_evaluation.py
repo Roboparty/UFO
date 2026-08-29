@@ -70,6 +70,8 @@ class DepthTerrainEvaluationTest(unittest.TestCase):
         self.assertGreater(result["policy_steps_per_second"], 0.0)
 
     def test_elevated_platform_probe_is_inside_first_raised_band(self):
+        patches = torch.zeros((10, 6, 12, 3))
+        patches[5, 5, 0, :2] = torch.tensor([8.2, 34.4])
         core = SimpleNamespace(
             _terrain_patch_size=torch.tensor([14.0, 14.0]),
             _terrain_grid_rows=10,
@@ -82,13 +84,15 @@ class DepthTerrainEvaluationTest(unittest.TestCase):
                 "rough",
                 "platforms",
             ),
-            config=SimpleNamespace(terrain=SimpleNamespace(platforms=SimpleNamespace(center_width=1.5, band_width=0.8))),
+            mjlab_env=SimpleNamespace(
+                scene={"terrain": SimpleNamespace(flat_patches={"platform_spawn": patches})}
+            ),
         )
 
         x, y = elevated_platform_probe_xy(core)
 
-        self.assertAlmostEqual(x, 8.15)
-        self.assertAlmostEqual(y, 35.0)
+        self.assertLess(abs(x - 8.2), 2.0e-6)
+        self.assertLess(abs(y - 34.4), 2.0e-6)
 
     def test_stair_edge_marks_both_sides_of_discontinuity(self):
         gt = torch.ones((1, 21, 13))

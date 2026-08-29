@@ -238,7 +238,7 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
         return max_local_self_obs, ref_dict
 
 
-_SUPPORTED_POLICY_ACTOR_INPUT_KEYS = ("state", "last_action", "history_actor")
+_SUPPORTED_POLICY_ACTOR_INPUT_KEYS = ("state", "last_action", "history_actor", "terrain_actor")
 
 
 def _as_actor_input_keys(raw_keys: Any) -> list[str]:

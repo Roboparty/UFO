@@ -1,4 +1,5 @@
 import json
+import os
 import pickle
 import typing as tp
 from pathlib import Path
@@ -11,10 +12,37 @@ from .base import BaseConfig
 from .envs.utils.gym_spaces import json_to_space, space_to_json
 
 
+def _cpu_state_dict_for_safetensors(
+    model: "BaseModel",
+) -> tp.Dict[str, torch.Tensor]:
+    """Snapshot model tensors on CPU before safetensors serialization.
+
+    Directly handing a large CUDA state dict to safetensors can leave rank 0
+    blocked in serialization while the other distributed ranks are already
+    waiting in the checkpoint barrier. Make the CUDA synchronization explicit
+    in PyTorch. Copy every tensor independently so recurrent flattened-storage
+    views such as GRU parameters are safe for safetensors as well.
+    """
+    return {
+        name: tensor.detach().to(device="cpu", copy=True).contiguous()
+        for name, tensor in model.state_dict().items()
+    }
+
+
 def save_model(path: str, model: "BaseModel", build_kwargs: tp.Optional[tp.Dict[str, tp.Any]] = None) -> None:
     output_folder = Path(path)
     output_folder.mkdir(exist_ok=True)
-    safetensors.torch.save_model(model, output_folder / "model.safetensors")
+    model_path = output_folder / "model.safetensors"
+    model_tmp_path = output_folder / f".model.safetensors.tmp-{os.getpid()}"
+    cpu_state_dict = _cpu_state_dict_for_safetensors(model)
+    try:
+        safetensors.torch.save_file(
+            cpu_state_dict,
+            model_tmp_path,
+        )
+        os.replace(model_tmp_path, model_path)
+    finally:
+        model_tmp_path.unlink(missing_ok=True)
 
     json_dump = model.cfg.model_dump()
 
@@ -51,7 +79,10 @@ def load_model(
             "No build_kwargs provided, and init_kwargs.pkl not found. Please provide build_kwargs that are passed to config_class.build functionm."
         )
 
-    loaded_config = config_class(**loaded_config)
+    # JSON cannot preserve tuple containers. Coerce them only while loading
+    # a serialized model config (for example direct_depth.proprio_keys), while
+    # keeping normal in-memory config construction unchanged.
+    loaded_config = config_class.model_validate(loaded_config, strict=False)
     loaded_model = loaded_config.build(**build_kwargs)
 
     # Matteo: this is a workaround to handle loading of model with and without target networks

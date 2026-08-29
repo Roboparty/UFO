@@ -537,6 +537,136 @@ class ResidualActor(nn.Module):
         return dist
 
 
+class DirectDepthActorArchiConfig(ActorArchiConfig):
+    """Residual PBFM actor with UFO-rp1's temporal depth encoder."""
+
+    name: tp.Literal["direct_depth"] = "direct_depth"
+    model: tp.Literal["residual"] = "residual"
+    depth_key: str = "depth_image"
+    depth_channels: int = 8
+    depth_height: int = 36
+    depth_width: int = 32
+    depth_latent_dim: int = 256
+
+    def build(self, obs_space, z_dim, action_dim) -> "DirectDepthActor":
+        return DirectDepthActor(obs_space, z_dim, action_dim, self)
+
+
+class _FixedAdaptiveAvgPool2x4(nn.Module):
+    """ONNX-friendly adaptive 2x4 pooling for the fixed RP1 feature map."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 4 or x.shape[-2:] != (9, 8):
+            raise ValueError(f"Expected feature map [B, C, 9, 8], got {tuple(x.shape)}")
+        rows = torch.stack((x[..., 0:5, :].mean(dim=-2), x[..., 4:9, :].mean(dim=-2)), dim=-2)
+        return torch.stack(
+            (
+                rows[..., 0:2].mean(dim=-1),
+                rows[..., 2:4].mean(dim=-1),
+                rows[..., 4:6].mean(dim=-1),
+                rows[..., 6:8].mean(dim=-1),
+            ),
+            dim=-1,
+        )
+
+
+class DepthEncoder(nn.Module):
+    """Encode each uint8 depth frame with a shared CNN, then aggregate by GRU."""
+
+    def __init__(self, *, channels: int = 8, height: int = 36, width: int = 32, latent_dim: int = 256):
+        super().__init__()
+        self.channels = int(channels)
+        self.height = int(height)
+        self.width = int(width)
+        self.frame_cnn = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            _FixedAdaptiveAvgPool2x4(),
+        )
+        self.frame_projection = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * 2 * 4, 128),
+            nn.ReLU(),
+        )
+        self.gru = nn.GRU(input_size=128, hidden_size=latent_dim, batch_first=True)
+
+    def forward(self, depth: torch.Tensor) -> torch.Tensor:
+        expected = (self.channels, self.height, self.width)
+        if depth.ndim != 4 or tuple(depth.shape[1:]) != expected:
+            raise ValueError(f"Expected depth [B, {self.channels}, {self.height}, {self.width}], got {tuple(depth.shape)}")
+        if depth.dtype == torch.uint8:
+            depth = depth.float().div_(255.0)
+        elif depth.is_floating_point():
+            depth = depth.float()
+        else:
+            raise TypeError(f"Expected uint8 depth or normalized floating-point depth, got {depth.dtype}")
+        batch, frames = depth.shape[:2]
+        frame_features = self.frame_projection(
+            self.frame_cnn(depth.reshape(batch * frames, 1, self.height, self.width))
+        )
+        sequence = frame_features.reshape(batch, frames, -1)
+        _, hidden = self.gru(sequence)
+        return hidden[-1]
+
+
+class DirectDepthActor(nn.Module):
+    """Fuse proprioception and the RP1 temporal depth latent."""
+
+    def __init__(self, obs_space, z_dim, action_dim, cfg: DirectDepthActorArchiConfig) -> None:
+        super().__init__()
+        if not isinstance(obs_space, gymnasium.spaces.Dict) or cfg.depth_key not in obs_space.spaces:
+            raise ValueError(f"DirectDepthActor requires observation key {cfg.depth_key!r}")
+        depth_shape = tuple(obs_space[cfg.depth_key].shape)
+        expected_depth_shape = (cfg.depth_channels, cfg.depth_height, cfg.depth_width)
+        if depth_shape != expected_depth_shape:
+            raise ValueError(f"{cfg.depth_key} shape must be {expected_depth_shape}, got {depth_shape}")
+        self.cfg = cfg
+        self.input_filter = cfg.input_filter.build(obs_space)
+        filtered_space = self.input_filter.output_space
+        if not isinstance(filtered_space, gymnasium.spaces.Box) or len(filtered_space.shape) != 1:
+            raise ValueError("DirectDepthActor state input filter must produce a 1D Box")
+        obs_dim = filtered_space.shape[0]
+        self.depth_encoder = DepthEncoder(
+            channels=cfg.depth_channels,
+            height=cfg.depth_height,
+            width=cfg.depth_width,
+            latent_dim=cfg.depth_latent_dim,
+        )
+        self.embed_z = residual_embedding(obs_dim + z_dim, cfg.hidden_dim, cfg.embedding_layers)
+        self.embed_s = residual_embedding(obs_dim, cfg.hidden_dim, cfg.embedding_layers)
+        self.fusion = Block(cfg.hidden_dim + cfg.depth_latent_dim, cfg.hidden_dim, True)
+        self.policy = nn.Sequential(
+            *[ResidualBlock(cfg.hidden_dim) for _ in range(cfg.hidden_layers)],
+            Block(cfg.hidden_dim, action_dim, False),
+        )
+
+    def forward_from_depth_latent(
+        self,
+        obs: torch.Tensor | dict[str, torch.Tensor],
+        z: torch.Tensor,
+        std: float,
+        depth_latent: torch.Tensor,
+    ):
+        if not isinstance(obs, dict):
+            raise TypeError("DirectDepthActor requires dictionary observations")
+        state = self.input_filter(obs)
+        z_embedding = self.embed_z(torch.cat([state, z], dim=-1))
+        state_embedding = self.embed_s(state)
+        fused = self.fusion(torch.cat([state_embedding, z_embedding, depth_latent], dim=-1))
+        mu = torch.tanh(self.policy(fused))
+        return TruncatedNormal(mu, torch.ones_like(mu) * std)
+
+    def forward(self, obs: dict[str, torch.Tensor], z: torch.Tensor, std: float):
+        if not isinstance(obs, dict):
+            raise TypeError("DirectDepthActor requires dictionary observations")
+        depth_latent = self.depth_encoder(obs[self.cfg.depth_key])
+        return self.forward_from_depth_latent(obs, z, std, depth_latent)
+
+
 ##########################
 # Helper modules
 ##########################

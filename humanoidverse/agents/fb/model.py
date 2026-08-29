@@ -26,6 +26,7 @@ from ..nn_filter_models import (
 from ..nn_models import (
     ActorArchiConfig,
     BackwardArchiConfig,
+    DirectDepthActorArchiConfig,
     ForwardArchiConfig,
     ResidualActorArchiConfig,
     SimpleActorArchiConfig,
@@ -46,6 +47,7 @@ class FBModelArchiConfig(BaseConfig):
         | ActorFilterArchiConfig
         | SimpleActorArchiConfig
         | ResidualActorArchiConfig
+        | DirectDepthActorArchiConfig
         | SimpleActorFilterArchiConfig
         | ResidualActorFilterArchiConfig
     ) = pydantic.Field(SimpleActorArchiConfig(), discriminator="name")

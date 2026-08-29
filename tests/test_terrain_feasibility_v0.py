@@ -65,7 +65,12 @@ from humanoidverse.terrains.terrain_observation import (
     reference_ray_index,
 )
 from humanoidverse.tracking_inference import _center_target_states_on_terrain
-from humanoidverse.training.workspace import Workspace, make_flat_terrain_priority_eval_config
+from humanoidverse.training.workspace import (
+    Workspace,
+    distributed_motion_ids,
+    make_flat_terrain_priority_eval_config,
+    merge_distributed_evaluation_results,
+)
 
 
 def _preset(name: str):
@@ -339,7 +344,7 @@ def test_stairs_transition_positions_fit_one_cycle_in_14m_tile() -> None:
 
 def test_course_completion_radius_is_inside_final_flat() -> None:
     course = OmegaConf.load("humanoidverse/config/terrain/terrain_ufo_v0.yaml").terrain.course
-    assert math.isclose(_course_completion_radius(course), 12.4)
+    assert math.isclose(_course_completion_radius(course), 11.1)
 
 
 def test_prompt_latent_round_trip_preserves_checksum(tmp_path) -> None:
@@ -752,10 +757,37 @@ class TerrainPhysicsObservationTest(unittest.TestCase):
                 atol=1e-5,
             )
 
-    def test_platform_bands_alternate_between_raised_and_flat(self) -> None:
-        offsets = [0.0, 1.0, 1.8, 2.6, 3.4]
-        values = _physics_heights_at_offsets("platforms", offsets)
-        np.testing.assert_allclose(values, [0.0, 0.15, 0.0, 0.15, 0.0], atol=1e-5)
+    def test_scattered_platforms_are_irregular_safe_and_bounded(self) -> None:
+        config = OmegaConf.load("humanoidverse/config/terrain/terrain_ufo_v0.yaml").terrain
+        config = OmegaConf.merge(config, {"num_rows": 1, "difficulty_range": [1.0, 1.0]})
+        generator = TerrainGenerator(make_ufo_v0_generator_cfg("platforms", config))
+        spec = mujoco.MjSpec()
+        generator.compile(spec)
+        model = spec.compile()
+        terrain_ids = np.flatnonzero(model.geom_group == 5)
+        box_sizes = model.geom_size[terrain_ids, :2] * 2.0
+        box_tops = model.geom_pos[terrain_ids, 2] + model.geom_size[terrain_ids, 2]
+
+        self.assertGreater(len(terrain_ids), 12)
+        self.assertGreater(len(np.unique(np.round(box_sizes[1:, 0], 3))), 2)
+        self.assertGreater(len(np.unique(np.round(box_sizes[1:, 1], 3))), 2)
+        self.assertGreater(len(np.unique(np.round(box_tops[1:], 3))), 3)
+        self.assertGreaterEqual(float(box_sizes[1:].min()), float(config.platforms.min_platform_width) - 1.0e-6)
+        raised_coverage = float(np.prod(box_sizes[1:], axis=1).sum()) / (
+            float(config.patch_size[0] - 2 * config.platforms.border_width)
+            * float(config.patch_size[1] - 2 * config.platforms.border_width)
+        )
+        self.assertGreaterEqual(raised_coverage, 0.55)
+        self.assertLessEqual(raised_coverage, 0.70)
+        self.assertGreaterEqual(float(box_tops.min()), -1.0e-6)
+        self.assertLessEqual(float(box_tops.max()), 0.18 + 1.0e-6)
+        center_samples = [(0.0, 0.0), (0.59, 0.0), (-0.59, 0.0), (0.0, 0.59), (0.0, -0.59)]
+        np.testing.assert_allclose(_physics_heights_at_xy_offsets("platforms", center_samples), 0.0, atol=1e-6)
+
+        patches = generator.flat_patches["platform_spawn"][0, 0]
+        self.assertEqual(patches.shape, (int(config.platforms.num_spawn_patches), 3))
+        self.assertTrue(np.all(patches[:, 2] > 0.0))
+        self.assertTrue(np.all(patches[:, 2] <= float(config.platforms.hard_height_range[1])))
 
     def test_mixed_tile_collision_seams_are_level_and_gap_free(self) -> None:
         epsilon = 0.05
@@ -822,22 +854,28 @@ class TerrainPhysicsObservationTest(unittest.TestCase):
         torch.testing.assert_close(normals[0, 1], torch.tensor([0.0, 0.0, 1.0]))
 
     def test_traversal_course_has_ordered_ten_step_up_down_profile(self) -> None:
-        offsets = [0.0, 1.9, 4.7, 5.1, 5.9, 8.05, 8.7, 9.6]
+        offsets = [0.0, 0.6, 3.4, 3.8, 4.4, 6.8, 7.4, 9.0]
         values = _physics_heights_at_offsets("course", offsets)
         self.assertAlmostEqual(values[0], 0.0, places=5)
         self.assertAlmostEqual(values[1], 0.12, places=4)
         self.assertAlmostEqual(values[2], 1.20, places=4)
         self.assertAlmostEqual(values[3], 1.20, places=4)
-        self.assertAlmostEqual(values[4], 0.96, places=4)
+        self.assertAlmostEqual(values[4], 1.08, places=4)
         self.assertAlmostEqual(values[5], 0.12, places=4)
         self.assertAlmostEqual(values[6], 0.0, places=4)
         self.assertAlmostEqual(values[7], 0.0, places=4)
 
-    def test_traversal_course_stair_edges_are_straight_across_y(self) -> None:
-        for x_offset in (1.9, 4.7, 5.9, 8.0):
+    def test_traversal_course_is_four_way_square_symmetric(self) -> None:
+        for radius in (0.6, 2.0, 3.4, 3.8, 4.4, 6.8):
             heights = _physics_heights_at_xy_offsets(
                 "course",
-                [(x_offset, y_offset) for y_offset in (-3.0, -1.0, 0.0, 1.0, 3.0)],
+                [
+                    (radius, 0.0),
+                    (-radius, 0.0),
+                    (0.0, radius),
+                    (0.0, -radius),
+                    (radius, radius),
+                ],
             )
             np.testing.assert_allclose(heights, heights[0], atol=1e-5)
 
@@ -947,6 +985,7 @@ class TerrainNetworkRoutingTest(unittest.TestCase):
                 "penalty_body_impact",
                 "penalty_slippage",
                 "penalty_ankle_roll",
+                "heading_reference_alignment",
             ],
         )
         self.assertEqual(
@@ -957,6 +996,7 @@ class TerrainNetworkRoutingTest(unittest.TestCase):
                 "penalty_body_impact": -1.0,
                 "penalty_slippage": -1.0,
                 "penalty_ankle_roll": -1.0,
+                "heading_reference_alignment": 2.0,
             },
         )
 
@@ -1115,6 +1155,48 @@ class TerrainPriorityEvaluationTest(unittest.TestCase):
         built_env.close.assert_called_once_with()
         self.assertIsNone(workspace._priority_eval_env)
 
+    def test_distributed_priority_eval_env_matches_local_motion_shard_size(self) -> None:
+        workspace = Workspace.__new__(Workspace)
+        workspace.cfg = SimpleNamespace(
+            env=self._mixed_env_cfg(),
+            online_parallel_envs=1024,
+            distributed_sync=True,
+            tags={"agent": "fb_terrain"},
+        )
+        workspace.distributed_rank = 3
+        workspace.distributed_world_size = 8
+        workspace.train_env = SimpleNamespace(
+            _env=SimpleNamespace(_motion_lib=SimpleNamespace(_num_unique_motions=862))
+        )
+        workspace._priority_eval_env = None
+        built_env = Mock()
+        with patch.object(HumanoidVerseMjlabConfig, "build", return_value=(built_env, {})) as build:
+            self.assertIs(workspace._get_priority_eval_env(), built_env)
+        build.assert_called_once_with(num_envs=108)
+
+    def test_distributed_motion_shards_cover_every_motion_once(self) -> None:
+        shards = [distributed_motion_ids(862, rank, 8) for rank in range(8)]
+        self.assertEqual([len(shard) for shard in shards], [108, 108, 108, 108, 108, 108, 107, 107])
+        flattened = [motion_id for shard in shards for motion_id in shard]
+        self.assertEqual(sorted(flattened), list(range(862)))
+        self.assertEqual(len(flattened), len(set(flattened)))
+
+    def test_distributed_eval_merge_sorts_by_motion_id(self) -> None:
+        shards = [
+            {"priority": {"m2": {"motion_id": 2, "emd": 0.8}, "m0": {"motion_id": 0, "emd": 0.6}}},
+            {"priority": {"m3": {"motion_id": 3, "emd": 0.9}, "m1": {"motion_id": 1, "emd": 0.7}}},
+        ]
+        merged = merge_distributed_evaluation_results(shards)
+        self.assertEqual(list(merged["priority"]), ["m0", "m1", "m2", "m3"])
+
+    def test_distributed_eval_merge_rejects_duplicate_motion(self) -> None:
+        shards = [
+            {"priority": {"m0": {"motion_id": 0, "emd": 0.6}}},
+            {"priority": {"other_name": {"motion_id": 0, "emd": 0.7}}},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "motion_id=0"):
+            merge_distributed_evaluation_results(shards)
+
     def test_only_priority_evaluator_uses_fixed_flat_env(self) -> None:
         workspace = Workspace.__new__(Workspace)
         workspace.cfg = SimpleNamespace(prioritization=True, tags={"agent": "fb_terrain"})
@@ -1133,6 +1215,8 @@ class TerrainPriorityEvaluationTest(unittest.TestCase):
             use_wandb=False,
         )
         workspace.priorization_eval_name = "priority"
+        workspace.distributed_rank = 0
+        workspace.distributed_world_size = 1
         workspace.train_env = Mock(name="mixed_train_env")
         priority_env = Mock(name="flat_priority_env")
         workspace._get_priority_eval_env = Mock(return_value=priority_env)

@@ -15,7 +15,6 @@ from torch.utils._pytree import tree_map
 from ..base import BaseConfig
 from ..fb_cpr.agent import FBcprAgent, FBcprAgentTrainConfig
 from ..nn_models import _soft_update_params, eval_mode
-from ...distributed import average_gradients
 from .model import FBcprAuxModelConfig
 
 
@@ -178,7 +177,7 @@ class FBcprAuxAgent(FBcprAgent):
             )
         )
         metrics.update(
-            self.update_actor(
+            self._run_actor_update(
                 obs=train_obs,
                 action=train_action,
                 z=train_z,
@@ -232,13 +231,15 @@ class FBcprAuxAgent(FBcprAgent):
                 expanded_targets = target_Q.expand(num_parallel, -1, -1)
 
             # compute critic loss
-            Qs = self._model._aux_critic(obs, z, action)  # num_parallel x batch x (1 or n_bins)
+            aux_critic_stage = self._training_stage("aux_critic")
+            aux_critic = self._model._aux_critic if aux_critic_stage is None else aux_critic_stage
+            Qs = aux_critic(obs, z, action)  # num_parallel x batch x (1 or n_bins)
             aux_critic_loss = 0.5 * num_parallel * F.mse_loss(Qs, expanded_targets)
 
         # optimize critic
         self.aux_critic_optimizer.zero_grad(set_to_none=True)
         aux_critic_loss.backward()
-        average_gradients(self._model._aux_critic.parameters())
+        self._sync_gradients_if_manual(self._model._aux_critic.parameters())
         self.aux_critic_optimizer.step()
 
         with torch.no_grad():
@@ -259,8 +260,10 @@ class FBcprAuxAgent(FBcprAgent):
         z: torch.Tensor,
         clip_grad_norm: float | None,
     ) -> Dict[str, torch.Tensor]:
+        actor_stage = self._training_stage("actor")
+        actor = self._model._actor if actor_stage is None else actor_stage
         with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
-            dist = self._model._actor(obs, z, self._model.cfg.actor_std)
+            dist = actor(obs, z, self._model.cfg.actor_std)
             action = dist.sample(clip=self.cfg.train.stddev_clip)
 
             # compute discriminator reward loss
@@ -286,7 +289,7 @@ class FBcprAuxAgent(FBcprAgent):
         # optimize actor
         self.actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
-        average_gradients(self._model._actor.parameters())
+        self._sync_gradients_if_manual(self._model._actor.parameters())
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm)
         self.actor_optimizer.step()

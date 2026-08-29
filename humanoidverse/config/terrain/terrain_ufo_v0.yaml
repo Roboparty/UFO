@@ -6,7 +6,7 @@ defaults:
 terrain:
   # Selected only by --agent fb_terrain; original FB remains unchanged.
   enabled: true
-  terrain_type: mixed  # flat, slope, stairs_up, stairs_down, rough, platforms, mixed
+  terrain_type: mixed  # flat, slope, stairs_up, stairs_down, rough, platforms, mixed, rp1_simple
   seed: 0
   # Fixed six-family distribution. Ascent and descent are separate so their
   # state coverage and success can be measured independently.
@@ -70,10 +70,19 @@ terrain:
     border_width: 0.5
 
   platforms:
-    height_range: [0.05, 0.15]
-    band_width: 0.8
-    center_width: 1.5
+    # Irregular non-overlapping rectangular blocks. Difficulty interpolates
+    # from 5-10 cm platforms to 10-18 cm platforms.
+    easy_height_range: [0.05, 0.10]
+    hard_height_range: [0.10, 0.18]
+    center_width: 1.2
     border_width: 0.5
+    # A resolvable flat corridor separates every pair of raised blocks.
+    gap_width: 0.25
+    min_platform_width: 0.60
+    raised_fraction: 1.0
+    row_count_range: [5, 7]
+    column_count_range: [4, 7]
+    num_spawn_patches: 12
 
   rough:
     amplitude_range: [0.03, 0.05]
@@ -83,11 +92,11 @@ terrain:
     lacunarity: 2.0
     border_width: 0.5
 
-  # Inference-only straight +x traversal: flat -> 10 stairs up -> short top ->
+  # Inference-only square-symmetric traversal: flat -> 10 stairs up -> short top ->
   # 10 stairs down -> flat. It is not part of the mixed training distribution.
   course:
     patch_size: [22.0, 22.0]
-    flat_run: 1.80
+    flat_run: 0.50
     step_height: 0.12
     step_depth: 0.30
     num_steps: 10
@@ -111,6 +120,38 @@ terrain:
     y_max: 0.6
     resolution: 0.1
     debug_vis: false
+
+  # Opt-in RP1-compatible direct-depth policy. `fb_depth` enables this block;
+  # the existing `fb_terrain` map policy leaves it disabled.
+  direct_depth:
+    enabled: false
+    reference_project: UFO-rp1
+    reference_commit: 8c364e1001734097aac58e5033a1b5076925d3c5
+    baseline_type: rp1_direct_depth
+    # Store one uint8 frame per transition and reconstruct the 8-frame stack.
+    replay_storage_dtype: compact_uint8
+    width: 64
+    height: 36
+    horizontal_fov_deg: 89.51
+    vertical_fov_deg: 58.29
+    min_distance: 0.0
+    max_distance: 2.5
+    crop: [0, 0, 16, 16]
+    history_length: 37
+    history_skip_frames: 5
+    num_output_frames: 8
+    delayed_frame_ranges: [0, 1]
+    # Fixed per episode, independently sampled for each simulated camera.
+    # Matches UFO-RP1's depth-camera installation randomization.
+    position_error: 0.05
+    angle_error_deg: 5.0
+    # RP1 terrain uses geom group 0; legacy UFO terrain rays use group 5.
+    include_geom_groups: [0, 2, 5]
+    exclude_parent_body: false
+    debug_terrain_reference: false
+    mount_body: torso_link
+    mount_pos: [0.0487988662332928, 0.01, 0.4378029937970051]
+    camera_frame_quat_wxyz: [0.9135367613482678, 0.004363309284746571, 0.4067366430758002, 0.0]
 
   coverage:
     policy_margin: 2.0

@@ -140,6 +140,15 @@ class DepthTerrainAdapter(nn.Module):
         points_world = self._rotate_xyzw(camera_optical_quat_w, flat_camera) + camera_pos_w[:, None, :]
         points_heading = self._rotate_inverse_xyzw(pelvis_heading_quat_w, points_world - pelvis_pos_w[:, None, :])
 
+        return self._rasterize_heading_points(depth_z, points_heading)
+
+    def _rasterize_heading_points(
+        self,
+        depth_z: torch.Tensor,
+        points_heading: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Rasterize gravity-aligned, pelvis-origin points into the fixed grid."""
+        batch_size = depth_z.shape[0]
         ix = torch.floor((points_heading[..., 0] - self.X_MIN) / self.RESOLUTION + 0.5).long()
         iy = torch.floor((points_heading[..., 1] - self.Y_MIN) / self.RESOLUTION + 0.5).long()
         valid = (
@@ -152,7 +161,7 @@ class DepthTerrainAdapter(nn.Module):
             & (iy < self.GRID_SHAPE[1])
         )
         indices = (ix * self.GRID_SHAPE[1] + iy).clamp(0, self.GRID_DIMENSION - 1)
-        clearances = (pelvis_pos_w[:, None, 2] - points_world[..., 2]).clamp_min(0.0)
+        clearances = (-points_heading[..., 2]).clamp_min(0.0)
         clearances = torch.where(valid, clearances, torch.full_like(clearances, float("inf")))
 
         projected = torch.full(

@@ -14,7 +14,6 @@ from humanoidverse.agents.nn_models import (
 )
 from humanoidverse.agents.normalizers import BatchNormNormalizerConfig, ObsNormalizerConfig
 
-
 TRAIN_RUNTIME = {
     "log_every_updates": 384000,
     "update_agent_every": 1024,
@@ -58,6 +57,7 @@ def build_fb_agent(
             "penalty_feet_ori",
             "penalty_ankle_roll",
             "penalty_slippage",
+            "heading_reference_alignment",
         ]
         aux_rewards_scaling = {
             "penalty_action_rate": -0.1,
@@ -66,6 +66,7 @@ def build_fb_agent(
             "limits_dof_pos": -10.0,
             "penalty_slippage": -2.0,
             "penalty_undesired_contact": -1.0,
+            "heading_reference_alignment": 2.0,
             "penalty_torques": 0.0,
             "limits_torque": 0.0,
         }

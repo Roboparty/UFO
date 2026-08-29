@@ -15,7 +15,6 @@ from ..base import BaseConfig
 from ..fb.agent import FBAgent, FBAgentTrainConfig
 from ..nn_models import _soft_update_params, eval_mode
 from ..pytree_utils import tree_get_batch_size
-from ...distributed import average_gradients
 from .model import FBcprModel, FBcprModelConfig
 
 
@@ -242,7 +241,7 @@ class FBcprAgent(FBAgent):
             )
         )
         metrics.update(
-            self.update_actor(
+            self._run_actor_update(
                 obs=train_obs,
                 action=train_action,
                 z=train_z,
@@ -340,8 +339,13 @@ class FBcprAgent(FBAgent):
         grad_penalty: float | None,
     ) -> Dict[str, torch.Tensor]:
         with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
-            expert_logits = self._model._discriminator.compute_logits(obs=expert_obs, z=expert_z)
-            unlabeled_logits = self._model._discriminator.compute_logits(obs=train_obs, z=train_z)
+            discriminator_stage = self._training_stage("discriminator")
+            if discriminator_stage is None:
+                expert_logits = self._model._discriminator.compute_logits(obs=expert_obs, z=expert_z)
+                unlabeled_logits = self._model._discriminator.compute_logits(obs=train_obs, z=train_z)
+            else:
+                expert_logits = discriminator_stage(obs=expert_obs, z=expert_z)
+                unlabeled_logits = discriminator_stage(obs=train_obs, z=train_z)
             # these are equivalent to binary cross entropy
             expert_loss = -torch.nn.functional.logsigmoid(expert_logits)
             unlabeled_loss = torch.nn.functional.softplus(unlabeled_logits)
@@ -353,7 +357,7 @@ class FBcprAgent(FBAgent):
 
         self.discriminator_optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        average_gradients(self._model._discriminator.parameters())
+        self._sync_gradients_if_manual(self._model._discriminator.parameters())
         self.discriminator_optimizer.step()
 
         with torch.no_grad():
@@ -387,13 +391,15 @@ class FBcprAgent(FBAgent):
                 expanded_targets = target_Q.expand(num_parallel, -1, -1)
 
             # compute critic loss
-            Qs = self._model._critic(obs, z, action)  # num_parallel x batch x (1 or n_bins)
+            critic_stage = self._training_stage("critic")
+            critic = self._model._critic if critic_stage is None else critic_stage
+            Qs = critic(obs, z, action)  # num_parallel x batch x (1 or n_bins)
             critic_loss = 0.5 * num_parallel * F.mse_loss(Qs, expanded_targets)
 
         # optimize critic
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
-        average_gradients(self._model._critic.parameters())
+        self._sync_gradients_if_manual(self._model._critic.parameters())
         self.critic_optimizer.step()
 
         with torch.no_grad():
@@ -414,8 +420,10 @@ class FBcprAgent(FBAgent):
         z: torch.Tensor,
         clip_grad_norm: float | None,
     ) -> Dict[str, torch.Tensor]:
+        actor_stage = self._training_stage("actor")
+        actor = self._model._actor if actor_stage is None else actor_stage
         with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
-            dist = self._model._actor(obs, z, self._model.cfg.actor_std)
+            dist = actor(obs, z, self._model.cfg.actor_std)
             action = dist.sample(clip=self.cfg.train.stddev_clip)
 
             # compute discriminator reward loss
@@ -433,7 +441,7 @@ class FBcprAgent(FBAgent):
         # optimize actor
         self.actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
-        average_gradients(self._model._actor.parameters())
+        self._sync_gradients_if_manual(self._model._actor.parameters())
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm)
         self.actor_optimizer.step()

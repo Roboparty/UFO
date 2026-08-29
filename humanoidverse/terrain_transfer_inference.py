@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ import mediapy as media
 import torch
 from torch.utils._pytree import tree_map
 
+from humanoidverse.actor_override import load_actor_module_override, load_actor_override
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
 from humanoidverse.goal_inference import _find_goal_json, load_and_validate_goal_json
 from humanoidverse.mjlab_inference_utils import (
@@ -23,12 +25,22 @@ from humanoidverse.mjlab_inference_utils import (
     replace_hydra_override,
     resolve_inference_robot_config,
 )
+from humanoidverse.perception.depth_terrain_runtime import TemporalDepthTerrainRuntime
 from humanoidverse.terrain_transfer import clone_same_z_for_terrains, tensor_checksum
 from humanoidverse.tracking_inference import _target_states_from_obs, _tracking_z
 from humanoidverse.utils.helpers import get_backward_observation
 from humanoidverse.utils.robot_spec import load_robot_training_spec
 
-SUPPORTED_TERRAINS = ("flat", "slope", "stairs", "rough", "platforms", "course")
+SUPPORTED_TERRAINS = (
+    "flat",
+    "slope",
+    "stairs",
+    "stairs_up",
+    "stairs_down",
+    "rough",
+    "platforms",
+    "course",
+)
 
 
 def _stairs_step_center_offset(step: int, *, platform_width: float, step_depth: float) -> float:
@@ -271,6 +283,26 @@ def _default_target_states(env) -> dict[str, torch.Tensor]:
     return {"root_states": root_state, "dof_states": dof_state}
 
 
+def _expand_goal_sequence(
+    goal_latents: torch.Tensor,
+    *,
+    episode_length: int,
+    switch_interval: int,
+) -> torch.Tensor:
+    if goal_latents.ndim != 2 or goal_latents.shape[0] < 1:
+        raise ValueError(f"Expected goal latents [num_goals, z_dim], got {tuple(goal_latents.shape)}")
+    if episode_length < 1:
+        raise ValueError(f"episode_length must be positive, got {episode_length}")
+    if switch_interval < 1:
+        raise ValueError(f"switch_interval must be positive, got {switch_interval}")
+    indices = torch.div(
+        torch.arange(episode_length, device=goal_latents.device),
+        switch_interval,
+        rounding_mode="floor",
+    ).remainder(goal_latents.shape[0])
+    return goal_latents.index_select(0, indices)
+
+
 def _compute_goal_or_tracking_z(args, model, base_cfg):
     encoding_cfg = _terrain_env_cfg(
         base_cfg,
@@ -292,6 +324,56 @@ def _compute_goal_or_tracking_z(args, model, base_cfg):
                 tree_map(lambda x: x[1:].to(args.device) if hasattr(x, "to") else x, backward_obs),
             )
             identifier = f"motion:{motion_id}"
+        elif getattr(args, "goal_sequence", False):
+            goal_path = _find_goal_json(
+                args.goal_json,
+                num_dof=env.num_dof,
+                robot_name=args.robot_training.robot.name,
+            )
+            goals = load_and_validate_goal_json(goal_path, num_dof=env.num_dof)
+            goal_latents = []
+            goal_names = []
+            initial_obs_dict = None
+            for goal in goals:
+                motion_id = int(goal["motion_id"])
+                backward_obs, obs_dict = get_backward_observation(
+                    env,
+                    motion_id,
+                    use_root_height_obs=args.use_root_height_obs,
+                    velocity_multiplier=0,
+                )
+                if initial_obs_dict is None:
+                    initial_obs_dict = obs_dict
+                num_frames = int(next(iter(backward_obs.values())).shape[0])
+                for raw_frame_idx in goal["frames"]:
+                    frame_idx = int(raw_frame_idx)
+                    if frame_idx < 0 or frame_idx >= num_frames:
+                        raise ValueError(
+                            f"Goal frame {frame_idx} is outside motion {motion_id} with {num_frames} frames. "
+                            "Use the full-motion LaFAN data file referenced by the goal JSON."
+                        )
+                    goal_obs = {
+                        key: torch.as_tensor(
+                            value[frame_idx : frame_idx + 1],
+                            device=args.device,
+                            dtype=torch.float32,
+                        )
+                        for key, value in backward_obs.items()
+                    }
+                    goal_latents.append(model.goal_inference(goal_obs))
+                    goal_names.append(f"{goal.get('motion_name', motion_id)}:{frame_idx}")
+            if initial_obs_dict is None or not goal_latents:
+                raise RuntimeError(f"No goal frames were loaded from {goal_path}")
+            z = _expand_goal_sequence(
+                torch.cat(goal_latents, dim=0),
+                episode_length=int(args.episode_length),
+                switch_interval=int(args.goal_switch_interval),
+            )
+            identifier = (
+                f"goal-sequence:{goal_path.stem}:{len(goal_names)}@{int(args.goal_switch_interval)}"
+            )
+            obs_dict = initial_obs_dict
+            print(f"[INFO] goal sequence: identifier={identifier}, goals={goal_names}")
         else:
             goal_path = _find_goal_json(
                 args.goal_json,
@@ -308,6 +390,12 @@ def _compute_goal_or_tracking_z(args, model, base_cfg):
                 use_root_height_obs=args.use_root_height_obs,
                 velocity_multiplier=0,
             )
+            num_frames = int(next(iter(backward_obs.values())).shape[0])
+            if frame_idx < 0 or frame_idx >= num_frames:
+                raise ValueError(
+                    f"Goal frame {frame_idx} is outside motion {motion_id} with {num_frames} frames. "
+                    "Use the full-motion LaFAN data file referenced by the goal JSON."
+                )
             goal_obs = {
                 key: torch.as_tensor(value[frame_idx : frame_idx + 1], device=args.device, dtype=torch.float32)
                 for key, value in backward_obs.items()
@@ -383,6 +471,47 @@ def _load_prompt_latent(path: Path, *, prompt_type: str, identifier: str, device
     return z.to(device)
 
 
+def _load_reward_latent_for_goal_composition(path: Path, *, device: str) -> tuple[torch.Tensor, str]:
+    path = path.expanduser().resolve()
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(payload, dict) or payload.get("prompt_type") != "reward":
+        raise ValueError(f"Expected a saved reward latent payload: {path}")
+    z = payload.get("z")
+    if not isinstance(z, torch.Tensor) or z.ndim != 2 or z.shape[0] != 1 or not torch.isfinite(z).all():
+        raise ValueError(
+            f"Forward reward latent must be a finite [1, z_dim] tensor, got "
+            f"{type(z)!r} shape={getattr(z, 'shape', None)}"
+        )
+    checksum = tensor_checksum(z)
+    if payload.get("z_checksum") != checksum:
+        raise ValueError(
+            f"Forward reward latent checksum mismatch: stored={payload.get('z_checksum')!r}, "
+            f"computed={checksum!r}"
+        )
+    identifier = str(payload.get("prompt_identifier", path.stem))
+    print(f"[INFO] loaded goal forward latent {path} identifier={identifier} z_checksum={checksum}")
+    return z.to(device), identifier
+
+
+def _compose_goal_and_forward_z(
+    model,
+    goal_z: torch.Tensor,
+    forward_z: torch.Tensor,
+    *,
+    weight: float,
+) -> torch.Tensor:
+    if goal_z.ndim != 2 or forward_z.ndim != 2 or forward_z.shape[0] != 1:
+        raise ValueError(
+            f"Expected goal_z [T, D] and forward_z [1, D], got "
+            f"{tuple(goal_z.shape)} and {tuple(forward_z.shape)}"
+        )
+    if goal_z.shape[1] != forward_z.shape[1]:
+        raise ValueError(f"Latent dimensions differ: {goal_z.shape[1]} != {forward_z.shape[1]}")
+    if weight < 0:
+        raise ValueError(f"goal forward weight must be non-negative, got {weight}")
+    return model.project_z(goal_z + weight * forward_z)
+
+
 def _prompt_value(model, observation, z: torch.Tensor) -> float:
     discriminator = getattr(model, "_discriminator", None)
     if discriminator is None:
@@ -390,6 +519,18 @@ def _prompt_value(model, observation, z: torch.Tensor) -> float:
     z_step = z if z.shape[0] == 1 else z[:1]
     value = discriminator.compute_reward(model._normalize(observation), z_step)
     return float(value.mean().item())
+
+
+@torch.no_grad()
+def _comparison_action(model, actor: torch.nn.Module, observation, z: torch.Tensor) -> torch.Tensor:
+    device_type = torch.device(model.device).type
+    with torch.autocast(
+        device_type=device_type,
+        dtype=model.amp_dtype,
+        enabled=bool(model.cfg.amp),
+    ):
+        distribution = actor(model._normalize(observation), z, model.cfg.actor_std)
+    return distribution.mean.float()
 
 
 def _root_ground_clearance(env) -> float:
@@ -403,7 +544,21 @@ def _root_ground_clearance(env) -> float:
     return float(heights[0, reference_index].item())
 
 
-def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_states) -> dict[str, Any]:
+def _root_upright_score(env) -> float:
+    """Return 1 for an upright pelvis and -1 for an inverted pelvis."""
+    projected_gravity_z = env._env.projected_gravity[0, 2]
+    return float((-projected_gravity_z).clamp(-1.0, 1.0).item())
+
+
+def _run_rollout(
+    args,
+    model,
+    base_cfg,
+    terrain: str,
+    z: torch.Tensor,
+    target_states,
+    comparison_actor: torch.nn.Module | None = None,
+) -> dict[str, Any]:
     env_cfg = _terrain_env_cfg(
         base_cfg,
         terrain,
@@ -411,7 +566,16 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
         dense_terrain=args.dense_terrain,
         patch_size=args.patch_size,
     )
-    wrapped_env, _ = env_cfg.build(num_envs=1)
+    perception_runtime = (
+        TemporalDepthTerrainRuntime(
+            env_cfg,
+            perception_checkpoint=args.perception_checkpoint,
+            device=args.device,
+        )
+        if args.perception_checkpoint is not None
+        else None
+    )
+    wrapped_env = perception_runtime.wrapped_env if perception_runtime is not None else env_cfg.build(num_envs=1)[0]
     checksum = tensor_checksum(z)
     renderer = None
     try:
@@ -470,8 +634,13 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
                 f"[INFO] stairs down-edge start: margin={args.stairs_down_edge_margin:.3f}, "
                 f"local_xy=({start_offset:.3f}, 0.000)"
             )
-        elif terrain == "stairs" and args.stairs_start_step > 0:
+        elif terrain in {"stairs", "stairs_up", "stairs_down"} and args.stairs_start_step > 0:
             stairs_cfg = wrapped_env._env.config.terrain.stairs
+            if args.stairs_start_step > int(stairs_cfg.num_steps):
+                raise ValueError(
+                    f"--stairs-start-step={args.stairs_start_step} exceeds "
+                    f"num_steps={int(stairs_cfg.num_steps)}"
+                )
             start_offset = _stairs_step_center_offset(
                 args.stairs_start_step,
                 platform_width=float(stairs_cfg.platform_width),
@@ -479,12 +648,15 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
             )
             target_states["root_states"][:, 0] += start_offset
             print(
-                f"[INFO] stairs start: step={args.stairs_start_step}, "
+                f"[INFO] stairs start: terrain={terrain}, step={args.stairs_start_step}, "
                 f"local_xy=({start_offset:.3f}, 0.000)"
             )
         observation, _ = wrapped_env.reset(to_numpy=False, target_states=target_states)
+        if perception_runtime is not None:
+            perception_runtime.reset()
         initial_root = wrapped_env._env.robot_root_states[0, :3].clone()
         initial_clearance = _root_ground_clearance(wrapped_env)
+        initial_upright_score = _root_upright_score(wrapped_env)
         initial_ground_height = float(initial_root[2].item()) - initial_clearance
         max_forward_displacement = 0.0
         max_planar_displacement = 0.0
@@ -497,6 +669,8 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
         velocities: list[float] = []
         prompt_values: list[float] = []
         tracking_errors: list[float] = []
+        action_l2_deviations: list[float] = []
+        action_abs_deviations: list[float] = []
         ground_heights = [initial_ground_height]
         ground_clearances = [initial_clearance]
         body_impacts: list[float] = []
@@ -521,10 +695,25 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
         boundary_reset_flag = False
         steps = min(args.episode_length, int(z.shape[0])) if args.prompt_type == "tracking" else args.episode_length
         completed = 0
+        last_z_step = z[:1]
         for step in range(steps):
             z_step = z[step : step + 1] if z.shape[0] > 1 else z
+            if perception_runtime is not None:
+                observation["terrain_actor"] = perception_runtime.terrain_actor(
+                    observation,
+                    reset_mask=torch.ones(1, device=args.device, dtype=torch.bool) if step == 0 else None,
+                )
+            last_z_step = z_step
             action = model.act(observation, z_step, mean=True)
+            if comparison_actor is not None:
+                comparison_action = _comparison_action(model, comparison_actor, observation, z_step)
+                difference = action - comparison_action
+                action_l2_deviations.append(float(torch.linalg.vector_norm(difference, dim=-1).mean().item()))
+                action_abs_deviations.append(float(difference.abs().mean().item()))
             observation, _reward, terminated, truncated, _info = wrapped_env.step(action, to_numpy=False)
+            if perception_runtime is not None:
+                reset = torch.as_tensor(terminated, device=args.device).bool() | torch.as_tensor(truncated, device=args.device).bool()
+                perception_runtime.after_step(reset)
             completed = step + 1
             forward_displacement = float(
                 (wrapped_env._env.robot_root_states[0, 0] - initial_root[0]).item()
@@ -563,6 +752,7 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
                 break
         final_root = wrapped_env._env.robot_root_states[0, :3].clone()
         final_ground_clearance = _root_ground_clearance(wrapped_env)
+        final_upright_score = _root_upright_score(wrapped_env)
         stairs_metrics: dict[str, Any] = {}
         if terrain == "stairs":
             step_height, terrain_difficulty, terrain_level = _stairs_step_height(wrapped_env)
@@ -607,8 +797,11 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
         final_goal_error = None
         if args.prompt_type == "goal":
             achieved_z = model.goal_inference(observation)
-            final_goal_error = float(torch.linalg.vector_norm(achieved_z - z[:1], dim=-1).mean().item())
+            final_goal_error = float(
+                torch.linalg.vector_norm(achieved_z - last_z_step, dim=-1).mean().item()
+            )
         fell = terminated_flag or final_ground_clearance < args.fall_clearance
+        rollout_completed = completed == steps and not terminated_flag and not truncated_flag
         video_path = None
         if renderer is not None:
             video_path = args.output.with_suffix("").with_name(f"{args.output.stem}_{terrain}.mp4")
@@ -624,6 +817,8 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
             "z_shape": list(z.shape),
             "z_checksum": checksum,
             "episode_length": completed,
+            "requested_episode_length": steps,
+            "rollout_completed": rollout_completed,
             "terminated": terminated_flag,
             "truncated": truncated_flag,
             "boundary_reset": boundary_reset_flag,
@@ -636,10 +831,30 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
             "course_completed": course_completed if terrain == "course" else None,
             "mean_root_velocity": sum(velocities) / max(len(velocities), 1),
             "final_root_height": float(final_root[2].item()),
+            "initial_ground_clearance": initial_clearance,
             "final_ground_clearance": final_ground_clearance,
+            "mean_ground_clearance": sum(ground_clearances) / len(ground_clearances),
+            "min_ground_clearance": min(ground_clearances),
+            "initial_upright_score": initial_upright_score,
+            "final_upright_score": final_upright_score,
+            "mean_body_impact": sum(body_impacts) / max(len(body_impacts), 1),
+            "max_body_impact": max(body_impacts, default=0.0),
             "mean_prompt_value": sum(prompt_values) / max(len(prompt_values), 1),
             "final_goal_error": final_goal_error,
             "mean_tracking_error": sum(tracking_errors) / len(tracking_errors) if tracking_errors else None,
+            "mean_action_l2_deviation": (
+                sum(action_l2_deviations) / len(action_l2_deviations) if action_l2_deviations else None
+            ),
+            "max_action_l2_deviation": max(action_l2_deviations) if action_l2_deviations else None,
+            "mean_action_abs_deviation": (
+                sum(action_abs_deviations) / len(action_abs_deviations) if action_abs_deviations else None
+            ),
+            "actor_checksum": (
+                args.actor_override_info["checksum"] if args.actor_override_info is not None else None
+            ),
+            "comparison_actor_checksum": (
+                args.comparison_actor_info["checksum"] if args.comparison_actor_info is not None else None
+            ),
             "video_path": str(video_path) if video_path is not None else None,
             **stairs_metrics,
         }
@@ -647,7 +862,10 @@ def _run_rollout(args, model, base_cfg, terrain: str, z: torch.Tensor, target_st
     finally:
         if renderer is not None:
             renderer.close()
-        wrapped_env.close()
+        if perception_runtime is not None:
+            perception_runtime.close()
+        else:
+            wrapped_env.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -676,6 +894,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reward-task", default="move-ego-0-0.7")
     parser.add_argument("--save-latent", type=Path, default=None)
     parser.add_argument("--load-latent", type=Path, default=None)
+    parser.add_argument(
+        "--actor-override",
+        type=Path,
+        default=None,
+        help="Actor-only milestone loaded in memory; the source full checkpoint is never modified.",
+    )
+    parser.add_argument(
+        "--comparison-actor",
+        type=Path,
+        default=None,
+        help="Optional read-only Actor used only to measure action deviation on rollout states.",
+    )
+    parser.add_argument(
+        "--perception-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional temporal terrain checkpoint; clean depth replaces GT terrain_actor.",
+    )
     parser.add_argument("--buffer-path", type=Path, default=None)
     parser.add_argument("--buffer-rank", type=int, default=0)
     parser.add_argument("--num-samples", type=int, default=100000)
@@ -684,12 +920,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-json", type=Path, default=None)
     parser.add_argument("--goal-index", type=int, default=0)
     parser.add_argument("--goal-frame", type=int, default=None)
+    parser.add_argument("--goal-sequence", action="store_true")
+    parser.add_argument("--goal-switch-interval", type=int, default=100)
+    parser.add_argument(
+        "--goal-forward-latent",
+        type=Path,
+        default=None,
+        help="Saved reward latent to blend into every goal latent before projection.",
+    )
+    parser.add_argument("--goal-forward-weight", type=float, default=0.5)
     parser.add_argument("--motion-id", type=int, default=0)
     parser.add_argument(
         "--stairs-start-step",
         type=int,
         default=0,
-        help="Start stairs rollout at the center of this one-indexed stair band; 0 keeps the center platform.",
+        help=(
+            "Start a stairs/stairs_up/stairs_down rollout at the center of this one-indexed "
+            "stair band; 0 keeps the center platform."
+        ),
     )
     parser.add_argument(
         "--stairs-down-edge-margin",
@@ -734,6 +982,18 @@ def main() -> None:
     checkpoint_dir = args.model_folder / "checkpoint"
     model = load_model_from_checkpoint_dir(checkpoint_dir, device=checkpoint_load_device(args.device))
     model.to(args.device).eval()
+    args.actor_override_info = load_actor_override(model, args.actor_override) if args.actor_override is not None else None
+    if args.actor_override_info is not None:
+        print(f"[INFO] Loaded read-only Actor override: {args.actor_override_info}")
+    comparison_actor = None
+    args.comparison_actor_info = None
+    if args.comparison_actor is not None:
+        comparison_actor = copy.deepcopy(model._actor)
+        args.comparison_actor_info = load_actor_module_override(comparison_actor, args.comparison_actor)
+        comparison_actor.to(args.device)
+        print(f"[INFO] Loaded read-only comparison Actor: {args.comparison_actor_info}")
+    if args.perception_checkpoint is not None:
+        print(f"[INFO] Enabled clean depth/temporal terrain_actor: {args.perception_checkpoint}")
     base_cfg, args.use_root_height_obs = load_mjlab_env_cfg(
         args.model_folder,
         data_path=args.data_path,
@@ -760,6 +1020,19 @@ def main() -> None:
         if args.load_latent is not None:
             raise ValueError("--load-latent currently supports reward prompts only")
         z, identifier, target_states = _compute_goal_or_tracking_z(args, model, base_cfg)
+        if args.prompt_type == "goal" and args.goal_forward_latent is not None:
+            forward_z, forward_identifier = _load_reward_latent_for_goal_composition(
+                args.goal_forward_latent,
+                device=args.device,
+            )
+            z = _compose_goal_and_forward_z(
+                model,
+                z,
+                forward_z,
+                weight=float(args.goal_forward_weight),
+            ).detach()
+            identifier = f"{identifier}+{float(args.goal_forward_weight):g}*{forward_identifier}"
+            print(f"[INFO] composed moving goal prompt: identifier={identifier}")
     if args.save_latent is not None:
         _save_prompt_latent(
             args.save_latent,
@@ -779,7 +1052,17 @@ def main() -> None:
     for terrain in terrains:
         assert tensor_checksum(same_z[terrain]) == checksum
         print(f"[INFO] terrain={terrain} z_checksum={checksum}")
-        results.append(_run_rollout(args, model, base_cfg, terrain, same_z[terrain], target_states))
+        results.append(
+            _run_rollout(
+                args,
+                model,
+                base_cfg,
+                terrain,
+                same_z[terrain],
+                target_states,
+                comparison_actor=comparison_actor,
+            )
+        )
     if {row["z_checksum"] for row in results} != {checksum}:
         raise AssertionError("same-z checksum changed across terrain rollouts")
     args.output.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")

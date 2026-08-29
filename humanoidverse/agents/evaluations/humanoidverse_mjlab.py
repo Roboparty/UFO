@@ -1,25 +1,27 @@
 
 import collections
-import functools
+import copy
+import dataclasses
+import gc
 import numbers
 import random
-import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Any, Dict, Mapping
-import dataclasses
 from collections import defaultdict
-import copy
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, Mapping
 
 import numpy as np
 import ot
 import torch
+import torch.distributed as dist
+from scipy.spatial.distance import cdist
 from torch.utils._pytree import tree_map
 from tqdm import tqdm
 
-from ..buffers.trajectory import TrajectoryDictBufferMultiDim
+from humanoidverse.utils.reference_observations import reference_base_ang_vel
+
 from ..envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
 from .base import BaseEvalConfig, extract_model
-from humanoidverse.utils.reference_observations import reference_base_ang_vel
+
 
 def get_next(field: str, data: Any):
     if "next" in data and field in data["next"]:
@@ -121,6 +123,7 @@ xpos_bodies = [
 
 def get_backward_observation(env, motion_id, include_last_action, velocity_multiplier: float = 1.0) -> torch.Tensor:
     import numpy as np
+
     from humanoidverse.envs.motion_observations import (
         compute_humanoid_observations_max,
         compute_humanoid_observations_max_with_contact,
@@ -294,6 +297,8 @@ class HumanoidVerseMjlabTrackingEvaluationConfig(BaseEvalConfig):
     include_results_from_all_envs: bool = False  # If True, include results from all num_envs envs, not just first num_motions
 
     disable_tqdm: bool = True
+    context_batch_size: int = 65536
+    emd_workers_per_rank: int = 8
 
     def build(self):
         return HumanoidVerseMjlabTrackingEvaluation(self)
@@ -303,18 +308,70 @@ class HumanoidVerseMjlabTrackingEvaluation:
     def __init__(self, config: HumanoidVerseMjlabTrackingEvaluationConfig):
         self.cfg = config
 
-    def run(self, *, timestep, agent_or_model, logger, env: Any | None = None, **kwargs) -> Dict[str, Any]:
+    def run(
+        self,
+        *,
+        timestep,
+        agent_or_model,
+        logger,
+        env: Any | None = None,
+        motion_ids: list[int] | None = None,
+        write_outputs: bool = True,
+        motion_lib=None,
+        expert_buffer=None,
+        distributed: bool = False,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        owns_env = env is None
         if env is None:
             if self.cfg.env is None:
                 raise ValueError("Either env or cfg.env must be provided")
-            env, _ = self.cfg.env.build(num_envs=self.cfg.num_envs)
+            eval_cfg = self.cfg.env.model_copy(update={"evaluation_fast_path": expert_buffer is not None})
+            env, _ = eval_cfg.build(num_envs=self.cfg.num_envs, motion_lib=motion_lib)
         else:
             if self.cfg.env is not None:
                 raise ValueError("Both env and cfg.env are provided, please provide only one (which one you want to evaluate with?)")
+        if expert_buffer is not None:
+            if self.cfg.n_episodes_per_motion != 1 or self.cfg.include_results_from_all_envs:
+                raise ValueError(
+                    "Fast tracking evaluation requires n_episodes_per_motion=1 and "
+                    "include_results_from_all_envs=False"
+                )
+            if motion_ids is not None:
+                raise ValueError("Fast distributed tracking evaluation assigns motion IDs internally")
+            try:
+                return self._run_fast(
+                    timestep=timestep,
+                    agent_or_model=agent_or_model,
+                    logger=logger if write_outputs else None,
+                    env=env,
+                    expert_buffer=expert_buffer,
+                    distributed=distributed,
+                )
+            finally:
+                if owns_env:
+                    env.close()
+                    del env
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
         # NOTE: this is not used as it disables some domain randomization we want to keep for evaluation
         # env._env.set_is_evaluating()
 
-        self.motion_ids = list(range(env._env._motion_lib._num_unique_motions))
+        num_unique_motions = int(env._env._motion_lib._num_unique_motions)
+        if motion_ids is None:
+            self.motion_ids = list(range(num_unique_motions))
+        else:
+            self.motion_ids = [int(motion_id) for motion_id in motion_ids]
+            if not self.motion_ids:
+                raise ValueError("Tracking evaluation motion_ids must not be empty")
+            if len(set(self.motion_ids)) != len(self.motion_ids):
+                raise ValueError("Tracking evaluation motion_ids must be unique")
+            invalid = [motion_id for motion_id in self.motion_ids if not 0 <= motion_id < num_unique_motions]
+            if invalid:
+                raise ValueError(
+                    f"Tracking evaluation motion_ids are outside [0, {num_unique_motions}): {invalid[:8]}"
+                )
         n_envs = env._env.num_envs
 
         # "Parallelization" is handled on the worker level.
@@ -342,33 +399,348 @@ class HumanoidVerseMjlabTrackingEvaluation:
                 for k, v in run_metrics.items():
                     metrics[f"{k}_repetition#{repetition_i}"] = v
 
-        aggregate = collections.defaultdict(list)
-        wandb_dict = {}
-        for _, metr in metrics.items():
-            for k, v in metr.items():
-                if isinstance(v, numbers.Number):
-                    aggregate[k].append(v)
-        for k, v in aggregate.items():
-            wandb_dict[k] = np.mean(v)
-            wandb_dict[f"{k}#std"] = np.std(v)
-
-        if logger is not None:
-            for k, v in metrics.items():
-                v["motion_name"] = k
-                v["timestep"] = timestep
-                logger.log(v)
+        wandb_dict = self.summarize(metrics)
+        if write_outputs:
+            self.record_results(metrics, timestep=timestep, logger=logger)
 
         # Resume back to original state of the motion lib if we were using shared env
         if self.cfg.env is None:
             env._env._motion_lib.load_motions_for_training()
         env._env.set_is_training()
 
+        if owns_env:
+            env.close()
         return metrics, wandb_dict
+
+    def _run_fast(self, *, timestep, agent_or_model, logger, env: Any, expert_buffer, distributed: bool):
+        core = env._env
+        use_distributed = distributed and dist.is_initialized() and dist.get_world_size() > 1
+        world_size = dist.get_world_size() if use_distributed else 1
+        rank = dist.get_rank() if use_distributed else 0
+        motion_lengths = {
+            int(motion_id): int(length)
+            for motion_id, length in zip(
+                expert_buffer.motion_ids,
+                expert_buffer.lengths.detach().cpu().tolist(),
+            )
+        }
+        motion_ids = sorted(motion_lengths)
+        rank_chunks = balanced_motion_chunks(
+            motion_ids,
+            motion_lengths,
+            chunk_size=core.num_envs,
+            world_size=world_size,
+        )
+        local_chunks = rank_chunks[rank]
+
+        pending = {}
+        local_metrics_by_id: dict[int, dict[str, Any]] = {}
+        with ThreadPoolExecutor(
+            max_workers=self.cfg.emd_workers_per_rank,
+            thread_name_prefix="joint-emd",
+        ) as executor:
+            for motion_id_chunk in local_chunks:
+                records = _fast_tracking_chunk(
+                    motion_id_chunk,
+                    env=env,
+                    agent=agent_or_model,
+                    expert_buffer=expert_buffer,
+                    context_batch_size=self.cfg.context_batch_size,
+                    disable_tqdm=self.cfg.disable_tqdm,
+                )
+                for record in records:
+                    future = executor.submit(
+                        _joint_tracking_metrics,
+                        record["joint_pos"],
+                        record["target_joint_pos"],
+                        record["invalid"],
+                    )
+                    pending[future] = (record["motion_file"], record["motion_id"])
+                while len(pending) > core.num_envs * 2:
+                    completed = [future for future in pending if future.done()]
+                    if not completed:
+                        completed = [next(iter(pending))]
+                        completed[0].result()
+                    for future in completed:
+                        motion_file, motion_id = pending.pop(future)
+                        local_metrics_by_id[motion_id] = {
+                            **future.result(),
+                            "motion_id": motion_id,
+                            "motion_file": motion_file,
+                        }
+            for future, (motion_file, motion_id) in list(pending.items()):
+                local_metrics_by_id[motion_id] = {
+                    **future.result(),
+                    "motion_id": motion_id,
+                    "motion_file": motion_file,
+                }
+
+        if use_distributed:
+            gathered = [None] * world_size if rank == 0 else None
+            dist.gather_object(local_metrics_by_id, gathered, dst=0)
+        else:
+            gathered = [local_metrics_by_id]
+
+        metrics: dict[str, dict[str, Any]] = {}
+        if rank == 0:
+            metrics_by_id: dict[int, dict[str, Any]] = {}
+            for shard in gathered:
+                if shard is None:
+                    continue
+                duplicate_ids = set(metrics_by_id).intersection(shard)
+                if duplicate_ids:
+                    raise RuntimeError(
+                        f"Distributed evaluation produced duplicate motion IDs: {sorted(duplicate_ids)[:8]}"
+                    )
+                metrics_by_id.update(shard)
+            if set(metrics_by_id) != set(motion_ids):
+                missing = sorted(set(motion_ids).difference(metrics_by_id))
+                extra = sorted(set(metrics_by_id).difference(motion_ids))
+                raise RuntimeError(
+                    "Distributed evaluation did not cover every motion exactly once: "
+                    f"expected={len(motion_ids)} actual={len(metrics_by_id)} missing={missing[:8]} extra={extra[:8]}"
+                )
+            for motion_id in motion_ids:
+                metric = metrics_by_id[motion_id]
+                key = str(metric["motion_file"])
+                if key in metrics:
+                    key = f"{key}#motion_id={motion_id}"
+                metrics[key] = metric
+
+        aggregate = self.summarize(metrics)
+        valid = sum(
+            1
+            for metric in metrics.values()
+            if isinstance(metric.get("emd"), numbers.Number) and np.isfinite(metric["emd"])
+        )
+        aggregate["valid_motion_count"] = valid
+        aggregate["invalid_motion_count"] = len(metrics) - valid
+        if rank == 0 and logger is not None:
+            self.record_results(metrics, timestep=timestep, logger=logger)
+        return (metrics, aggregate) if rank == 0 else ({}, None)
+
+    @staticmethod
+    def summarize(metrics: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+        aggregate = collections.defaultdict(list)
+        wandb_dict = {}
+        for metr in metrics.values():
+            for key, value in metr.items():
+                if isinstance(value, numbers.Number) and np.isfinite(value):
+                    aggregate[key].append(value)
+        for key, values in aggregate.items():
+            wandb_dict[key] = np.mean(values)
+            wandb_dict[f"{key}#std"] = np.std(values)
+        return wandb_dict
+
+    @staticmethod
+    def record_results(metrics: Mapping[str, Mapping[str, Any]], *, timestep: int, logger) -> None:
+        if logger is None:
+            return
+        for motion_name, metric in metrics.items():
+            row = dict(metric)
+            row["motion_name"] = motion_name
+            row["timestep"] = timestep
+            logger.log(row)
 
     def close(self) -> None:
         mp_manager = getattr(self, "mp_manager", None)
         if mp_manager is not None:
             mp_manager.shutdown()
+
+
+def balanced_motion_chunks(
+    motion_ids: list[int],
+    lengths: Mapping[int, int],
+    *,
+    chunk_size: int,
+    world_size: int,
+) -> list[list[list[int]]]:
+    """Pack full simulator batches, then balance estimated frame cost across ranks."""
+    if chunk_size <= 0 or world_size <= 0:
+        raise ValueError("chunk_size and world_size must be positive")
+    if not motion_ids:
+        return [[] for _ in range(world_size)]
+    if len(set(motion_ids)) != len(motion_ids):
+        raise ValueError("motion_ids must be unique")
+    num_chunks = (len(motion_ids) + chunk_size - 1) // chunk_size
+    capacities = [chunk_size] * num_chunks
+    capacities[-1] = len(motion_ids) - chunk_size * (num_chunks - 1)
+    chunks: list[list[int]] = [[] for _ in capacities]
+    chunk_costs = [0] * num_chunks
+    for motion_id in sorted(motion_ids, key=lambda value: (-int(lengths[value]), value)):
+        chunk_index = min(
+            (index for index in range(num_chunks) if len(chunks[index]) < capacities[index]),
+            key=lambda index: (chunk_costs[index], len(chunks[index]), index),
+        )
+        chunks[chunk_index].append(motion_id)
+        chunk_costs[chunk_index] += int(lengths[motion_id])
+
+    rank_chunks: list[list[list[int]]] = [[] for _ in range(world_size)]
+    rank_costs = [0] * world_size
+    for chunk_index in sorted(range(num_chunks), key=lambda index: (-chunk_costs[index], index)):
+        rank_index = min(
+            range(world_size),
+            key=lambda index: (rank_costs[index], len(rank_chunks[index]), index),
+        )
+        rank_chunks[rank_index].append(chunks[chunk_index])
+        rank_costs[rank_index] += chunk_costs[chunk_index]
+    return rank_chunks
+
+
+def _expert_motion_slice(expert_buffer, motion_id: int) -> dict[str, torch.Tensor]:
+    mapping = getattr(expert_buffer, "_evaluation_motion_index", None)
+    if mapping is None:
+        mapping = {int(value): index for index, value in enumerate(expert_buffer.motion_ids)}
+        expert_buffer._evaluation_motion_index = mapping
+    trajectory_index = mapping[motion_id]
+    start = int(expert_buffer.start_idx[trajectory_index, 0].item())
+    length = int(expert_buffer.lengths[trajectory_index].item())
+    indices = torch.arange(start, start + length, device=expert_buffer.start_idx.device) % expert_buffer.capacity
+    return tree_map(lambda value: value[indices], expert_buffer.storage["observation"])
+
+
+@torch.no_grad()
+def _encode_motion_contexts(model, observations, lengths, *, device: str, batch_size: int):
+    joined = {
+        key: torch.cat([observation[key][1:] for observation in observations], dim=0)
+        for key in observations[0]
+    }
+    encoded_parts = []
+    total = next(iter(joined.values())).shape[0]
+    for start in range(0, total, batch_size):
+        batch = tree_map(lambda value: value[start : start + batch_size].to(device), joined)
+        encoded_parts.append(model.backward_map(batch))
+    encoded = model.project_z(torch.cat(encoded_parts, dim=0))
+    return list(torch.split(encoded, [length - 1 for length in lengths]))
+
+
+@torch.no_grad()
+def _fast_tracking_chunk(
+    motion_ids: list[int],
+    *,
+    env,
+    agent,
+    expert_buffer,
+    context_batch_size: int,
+    disable_tqdm: bool,
+) -> list[dict[str, Any]]:
+    core = env._env
+    model = extract_model(agent)
+    observations = [_expert_motion_slice(expert_buffer, motion_id) for motion_id in motion_ids]
+    lengths = [int(observation["state"].shape[0]) for observation in observations]
+    if any(length < 3 for length in lengths):
+        raise ValueError("Tracking evaluation requires every motion to contain at least three frames")
+    contexts = _encode_motion_contexts(
+        model,
+        observations,
+        lengths,
+        device=core.device,
+        batch_size=context_batch_size,
+    )
+    default_dof_pos = core.default_dof_pos[0]
+    targets = [
+        (observation["state"][:, : core.num_dof].float().to(core.device) + default_dof_pos).detach().cpu()
+        for observation in observations
+    ]
+
+    assigned_ids = motion_ids + [motion_ids[-1]] * (core.num_envs - len(motion_ids))
+    assigned = torch.tensor(assigned_ids, dtype=torch.long, device=core.device)
+    initial = core._motion_lib.get_motion_state(
+        assigned,
+        torch.zeros(core.num_envs, dtype=torch.float32, device=core.device),
+        offset=core.env_origins,
+    )
+    target_states = {
+        "dof_states": torch.stack((initial["dof_pos"], initial["dof_vel"]), dim=-1),
+        "root_states": torch.cat(
+            (initial["root_pos"], initial["root_rot"], initial["root_vel"], initial["root_ang_vel"]),
+            dim=-1,
+        ),
+    }
+    observation, _ = env.reset(target_states=target_states, to_numpy=False)
+
+    all_context = torch.cat(contexts, dim=0)
+    context_lengths = torch.tensor([context.shape[0] for context in contexts], device=core.device)
+    offsets = torch.cat(
+        (
+            torch.zeros(1, dtype=torch.long, device=core.device),
+            context_lengths.cumsum(0)[:-1],
+        )
+    )
+    assigned_local = torch.arange(core.num_envs, device=core.device).clamp_max(len(motion_ids) - 1)
+    joint_positions = [core.dof_pos.clone()]
+    invalid = torch.zeros(core.num_envs, dtype=torch.bool, device=core.device)
+    for step in tqdm(
+        range(int(context_lengths.max().item())),
+        desc="Tracking Evaluation",
+        disable=disable_tqdm,
+    ):
+        context_indices = offsets[assigned_local] + torch.remainder(step, context_lengths[assigned_local])
+        action = agent.act(observation, all_context[context_indices], mean=True)
+        observation, _, terminated, truncated, _ = env.step(action, to_numpy=False)
+        active = step < context_lengths[assigned_local]
+        step_invalid = (
+            terminated.reshape(-1).bool()
+            | truncated.reshape(-1).bool()
+            | ~torch.isfinite(core.dof_pos).all(dim=-1)
+        )
+        invalid |= active & step_invalid
+        joint_positions.append(core.dof_pos.clone())
+
+    joint_positions_cpu = torch.stack(joint_positions).cpu()
+    invalid_cpu = invalid.cpu()
+    records = []
+    for env_index, (motion_id, target, length) in enumerate(zip(motion_ids, targets, lengths)):
+        records.append(
+            {
+                "motion_id": motion_id,
+                "motion_file": str(core._motion_lib._motion_data_keys[motion_id]),
+                "joint_pos": joint_positions_cpu[:length, env_index].numpy(),
+                "target_joint_pos": target.numpy(),
+                "invalid": bool(invalid_cpu[env_index]),
+            }
+        )
+    return records
+
+
+def _proximity(distance: np.ndarray, *, bound: float = 2.0, margin: float = 2.0) -> float:
+    in_bounds = distance <= bound
+    transition = (distance > bound) & (distance <= bound + margin)
+    score = in_bounds.astype(np.float64)
+    score[transition] = (bound + margin - distance[transition]) / margin
+    return float(score.mean())
+
+
+def _joint_tracking_metrics(
+    joint_pos: np.ndarray,
+    target_joint_pos: np.ndarray,
+    invalid: bool,
+) -> dict[str, Any]:
+    if invalid or not np.isfinite(joint_pos).all() or not np.isfinite(target_joint_pos).all():
+        return {"distance": float("nan"), "emd": float("nan")}
+    distance = np.linalg.norm(joint_pos - target_joint_pos, axis=-1)
+    cost = cdist(joint_pos, target_joint_pos, metric="euclidean")
+    source_weights = np.full(joint_pos.shape[0], 1.0 / joint_pos.shape[0], dtype=np.float64)
+    target_weights = np.full(target_joint_pos.shape[0], 1.0 / target_joint_pos.shape[0], dtype=np.float64)
+    emd = float(ot.emd2(source_weights, target_weights, cost, numItermax=100000, numThreads=1))
+    velocity_distance = np.linalg.norm(np.diff(joint_pos, axis=0) - np.diff(target_joint_pos, axis=0), axis=-1)
+    acceleration_distance = np.linalg.norm(
+        np.diff(joint_pos, n=2, axis=0) - np.diff(target_joint_pos, n=2, axis=0),
+        axis=-1,
+    )
+    return {
+        "obs_state_proximity": _proximity(distance),
+        "obs_state_distance": float(distance.mean()),
+        "obs_state_emd": emd,
+        # Keep the fast path's public metrics identical to the legacy path.
+        # Scalar values also keep the one-time cross-rank gather compact.
+        "mpjpe_l": float(distance.mean() * 1000.0),
+        "vel_dist": float(velocity_distance.mean() * 1000.0),
+        "accel_dist": float(acceleration_distance.mean() * 100.0),
+        "proximity": _proximity(distance),
+        "distance": float(distance.mean()),
+        "emd": emd,
+    }
 
 
 def group_assign_motions_to_envs_with_map(motion_ids, num_envs, device=None):

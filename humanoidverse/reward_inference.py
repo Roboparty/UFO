@@ -22,25 +22,26 @@ import joblib
 import mediapy as media
 import torch
 
+from humanoidverse.actor_override import load_actor_override
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
 from humanoidverse.agents.buffers.transition import DictBuffer
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
-from humanoidverse.utils.helpers import export_meta_policy_as_onnx
-from humanoidverse.mjlab_reward_relabel import RewardWrapperHV
 from humanoidverse.mjlab_inference_utils import (
     MujocoQposRenderer,
-    add_robot_config_manifest_args,
     add_bool_arg,
+    add_robot_config_manifest_args,
     checkpoint_load_device,
     load_mjlab_env_cfg,
     render_policy_frame,
     resolve_inference_data_and_robot_args,
     resolve_inference_robot_config,
-    write_mjlab_relabel_xml,
     write_g1_mjlab_relabel_xml,
+    write_mjlab_relabel_xml,
 )
+from humanoidverse.mjlab_reward_relabel import RewardWrapperHV
+from humanoidverse.perception.depth_terrain_runtime import TemporalDepthTerrainRuntime
+from humanoidverse.utils.helpers import export_meta_policy_as_onnx
 from humanoidverse.utils.robot_spec import load_robot_training_spec
-
 
 DEFAULT_TASKS = [
     "move-ego-0-0",
@@ -106,9 +107,7 @@ def _resolve_reward_tasks(tasks: list[str] | None, robot_training) -> tuple[list
     selected_tasks = list(tasks or NON_G1_LOCOMOTION_TASKS)
     for task in selected_tasks:
         if not _is_non_g1_locomotion_task(task):
-            raise ValueError(
-                f"Task {task} requires G1-style arm/body semantics and is not enabled for robot {robot_training.robot.name}."
-            )
+            raise ValueError(f"Task {task} requires G1-style arm/body semantics and is not enabled for robot {robot_training.robot.name}.")
     return selected_tasks, "non-G1 locomotion-only tasks"
 
 
@@ -168,10 +167,7 @@ def _load_replay_buffer(
         elif old_single_rank.is_dir():
             buffer_path = old_single_rank
         else:
-            raise FileNotFoundError(
-                "Could not find replay buffer. Tried "
-                f"{reduced}, {rank_shard}, and {old_single_rank}."
-            )
+            raise FileNotFoundError(f"Could not find replay buffer. Tried {reduced}, {rank_shard}, and {old_single_rank}.")
 
     config_path = buffer_path / "config.json"
     if config_path.exists() and "TrajectoryDictBufferMultiDim" in config_path.read_text():
@@ -207,6 +203,8 @@ def run_reward_inference(
     fps: int,
     max_episode_length_s: float,
     export_onnx: bool,
+    actor_override: Path | None = None,
+    perception_checkpoint: Path | None = None,
 ) -> None:
     model_folder = model_folder.expanduser().resolve()
     checkpoint_dir = model_folder / "checkpoint"
@@ -227,6 +225,9 @@ def run_reward_inference(
     model = load_model_from_checkpoint_dir(checkpoint_dir, device=model_load_device)
     model.to(device)
     model.eval()
+    actor_override_info = load_actor_override(model, actor_override) if actor_override is not None else None
+    if actor_override_info is not None:
+        print(f"[INFO] Loaded read-only Actor override: {actor_override_info}")
 
     if export_onnx:
         _export_model(model, model_folder / "exported")
@@ -299,7 +300,16 @@ def run_reward_inference(
         disable_obs_noise=disable_obs_noise,
         max_episode_length_s=max_episode_length_s,
     )
-    wrapped_env, _ = env_cfg.build(num_envs=1)
+    perception_runtime = (
+        TemporalDepthTerrainRuntime(
+            env_cfg,
+            perception_checkpoint=perception_checkpoint,
+            device=device,
+        )
+        if perception_checkpoint is not None
+        else None
+    )
+    wrapped_env = perception_runtime.wrapped_env if perception_runtime is not None else env_cfg.build(num_envs=1)[0]
     renderer = None
     try:
         print(f"[INFO] Generating rollout videos with XML={env_cfg.mjcf_path}")
@@ -318,14 +328,24 @@ def run_reward_inference(
                 z = z_cpu.to(device).repeat(1, 1)
                 target_states = _default_standing_target_states(wrapped_env, device=device)
                 observation, _info = wrapped_env.reset(to_numpy=False, target_states=target_states)
+                if perception_runtime is not None:
+                    perception_runtime.reset()
                 print("[INFO] Reset reward rollout to default standing pose.")
                 use_env_render = True
                 if save_mp4:
                     frame, use_env_render = render_policy_frame(wrapped_env, renderer, use_env_render=use_env_render)
                     frames.append(frame)
                 for step in range(int(episode_length)):
+                    if perception_runtime is not None:
+                        observation["terrain_actor"] = perception_runtime.terrain_actor(
+                            observation,
+                            reset_mask=torch.ones(1, device=device, dtype=torch.bool) if step == 0 else None,
+                        )
                     action = model.act(observation, z, mean=True)
                     observation, _reward, terminated, truncated, _info = wrapped_env.step(action, to_numpy=False)
+                    if perception_runtime is not None:
+                        reset = torch.as_tensor(terminated, device=device).bool() | torch.as_tensor(truncated, device=device).bool()
+                        perception_runtime.after_step(reset)
                     if save_mp4:
                         frame, use_env_render = render_policy_frame(wrapped_env, renderer, use_env_render=use_env_render)
                         frames.append(frame)
@@ -339,7 +359,10 @@ def run_reward_inference(
     finally:
         if renderer is not None:
             renderer.close()
-        wrapped_env.close()
+        if perception_runtime is not None:
+            perception_runtime.close()
+        else:
+            wrapped_env.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -367,6 +390,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-elevation", type=float, default=-18.0)
     parser.add_argument("--fps", type=int, default=50)
     parser.add_argument("--max-episode-length-s", type=float, default=10000.0)
+    parser.add_argument(
+        "--actor-override",
+        type=Path,
+        default=None,
+        help="Actor-only milestone to load in memory; the source full checkpoint is never modified.",
+    )
+    parser.add_argument(
+        "--perception-checkpoint",
+        type=Path,
+        default=None,
+        help="Optional temporal terrain checkpoint. When set, clean depth replaces GT terrain_actor.",
+    )
     add_bool_arg(parser, "--export-onnx", False, "Export ONNX next to the checkpoint before inference.")
     return resolve_inference_data_and_robot_args(parser.parse_args(), parser)
 
@@ -398,6 +433,8 @@ def main() -> None:
         fps=args.fps,
         max_episode_length_s=args.max_episode_length_s,
         export_onnx=args.export_onnx,
+        actor_override=args.actor_override,
+        perception_checkpoint=args.perception_checkpoint,
     )
 
 

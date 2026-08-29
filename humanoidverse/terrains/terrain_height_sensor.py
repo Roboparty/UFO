@@ -110,7 +110,18 @@ class PbfmTerrainHeightSensor(TerrainHeightSensor):
     ) -> None:
         terrain = entities.get("terrain")
         generator_cfg = getattr(getattr(terrain, "cfg", None), "terrain_generator", None)
-        if generator_cfg is not None and float(generator_cfg.border_width) > 0.0:
+        # MJLab creates generator padding directly in geom group 0.  The
+        # legacy G1 terrains move all physical terrain into a dedicated group
+        # and therefore need the padding moved and miss-repaired as well.
+        # RP1 terrain intentionally stays in source group 0, so its padding is
+        # already visible and must not be rediscovered by scanning every
+        # group-0 terrain geom.
+        needs_padding_group_remap = int(self.cfg.padding_ray_group) != 0
+        if (
+            generator_cfg is not None
+            and float(generator_cfg.border_width) > 0.0
+            and needs_padding_group_remap
+        ):
             self._padding_regions = terrain_padding_regions(scene_spec)
             mark_terrain_padding_ray_group(
                 scene_spec,

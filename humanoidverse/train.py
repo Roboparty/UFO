@@ -50,6 +50,7 @@ DEFAULT_ROBOT_CONFIG = "configs/robots/g1_29dof.yaml"
 
 AGENT_ALIASES = {
     "fb": "fb",
+    "fb_depth": "fb_depth",
     "fb_terrain": "fb_terrain",
     "tech": "tech",
     "tldr": "tech",
@@ -59,6 +60,7 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConf
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import HumanoidVerseMjlabTrackingEvaluationConfig
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.terrains.coverage import validate_motion_terrain_coverage
+from humanoidverse.terrains.rp1_simple import RP1_PATCH_SIZE, RP1_TERRAIN_BORDER_WIDTH
 from humanoidverse.training.workspace import TrainConfig
 from humanoidverse.utils.motion_data import prepare_motion_manifest
 from humanoidverse.utils.robot_spec import assert_robot_configs_compatible, load_robot_training_spec, resolve_robot_config_path
@@ -114,12 +116,27 @@ def build_ufo_mjlab_config(
     disable_obs_noise: bool = False,
     lr_scale: float = 1.0,
     clip_grad_norm: float = 0.0,
+    resume_replay_warmup_steps: int = 0,
     cartwheel_aux_safe: bool = False,
     num_agent_updates: int | None = None,
     robot_config: str | Path | None = None,
     terrain_mode: str | None = None,
+    cache_expert_buffer: bool = True,
+    rebuild_expert_buffer_cache: bool = False,
+    gradient_sync: str = "auto",
+    ddp_bucket_cap_mb: float = 25.0,
 ) -> TrainConfig:
     agent = canonical_agent_name(agent)
+    if gradient_sync == "auto":
+        gradient_sync = (
+            "ddp"
+            if distributed_world_size > 1 and agent in {"fb", "fb_terrain", "fb_depth"}
+            else "manual"
+        )
+    if gradient_sync not in {"manual", "ddp"}:
+        raise ValueError(f"Unsupported gradient synchronization mode: {gradient_sync!r}")
+    if gradient_sync == "ddp" and distributed_world_size <= 1:
+        raise ValueError("gradient_sync='ddp' requires more than one distributed rank")
     robot_training = load_robot_training_spec(robot_config or DEFAULT_ROBOT_CONFIG)
     try:
         raw_robot_config = OmegaConf.to_container(OmegaConf.load(robot_training.config_path), resolve=True)
@@ -187,8 +204,8 @@ def build_ufo_mjlab_config(
         f"robot.control.normalize_action_to={robot_training.normalize_action_to}",
         *robot_training.hydra_overrides,
     ]
-    if agent == "fb_terrain":
-        terrain_mode = terrain_mode or "mixed"
+    if agent in {"fb_terrain", "fb_depth"}:
+        terrain_mode = terrain_mode or ("rp1_simple" if agent == "fb_depth" else "mixed")
         hydra_overrides.extend(
             [
                 "terrain=terrain_ufo_v0",
@@ -199,8 +216,10 @@ def build_ufo_mjlab_config(
                 "rewards.reward_scales.penalty_feet_ori=0.0",
             ]
         )
+        if agent == "fb_depth":
+            hydra_overrides.append("terrain.direct_depth.enabled=true")
     elif terrain_mode is not None:
-        raise ValueError("--terrain-mode is only valid with --agent fb_terrain")
+        raise ValueError("--terrain-mode is only valid with --agent fb_terrain or fb_depth")
     if cartwheel_aux_safe:
         hydra_overrides.extend(
             [
@@ -246,6 +265,7 @@ def build_ufo_mjlab_config(
         num_env_steps=num_env_steps,
         update_agent_every=train_runtime["update_agent_every"],
         num_seed_steps=train_runtime["num_seed_steps"],
+        resume_replay_warmup_steps=int(resume_replay_warmup_steps),
         num_agent_updates=train_runtime["num_agent_updates"],
         checkpoint_every_steps=checkpoint_every_steps,
         checkpoint_buffer=train_runtime["checkpoint_buffer"],
@@ -263,6 +283,8 @@ def build_ufo_mjlab_config(
         wandb_run_name=wandb_run_name or f"ufo_{agent}",
         load_expert_data_from_motion_lib=True,
         buffer_device="cuda" if device.startswith("cuda") else "cpu",
+        cache_expert_buffer=bool(cache_expert_buffer),
+        rebuild_expert_buffer_cache=bool(rebuild_expert_buffer_cache),
         disable_tqdm=True,
         evaluations=evaluations,
         eval_every_steps=train_runtime["eval_every_steps"],
@@ -273,7 +295,15 @@ def build_ufo_mjlab_config(
         distributed_sync=distributed_sync,
         distributed_global_steps=True,
         distributed_average_metrics=True,
-        tags={"backend": "mjlab", "agent": agent, "distributed_rank": distributed_rank, "distributed_world_size": distributed_world_size},
+        distributed_gradient_sync=gradient_sync,
+        ddp_bucket_cap_mb=float(ddp_bucket_cap_mb),
+        tags={
+            "backend": "mjlab",
+            "agent": agent,
+            "distributed_rank": distributed_rank,
+            "distributed_world_size": distributed_world_size,
+            "direct_depth_replay_storage_dtype": "compact_uint8" if agent == "fb_depth" else None,
+        },
     )
 
 
@@ -353,10 +383,15 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         disable_obs_noise=bool(args.disable_obs_noise),
         lr_scale=args.lr_scale,
         clip_grad_norm=args.clip_grad_norm,
+        resume_replay_warmup_steps=args.resume_replay_warmup_steps,
         cartwheel_aux_safe=bool(args.cartwheel_aux_safe),
         num_agent_updates=args.num_agent_updates,
         robot_config=args.robot_config,
         terrain_mode=args.terrain_mode,
+        cache_expert_buffer=bool(args.expert_buffer_cache),
+        rebuild_expert_buffer_cache=bool(args.rebuild_expert_buffer_cache),
+        gradient_sync=args.gradient_sync,
+        ddp_bucket_cap_mb=args.ddp_bucket_cap_mb,
     )
     print(
         "[INFO] UFO train: "
@@ -367,8 +402,11 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, "
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
+        f"resume_replay_warmup_steps={cfg.resume_replay_warmup_steps}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
-        f"terrain_mode={args.terrain_mode}, compile={cfg.agent.compile}",
+        f"terrain_mode={args.terrain_mode}, compile={cfg.agent.compile}, "
+        f"expert_buffer_cache={cfg.cache_expert_buffer}, gradient_sync={cfg.distributed_gradient_sync}, "
+        f"ddp_bucket_cap_mb={cfg.ddp_bucket_cap_mb:g}",
         flush=True,
     )
     try:
@@ -386,22 +424,31 @@ def launch(args: argparse.Namespace) -> None:
     log_dir = Path(args.work_dir).expanduser().resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     _ensure_compile_cache()
-    if args.agent == "fb_terrain" and args.terrain_mode != "plane":
+    if args.agent in {"fb_terrain", "fb_depth"} and args.terrain_mode != "plane":
         terrain_cfg = OmegaConf.load(Path(__file__).parent / "config/terrain/terrain_ufo_v0.yaml").terrain
+        patch_size = (
+            (RP1_PATCH_SIZE, RP1_PATCH_SIZE)
+            if args.terrain_mode == "rp1_simple"
+            else tuple(float(value) for value in terrain_cfg.patch_size)
+        )
+        border_width = (
+            RP1_TERRAIN_BORDER_WIDTH
+            if args.terrain_mode == "rp1_simple"
+            else float(terrain_cfg.border_width)
+        )
         sensor_radius = math.hypot(
             max(abs(float(terrain_cfg.terrain_priv.x_min)), abs(float(terrain_cfg.terrain_priv.x_max))),
             max(abs(float(terrain_cfg.terrain_priv.y_min)), abs(float(terrain_cfg.terrain_priv.y_max))),
         )
         report = validate_motion_terrain_coverage(
             args.data_path or DEFAULT_DATA_PATH,
-            patch_size=tuple(float(value) for value in terrain_cfg.patch_size),
+            patch_size=patch_size,
             sensor_radius=sensor_radius,
             policy_margin=float(terrain_cfg.coverage.policy_margin),
             # Tiles are traversable. The worst assigned origin is at the
             # center of an outer tile, with the global border beyond it.
             safe_radius=(
-                min(float(value) for value in terrain_cfg.patch_size) / 2.0
-                + float(terrain_cfg.border_width)
+                min(patch_size) / 2.0 + border_width
             ),
         )
         print(
@@ -468,14 +515,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--agent",
         default=DEFAULT_AGENT,
-        choices=["fb", "fb_terrain", "tech", "tldr"],
-        help="Training agent preset. fb_terrain explicitly enables privileged terrain conditioning.",
+        choices=["fb", "fb_terrain", "fb_depth", "tech", "tldr"],
+        help="Training agent preset. fb_depth uses the RP1-compatible uint8 temporal-depth branch.",
     )
     parser.add_argument(
         "--terrain-mode",
-        choices=["flat", "slope", "stairs", "stairs_up", "stairs_down", "rough", "platforms", "mixed"],
+        choices=["flat", "slope", "stairs", "stairs_up", "stairs_down", "rough", "platforms", "mixed", "rp1_simple"],
         default=None,
-        help="Physical terrain for --agent fb_terrain (default: mixed).",
+        help="Physical terrain (defaults: fb_terrain=mixed, fb_depth=rp1_simple).",
     )
     parser.add_argument("--gpu-ids", default="single", help="'single', 'all', or a comma-separated GPU id list relative to CUDA_VISIBLE_DEVICES.")
     parser.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
@@ -523,6 +570,29 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="Replay capacity per rank/GPU.")
     parser.add_argument(
+        "--expert-buffer-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse a content-addressed expert trajectory and full-FK cache.",
+    )
+    parser.add_argument(
+        "--rebuild-expert-buffer-cache",
+        action="store_true",
+        help="Force rank 0 to atomically rebuild the expert/full-FK cache.",
+    )
+    parser.add_argument(
+        "--gradient-sync",
+        choices=["auto", "ddp", "manual"],
+        default="auto",
+        help="Distributed gradient synchronization; auto selects DDP overlap for FB agents.",
+    )
+    parser.add_argument(
+        "--ddp-bucket-cap-mb",
+        type=float,
+        default=25.0,
+        help="DDP gradient bucket capacity in MiB.",
+    )
+    parser.add_argument(
         "--num-agent-updates",
         type=int,
         default=None,
@@ -535,6 +605,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-obs-noise", action="store_true", help="Disable observation noise for training.")
     parser.add_argument("--lr-scale", type=float, default=1.0, help="Scale FB learning rates. TeCH preset ignores this value.")
     parser.add_argument("--clip-grad-norm", type=float, default=0.0, help="Enable FB actor/FB gradient clipping when > 0.")
+    parser.add_argument(
+        "--resume-replay-warmup-steps",
+        type=int,
+        default=0,
+        help=(
+            "Recovery-only local env steps to collect with a loaded policy before optimizer updates. "
+            "Use only when a resumed checkpoint intentionally has no replay buffer."
+        ),
+    )
     parser.add_argument(
         "--cartwheel-aux-safe",
         action="store_true",
@@ -596,12 +675,14 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--lr-scale must be positive")
     if args.clip_grad_norm < 0:
         raise ValueError("--clip-grad-norm must be non-negative")
-    if args.cartwheel_aux_safe and args.agent not in {"fb", "fb_terrain"}:
-        raise ValueError("--cartwheel-aux-safe is only supported with --agent fb or fb_terrain")
-    if args.agent == "fb_terrain" and args.terrain_mode is None:
-        args.terrain_mode = "mixed"
-    if args.agent != "fb_terrain" and args.terrain_mode is not None:
-        raise ValueError("--terrain-mode is only valid with --agent fb_terrain")
+    if args.resume_replay_warmup_steps < 0:
+        raise ValueError("--resume-replay-warmup-steps must be non-negative")
+    if args.cartwheel_aux_safe and args.agent not in {"fb", "fb_terrain", "fb_depth"}:
+        raise ValueError("--cartwheel-aux-safe is only supported with --agent fb, fb_terrain, or fb_depth")
+    if args.agent in {"fb_terrain", "fb_depth"} and args.terrain_mode is None:
+        args.terrain_mode = "rp1_simple" if args.agent == "fb_depth" else "mixed"
+    if args.agent not in {"fb_terrain", "fb_depth"} and args.terrain_mode is not None:
+        raise ValueError("--terrain-mode is only valid with --agent fb_terrain or fb_depth")
     return args
 
 
