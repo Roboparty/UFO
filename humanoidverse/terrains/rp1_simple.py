@@ -102,6 +102,7 @@ RP1_GUARD_TILE_RINGS = int(RP1_NONFLAT_GUARD_WIDTH / RP1_PATCH_SIZE)
 RP1_GUARD_HEIGHT_LIFT = 0.05
 RP1_GUARD_FAMILIES = ("perlin_rough", "boxes")
 RP1_STAIR_LEVELS = 5
+RP1_STAIR_STEP_HEIGHT_RANGE = (0.05, 0.15)
 RP1_STAIR_BORDER_WIDTH = 0.5
 RP1_STAIR_STEP_WIDTH = 0.3
 RP1_STAIR_PLATFORM_WIDTH = RP1_CENTER_PLATFORM_WIDTH
@@ -312,14 +313,14 @@ def make_rp1_simple_generator_cfg() -> TerrainGeneratorCfg:
             ),
             "low_stairs_up": BoxPyramidStairsTerrainCfg(
                 proportion=RP1_TERRAIN_PROPORTIONS["low_stairs_up"],
-                step_height_range=(0.05, 0.15),
+                step_height_range=RP1_STAIR_STEP_HEIGHT_RANGE,
                 step_width=RP1_STAIR_STEP_WIDTH,
                 platform_width=RP1_STAIR_PLATFORM_WIDTH,
                 border_width=0.0,
             ),
             "low_stairs_down": BoxInvertedPyramidStairsTerrainCfg(
                 proportion=RP1_TERRAIN_PROPORTIONS["low_stairs_down"],
-                step_height_range=(0.05, 0.15),
+                step_height_range=RP1_STAIR_STEP_HEIGHT_RANGE,
                 step_width=RP1_STAIR_STEP_WIDTH,
                 platform_width=RP1_STAIR_PLATFORM_WIDTH,
                 border_width=0.0,

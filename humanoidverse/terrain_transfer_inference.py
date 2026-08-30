@@ -27,6 +27,13 @@ from humanoidverse.mjlab_inference_utils import (
 )
 from humanoidverse.perception.depth_terrain_runtime import TemporalDepthTerrainRuntime
 from humanoidverse.terrain_transfer import clone_same_z_for_terrains, tensor_checksum
+from humanoidverse.terrains.rp1_simple import (
+    RP1_CENTER_PLATFORM_WIDTH,
+    RP1_STAIR_LEVELS,
+    RP1_STAIR_STEP_HEIGHT_RANGE,
+    RP1_TERRAIN_COMPONENT_NAMES,
+    rp1_center_reset_profile,
+)
 from humanoidverse.tracking_inference import _target_states_from_obs, _tracking_z
 from humanoidverse.utils.helpers import get_backward_observation
 from humanoidverse.utils.robot_spec import load_robot_training_spec
@@ -40,7 +47,34 @@ SUPPORTED_TERRAINS = (
     "rough",
     "platforms",
     "course",
-)
+) + RP1_TERRAIN_COMPONENT_NAMES
+
+
+def _is_rp1_training_family(terrain: str) -> bool:
+    return terrain in RP1_TERRAIN_COMPONENT_NAMES
+
+
+def _assign_rp1_training_tile(core, *, family: str, difficulty_row: int) -> None:
+    """Place the inference environment on an exact RP1 training tile."""
+
+    if tuple(core.terrain_component_names) != tuple(RP1_TERRAIN_COMPONENT_NAMES):
+        raise RuntimeError(
+            f"RP1 inference expected family columns {RP1_TERRAIN_COMPONENT_NAMES}, "
+            f"got {core.terrain_component_names}"
+        )
+    terrain = core.mjlab_env.scene["terrain"]
+    num_rows = int(terrain.terrain_origins.shape[0])
+    if not 0 <= difficulty_row < num_rows:
+        raise ValueError(f"RP1 difficulty row {difficulty_row} is outside [0, {num_rows})")
+    family_id = RP1_TERRAIN_COMPONENT_NAMES.index(family)
+    terrain.terrain_levels.fill_(int(difficulty_row))
+    terrain.terrain_types.fill_(int(family_id))
+    core.env_origins.copy_(terrain.terrain_origins[difficulty_row, family_id].expand_as(core.env_origins))
+    profile, vertical_direction = rp1_center_reset_profile(family)
+    print(
+        f"[INFO] RP1 training terrain: asset_family={family}, profile={profile}, "
+        f"direction={vertical_direction}, difficulty_row={difficulty_row}, reset=tile_center"
+    )
 
 
 def _stairs_step_center_offset(step: int, *, platform_width: float, step_depth: float) -> float:
@@ -78,7 +112,11 @@ def _stairs_pre_ascent_offset(*, platform_width: float, edge_margin: float) -> f
     return platform_width / 2.0 - edge_margin
 
 
-def _stairs_step_height(env) -> tuple[float, float, int]:
+def _stairs_step_height(
+    env,
+    *,
+    step_height_range: tuple[float, float] | None = None,
+) -> tuple[float, float, int]:
     """Return generated step height, normalized difficulty, and terrain level."""
     core = env._env
     terrain = core.mjlab_env.scene["terrain"]
@@ -89,9 +127,12 @@ def _stairs_step_height(env) -> tuple[float, float, int]:
     )
     fraction = 0.0 if num_rows <= 1 else level / (num_rows - 1)
     difficulty = difficulty_min + fraction * (difficulty_max - difficulty_min)
-    height_min, height_max = (
-        float(value) for value in core.config.terrain.stairs.step_height_range
+    configured_range = (
+        core.config.terrain.stairs.step_height_range
+        if step_height_range is None
+        else step_height_range
     )
+    height_min, height_max = (float(value) for value in configured_range)
     return height_min + difficulty * (height_max - height_min), difficulty, level
 
 
@@ -256,9 +297,10 @@ def _terrain_env_cfg(
 ):
     overrides = list(base_cfg.hydra_overrides)
     overrides = replace_hydra_override(overrides, "terrain", "terrain_ufo_v0")
-    overrides = replace_hydra_override(overrides, "terrain.terrain_type", terrain)
+    terrain_mode = "rp1_simple" if _is_rp1_training_family(terrain) else terrain
+    overrides = replace_hydra_override(overrides, "terrain.terrain_type", terrain_mode)
     overrides = replace_hydra_override(overrides, "terrain.seed", seed)
-    if patch_size is not None:
+    if patch_size is not None and not _is_rp1_training_family(terrain):
         overrides = replace_hydra_override(overrides, "terrain.patch_size", [patch_size, patch_size])
     if terrain == "course":
         overrides = replace_hydra_override(overrides, "terrain.num_rows", 1)
@@ -579,6 +621,12 @@ def _run_rollout(
     checksum = tensor_checksum(z)
     renderer = None
     try:
+        if _is_rp1_training_family(terrain):
+            _assign_rp1_training_tile(
+                wrapped_env._env,
+                family=terrain,
+                difficulty_row=int(args.rp1_difficulty_row),
+            )
         if target_states is None:
             target_states = _default_target_states(wrapped_env)
         else:
@@ -794,6 +842,35 @@ def _run_rollout(
                     max_allowed_body_impact=float(args.max_body_impact),
                 ),
             }
+        elif terrain in {"low_stairs_up", "low_stairs_down"}:
+            step_height, terrain_difficulty, terrain_level = _stairs_step_height(
+                wrapped_env,
+                step_height_range=RP1_STAIR_STEP_HEIGHT_RANGE,
+            )
+            profile, vertical_direction = rp1_center_reset_profile(terrain)
+            separated_direction = "stairs_up" if vertical_direction == "ascent" else "stairs_down"
+            stairs_metrics = {
+                "terrain_asset_family": terrain,
+                "terrain_family": profile,
+                "initial_vertical_direction": vertical_direction,
+                "reset_region": "tile_center",
+                "terrain_level": terrain_level,
+                "terrain_difficulty": terrain_difficulty,
+                "stairs_step_height": step_height,
+                **_separated_stairs_progress_metrics(
+                    terrain=separated_direction,
+                    ground_heights=ground_heights,
+                    ground_clearances=ground_clearances,
+                    body_impacts=body_impacts,
+                    planar_radii=planar_radii,
+                    cumulative_planar_path=cumulative_planar_path,
+                    step_height=step_height,
+                    num_steps=RP1_STAIR_LEVELS,
+                    center_width=RP1_CENTER_PLATFORM_WIDTH,
+                    fall_clearance=float(args.fall_clearance),
+                    max_allowed_body_impact=float(args.max_body_impact),
+                ),
+            }
         final_goal_error = None
         if args.prompt_type == "goal":
             achieved_z = model.goal_inference(observation)
@@ -873,6 +950,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-folder", type=Path, required=True)
     parser.add_argument("--prompt-type", choices=["reward", "goal", "tracking"], required=True)
     parser.add_argument("--terrains", default="flat,slope,stairs,rough")
+    parser.add_argument(
+        "--rp1-difficulty-row",
+        type=int,
+        default=4,
+        help="Curriculum row [0, 9] used by exact RP1 training-family rollouts.",
+    )
     parser.add_argument(
         "--patch-size",
         type=float,

@@ -47,7 +47,10 @@ from humanoidverse.mjlab_inference_utils import (
 )
 from humanoidverse.terrain_transfer import clone_same_z_for_terrains, tensor_checksum
 from humanoidverse.terrain_transfer_inference import (
+    SUPPORTED_TERRAINS,
+    _assign_rp1_training_tile,
     _course_completion_radius,
+    _is_rp1_training_family,
     _load_prompt_latent,
     _save_prompt_latent,
     _stairs_down_edge_offset,
@@ -55,7 +58,11 @@ from humanoidverse.terrain_transfer_inference import (
 )
 from humanoidverse.terrains import make_terrain_entity_cfg, terrain_component_names
 from humanoidverse.terrains.coverage import validate_motion_terrain_coverage
-from humanoidverse.terrains.rp1_simple import make_ufo_v0_generator_cfg
+from humanoidverse.terrains.rp1_simple import (
+    RP1_STAIR_STEP_HEIGHT_RANGE,
+    RP1_TERRAIN_COMPONENT_NAMES,
+    make_ufo_v0_generator_cfg,
+)
 from humanoidverse.terrains.terrain_height_sensor import (
     mark_terrain_padding_ray_group,
     repair_padding_ray_misses,
@@ -87,6 +94,36 @@ def _preset(name: str):
         cartwheel_aux_safe=False,
         wandb_project="test",
     )["agent_cfg"]
+
+
+def test_terrain_transfer_exposes_exact_rp1_training_families() -> None:
+    assert set(RP1_TERRAIN_COMPONENT_NAMES).issubset(SUPPORTED_TERRAINS)
+    assert _is_rp1_training_family("low_stairs_down")
+    assert not _is_rp1_training_family("stairs")
+    assert RP1_STAIR_STEP_HEIGHT_RANGE == (0.05, 0.15)
+
+
+def test_assign_rp1_training_tile_uses_requested_family_and_row() -> None:
+    origins = torch.arange(10 * 7 * 3, dtype=torch.float32).reshape(10, 7, 3)
+    terrain = SimpleNamespace(
+        terrain_origins=origins,
+        terrain_levels=torch.zeros(1, dtype=torch.long),
+        terrain_types=torch.zeros(1, dtype=torch.long),
+    )
+    core = SimpleNamespace(
+        terrain_component_names=RP1_TERRAIN_COMPONENT_NAMES,
+        mjlab_env=SimpleNamespace(scene={"terrain": terrain}),
+        env_origins=torch.zeros(1, 3),
+    )
+
+    _assign_rp1_training_tile(core, family="low_stairs_down", difficulty_row=4)
+
+    assert terrain.terrain_levels.item() == 4
+    assert terrain.terrain_types.item() == RP1_TERRAIN_COMPONENT_NAMES.index("low_stairs_down")
+    torch.testing.assert_close(
+        core.env_origins[0],
+        origins[4, RP1_TERRAIN_COMPONENT_NAMES.index("low_stairs_down")],
+    )
 
 
 def test_tracking_target_reset_is_centered_only_for_terrain() -> None:
