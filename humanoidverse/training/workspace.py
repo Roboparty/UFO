@@ -12,6 +12,7 @@ from humanoidverse.agents.envs.expert_motion_loader import (
     load_expert_buffer_cache,
     load_expert_trajectories_from_motion_lib,
     save_expert_buffer_cache,
+    source_mixed_expert_priorities,
 )
 from humanoidverse.agents.envs.humanoidverse_mjlab import (
     RESET_REGION_NAMES,
@@ -1091,10 +1092,27 @@ class Workspace:
                 self.cfg.agent,
                 device=self.cfg.buffer_device,
             )
+        expert_priorities = source_mixed_expert_priorities(
+            self.train_env._env._motion_lib,
+            expert_buffer.motion_ids,
+            device=self.cfg.buffer_device,
+        )
+        expert_buffer.update_priorities(
+            priorities=expert_priorities,
+            idxs=torch.arange(len(expert_buffer.motion_ids), device=self.cfg.buffer_device),
+        )
         if self._write_shared_artifacts:
+            motion_lib = self.train_env._env._motion_lib
+            motion_ids = torch.as_tensor(expert_buffer.motion_ids, device=motion_lib._motion_source_ids.device)
+            source_ids = motion_lib._motion_source_ids[motion_ids]
+            expert_source_ids = source_ids.to(expert_priorities.device)
+            source_mass = {
+                str(name): float(expert_priorities[expert_source_ids == source_idx].sum().item())
+                for source_idx, name in enumerate(motion_lib._motion_source_names)
+            }
             print(
                 f"[INFO] Expert motion buffer ready: motions={len(expert_buffer.motion_ids)} "
-                f"frames={len(expert_buffer)} elapsed={time.time() - started_at:.1f}s",
+                f"frames={len(expert_buffer)} source_mass={source_mass} elapsed={time.time() - started_at:.1f}s",
                 flush=True,
             )
         return expert_buffer
@@ -1514,8 +1532,17 @@ class Workspace:
                             file_name=name_in_buffer,
                         )
 
+                    expert_priorities = source_mixed_expert_priorities(
+                        train_env._env._motion_lib,
+                        replay_buffer["expert_slicer"].motion_ids,
+                        device=self.cfg.buffer_device,
+                    )
                     replay_buffer["expert_slicer"].update_priorities(
-                        priorities=priorities.to(self.cfg.buffer_device), idxs=torch.tensor(np.array(idxs), device=self.cfg.buffer_device)
+                        priorities=expert_priorities,
+                        idxs=torch.arange(
+                            len(replay_buffer["expert_slicer"].motion_ids),
+                            device=self.cfg.buffer_device,
+                        ),
                     )
 
             if global_time + global_step_increment > self.cfg.num_env_steps:

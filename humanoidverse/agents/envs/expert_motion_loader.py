@@ -50,6 +50,41 @@ _MOTION_LIB_CACHE_TENSOR_FIELDS = (
 )
 
 
+@torch.no_grad()
+def source_mixed_expert_priorities(
+    motion_lib,
+    motion_ids: list[int],
+    *,
+    device: str | torch.device,
+) -> torch.Tensor:
+    """Map MotionLib's source-stratified probabilities onto expert episodes.
+
+    MotionLib preserves the configured source mass (for example LaFAN 0.8 and
+    100STYLE 0.2) while allowing EMD to reprioritize clips within each source.
+    The expert trajectory buffer has a separate sampler, so it must receive
+    the same probabilities explicitly instead of defaulting to uniform motion
+    sampling, which would make a large source dominate merely by clip count.
+    """
+
+    expected = int(motion_lib._num_unique_motions)
+    if len(motion_ids) != expected or sorted(int(value) for value in motion_ids) != list(range(expected)):
+        raise ValueError(
+            "Expert buffer must contain every MotionLib motion exactly once before source mixing: "
+            f"expert={len(motion_ids)} motion_lib={expected}"
+        )
+    sampling_prob = torch.as_tensor(motion_lib._sampling_prob, dtype=torch.float32)
+    if sampling_prob.numel() != expected:
+        raise ValueError(f"MotionLib sampling probabilities have length {sampling_prob.numel()}, expected {expected}")
+    ids = torch.as_tensor(motion_ids, device=sampling_prob.device, dtype=torch.long)
+    priorities = sampling_prob[ids]
+    if not bool(torch.isfinite(priorities).all()) or bool((priorities < 0).any()):
+        raise ValueError("MotionLib produced invalid expert sampling probabilities")
+    total = priorities.sum()
+    if not torch.isfinite(total) or float(total) <= 0.0:
+        raise ValueError("MotionLib expert sampling probabilities must sum to a positive value")
+    return (priorities / total).to(device=device)
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
         return value.detach().cpu().tolist()
