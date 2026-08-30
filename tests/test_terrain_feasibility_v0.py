@@ -80,6 +80,7 @@ from humanoidverse.training.workspace import (
     distributed_motion_ids,
     make_flat_terrain_priority_eval_config,
     merge_distributed_evaluation_results,
+    priority_eval_episode_length_s,
 )
 
 
@@ -1202,8 +1203,17 @@ class TerrainPriorityEvaluationTest(unittest.TestCase):
             distributed_sync=False,
         )
         workspace.distributed_rank = 0
-        motion_lib = SimpleNamespace(_num_unique_motions=16)
-        workspace.train_env = SimpleNamespace(_env=SimpleNamespace(_motion_lib=motion_lib))
+        motion_lib = SimpleNamespace(
+            _num_unique_motions=16,
+            _motion_num_frames=torch.full((16,), 300),
+        )
+        workspace.train_env = SimpleNamespace(
+            _env=SimpleNamespace(
+                _motion_lib=motion_lib,
+                dt=0.02,
+                mjlab_env=SimpleNamespace(max_episode_length_s=10.0),
+            )
+        )
         workspace._priority_eval_env = None
         built_env = Mock()
         with patch.object(HumanoidVerseMjlabConfig, "build", return_value=(built_env, {})) as build:
@@ -1225,8 +1235,17 @@ class TerrainPriorityEvaluationTest(unittest.TestCase):
             )
             workspace.distributed_rank = rank
             workspace.distributed_world_size = 8
-            motion_lib = SimpleNamespace(_num_unique_motions=862)
-            workspace.train_env = SimpleNamespace(_env=SimpleNamespace(_motion_lib=motion_lib))
+            motion_lib = SimpleNamespace(
+                _num_unique_motions=862,
+                _motion_num_frames=torch.full((862,), 300),
+            )
+            workspace.train_env = SimpleNamespace(
+                _env=SimpleNamespace(
+                    _motion_lib=motion_lib,
+                    dt=0.02,
+                    mjlab_env=SimpleNamespace(max_episode_length_s=10.0),
+                )
+            )
             workspace._priority_eval_env = None
             built_env = Mock()
             with patch.object(HumanoidVerseMjlabConfig, "build", return_value=(built_env, {})) as build:
@@ -1234,6 +1253,24 @@ class TerrainPriorityEvaluationTest(unittest.TestCase):
             build.assert_called_once_with(num_envs=108, motion_lib=motion_lib)
 
         self.assertEqual(distributed_eval_num_envs(862, 8), 108)
+
+    def test_priority_eval_horizon_covers_longest_expert_motion(self) -> None:
+        self.assertEqual(
+            priority_eval_episode_length_s(
+                torch.tensor([300, 501]),
+                step_dt=0.02,
+                minimum_episode_length_s=10.0,
+            ),
+            10.02,
+        )
+        self.assertEqual(
+            priority_eval_episode_length_s(
+                torch.tensor([300, 996]),
+                step_dt=0.02,
+                minimum_episode_length_s=10.0,
+            ),
+            19.92,
+        )
 
     def test_distributed_motion_shards_cover_every_motion_once(self) -> None:
         shards = [distributed_motion_ids(862, rank, 8) for rank in range(8)]

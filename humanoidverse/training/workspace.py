@@ -115,6 +115,33 @@ def make_flat_terrain_priority_eval_config(env_cfg: HumanoidVerseMjlabConfig) ->
     return env_cfg.model_copy(update={"hydra_overrides": overrides, "evaluation_fast_path": True})
 
 
+def priority_eval_episode_length_s(
+    motion_num_frames,
+    *,
+    step_dt: float,
+    minimum_episode_length_s: float,
+) -> float:
+    """Return a timeout-safe horizon for fast full-motion tracking evaluation.
+
+    The fast evaluator executes one policy step per expert-buffer frame after
+    the initial state.  Reserve one full extra step so the environment timeout
+    cannot truncate the longest trajectory on its final action.
+    """
+
+    if step_dt <= 0.0 or not np.isfinite(step_dt):
+        raise ValueError("priority evaluation step_dt must be finite and positive")
+    if minimum_episode_length_s <= 0.0 or not np.isfinite(minimum_episode_length_s):
+        raise ValueError("priority evaluation minimum horizon must be finite and positive")
+    lengths = torch.as_tensor(motion_num_frames)
+    if lengths.numel() == 0:
+        raise ValueError("priority evaluation requires at least one motion")
+    if not torch.isfinite(lengths).all() or bool((lengths < 2).any()):
+        raise ValueError("priority evaluation motion lengths must be finite and at least two frames")
+    max_frames = int(lengths.max().item())
+    required_episode_length_s = max_frames * float(step_dt)
+    return max(float(minimum_episode_length_s), required_episode_length_s)
+
+
 def make_canonical_plane_training_config(env_cfg: HumanoidVerseMjlabConfig) -> HumanoidVerseMjlabConfig:
     """Copy the main training config while changing only terrain geometry.
 
@@ -899,11 +926,20 @@ class Workspace:
 
     def _get_priority_eval_env(self):
         if self._priority_eval_env is None:
-            eval_cfg = make_flat_terrain_priority_eval_config(self.cfg.env)
+            core = self.train_env._env
+            motion_lib = core._motion_lib
+            eval_episode_length_s = priority_eval_episode_length_s(
+                motion_lib._motion_num_frames,
+                step_dt=float(core.dt),
+                minimum_episode_length_s=float(core.mjlab_env.max_episode_length_s),
+            )
+            eval_cfg = make_flat_terrain_priority_eval_config(self.cfg.env).model_copy(
+                update={"max_episode_length_s": eval_episode_length_s}
+            )
             eval_num_envs = int(self.cfg.online_parallel_envs)
             local_motion_count = None
             if self.cfg.distributed_sync and self.distributed_world_size > 1:
-                num_motions = int(self.train_env._env._motion_lib._num_unique_motions)
+                num_motions = int(motion_lib._num_unique_motions)
                 local_motion_count = len(
                     distributed_motion_ids(num_motions, self.distributed_rank, self.distributed_world_size)
                 )
@@ -915,13 +951,14 @@ class Workspace:
                 eval_num_envs = distributed_eval_num_envs(num_motions, self.distributed_world_size)
             self._priority_eval_env, _ = eval_cfg.build(
                 num_envs=eval_num_envs,
-                motion_lib=self.train_env._env._motion_lib,
+                motion_lib=motion_lib,
             )
             tags = getattr(self.cfg, "tags", {})
             print(
                 "[INFO] Built persistent terrain-aware priority evaluation environment: "
                 f"terrain=plane, terrain_height_observation=flat_zero, "
                 f"direct_depth_sensor={'on' if tags.get('agent') == 'fb_depth' else 'off'}, "
+                f"episode_length_s={eval_episode_length_s:g}, "
                 f"num_envs={eval_num_envs}, rank={self.distributed_rank}, "
                 f"motion_shard_size={local_motion_count}",
                 flush=True,
