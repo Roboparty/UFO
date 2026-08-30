@@ -88,6 +88,7 @@ class MemoryMappedTrajectoryReplay:
         if self.is_full and self.storage_length != self.capacity:
             raise ValueError("A full replay must serialize exactly capacity time slots")
         self.observation_keys = tuple(name.removeprefix(OBSERVATION_PREFIX) for name in self.arrays if name.startswith(OBSERVATION_PREFIX))
+        self.aux_reward_keys = tuple(name.removeprefix("aux_rewards-") for name in self.arrays if name.startswith("aux_rewards-"))
         self._prepare_trajectory_index()
 
     def _prepare_trajectory_index(self) -> None:
@@ -155,10 +156,19 @@ class MemoryMappedTrajectoryReplay:
     def sample(self, batch_size: int) -> dict[str, Any]:
         time_idx, env_idx = self.sample_indices(batch_size)
         next_time = np.remainder(time_idx + 1, self.capacity)
+        next_fields: dict[str, Any] = {"observation": self.observation(next_time, env_idx)}
+        for flag in ("terminated", "truncated"):
+            if flag in self.arrays:
+                next_fields[flag] = self._take(flag, next_time, env_idx)
         return {
             "observation": self.observation(time_idx, env_idx),
             "z": self._take("z", time_idx, env_idx),
-            "next": {"observation": self.observation(next_time, env_idx)},
+            "action": self._take("action", time_idx, env_idx),
+            "aux_rewards": {
+                key: self._take(f"aux_rewards-{key}", time_idx, env_idx)
+                for key in self.aux_reward_keys
+            },
+            "next": next_fields,
             "sample_time_idx": torch.from_numpy(time_idx.copy()),
             "sample_env_idx": torch.from_numpy(env_idx.copy()),
         }
