@@ -431,6 +431,77 @@ class LocomotionReward(RewardFunction):
 
 
 @dataclasses.dataclass
+class HighKneeLocomotionReward(LocomotionReward):
+    """Forward locomotion reward with an extra swing-foot lift preference.
+
+    The lift term uses the relative height difference between the two foot
+    sites instead of absolute foot height. This keeps the reward focused on
+    gait swing clearance and avoids rewarding a two-foot jump where both feet
+    rise together.
+    """
+
+    foot_lift_height: float = 0.08
+    foot_lift_weight: float = 0.5
+
+    def compute(
+        self,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+    ) -> float:
+        base_reward = super().compute(model, data)
+        left_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "left_foot")
+        right_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "right_foot")
+        if left_site_id < 0 or right_site_id < 0:
+            raise RuntimeError("HighKneeLocomotionReward requires left_foot/right_foot sites")
+
+        left_height = float(data.site_xpos[left_site_id, 2])
+        right_height = float(data.site_xpos[right_site_id, 2])
+        relative_swing_height = abs(left_height - right_height)
+        lift_reward = rewards.tolerance(
+            relative_swing_height,
+            bounds=(self.foot_lift_height, float("inf")),
+            margin=max(self.foot_lift_height, 1e-6),
+            value_at_margin=0.1,
+            sigmoid="linear",
+        )
+        lift_weight = float(np.clip(self.foot_lift_weight, 0.0, 1.0))
+        return base_reward * ((1.0 - lift_weight) + lift_weight * lift_reward)
+
+    @staticmethod
+    def reward_from_name(name: str) -> Optional["RewardFunction"]:
+        pattern = r"^move-ego-highknee-(-?\d+\.*\d*)-(-?\d+\.*\d*)-(-?\d+\.*\d*)$"
+        match = re.search(pattern, name)
+        if match:
+            move_angle, move_speed, foot_lift_height = (
+                float(match.group(1)),
+                float(match.group(2)),
+                float(match.group(3)),
+            )
+            return HighKneeLocomotionReward(
+                move_angle=move_angle,
+                move_speed=move_speed,
+                foot_lift_height=foot_lift_height,
+            )
+
+        pattern = r"^move-ego-highknee-(-?\d+\.*\d*)-(-?\d+\.*\d*)-(-?\d+\.*\d*)-(-?\d+\.*\d*)$"
+        match = re.search(pattern, name)
+        if match:
+            move_angle, move_speed, foot_lift_height, foot_lift_weight = (
+                float(match.group(1)),
+                float(match.group(2)),
+                float(match.group(3)),
+                float(match.group(4)),
+            )
+            return HighKneeLocomotionReward(
+                move_angle=move_angle,
+                move_speed=move_speed,
+                foot_lift_height=foot_lift_height,
+                foot_lift_weight=foot_lift_weight,
+            )
+        return None
+
+
+@dataclasses.dataclass
 class JumpReward(RewardFunction):
     jump_height: float = 1.4
     max_velocity: float = 5.0

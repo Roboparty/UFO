@@ -51,6 +51,7 @@ from torch.utils._pytree import tree_map
 from tqdm import tqdm
 
 from humanoidverse.agents.base import BaseConfig
+from humanoidverse.agents.behavior_context import heading_observation, root_heading_xy
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
 from humanoidverse.agents.buffers.transition import DictBuffer, dtype_numpytotorch_lower_precision
 from humanoidverse.agents.fb.agent import RolloutContextState
@@ -250,11 +251,27 @@ def _trajectory_output_keys(agent: Agent) -> list[str]:
     ]
     if getattr(agent, "aux_rewards", None):
         keys.append("aux_rewards")
+    if bool(getattr(agent.model, "heading_context_enabled", False)):
+        keys.extend(
+            [
+                "heading_next",
+                "heading_z_next",
+                "heading_valid",
+                "heading_context_id",
+                "heading_source_type",
+                "heading_reward",
+                "heading_context_continues",
+                "root_heading_xy",
+                "next_root_heading_xy",
+                "transition_terminated",
+                "transition_truncated",
+            ]
+        )
     return keys
 
 
-def _prior_trajectory_output_keys() -> list[str]:
-    return [
+def _prior_trajectory_output_keys(agent: Agent) -> list[str]:
+    keys = [
         "observation",
         "action",
         "z",
@@ -263,6 +280,18 @@ def _prior_trajectory_output_keys() -> list[str]:
         "transition_truncated",
         "step_count",
     ]
+    if bool(getattr(agent.model, "heading_context_enabled", False)):
+        keys.extend(
+            [
+                "heading_next",
+                "heading_valid",
+                "heading_context_id",
+                "heading_source_type",
+                "root_heading_xy",
+                "next_root_heading_xy",
+            ]
+        )
+    return keys
 
 
 def _assert_canonical_plane_terrain_priv(observation: tp.Mapping[str, tp.Any], *, label: str) -> None:
@@ -408,6 +437,11 @@ class TrainConfig(BaseConfig):
                 raise ValueError("canonical-plane direct-depth collection requires trajectory replay")
             if self.prior_buffer_size < self.prior_plane_envs * 2:
                 raise ValueError("prior_buffer_size must hold at least two steps per plane environment")
+        if bool(getattr(self.agent.model, "heading_context_enabled", False)):
+            if self.tags.get("agent") != "fb_depth":
+                raise ValueError("BehaviorContext heading is currently defined only for fb_depth")
+            if not self.use_trajectory_buffer:
+                raise ValueError("BehaviorContext heading requires trajectory replay")
         if self.distributed_gradient_sync == "ddp" and not self.distributed_sync:
             raise ValueError("distributed_gradient_sync='ddp' requires distributed_sync=True")
 
@@ -836,16 +870,109 @@ class Workspace:
         state: RolloutContextState,
         step_count: torch.Tensor,
         replay_buffer: dict[str, tp.Any],
+        current_heading_xy: torch.Tensor | None = None,
     ) -> RolloutContextState:
         advance = getattr(self.agent, "advance_rollout_context", None)
         if callable(advance):
-            return advance(state, step_count, replay_buffer)
+            return advance(
+                state,
+                step_count,
+                replay_buffer,
+                current_heading_xy=current_heading_xy,
+            )
         z = self.agent.maybe_update_rollout_context(
             z=state.z,
             step_count=step_count,
             replay_buffer=replay_buffer,
         )
         return RolloutContextState(z=z)
+
+    @property
+    def _heading_context_enabled(self) -> bool:
+        return bool(getattr(self.cfg.agent.model, "heading_context_enabled", False))
+
+    def _collector_root_heading_xy(self, vector_env) -> torch.Tensor:
+        core = getattr(vector_env, "_env", vector_env)
+        return root_heading_xy(core.base_quat.to(device=self.agent.device, dtype=torch.float32))
+
+    def _attach_rollout_heading(
+        self,
+        obs: dict[str, torch.Tensor],
+        state: RolloutContextState,
+        current_heading_xy: torch.Tensor,
+    ) -> None:
+        if not self._heading_context_enabled:
+            return
+        if state.heading_target_xy is None or state.heading_valid is None:
+            raise RuntimeError("Heading-enabled collector produced an incomplete BehaviorContext")
+        obs["heading"] = heading_observation(
+            current_heading_xy,
+            state.heading_target_xy,
+            state.heading_valid,
+        )
+
+    def _heading_transition_metadata(
+        self,
+        *,
+        vector_env,
+        state: RolloutContextState,
+        step_count: torch.Tensor,
+        current_heading_xy: torch.Tensor | None,
+        new_td: dict[str, tp.Any],
+        new_terminated: np.ndarray,
+        new_truncated: np.ndarray,
+    ) -> dict[str, torch.Tensor]:
+        """Capture action-outcome-aligned Q_H metadata before context switch."""
+
+        if not self._heading_context_enabled:
+            return {}
+        if current_heading_xy is None:
+            raise RuntimeError("Heading-enabled collector is missing the current root heading")
+        if state.context_id is None or state.source_type is None or state.heading_valid is None:
+            raise RuntimeError("Heading-enabled collector produced incomplete context metadata")
+        next_root_heading = self._collector_root_heading_xy(vector_env)
+        next_target, next_valid = self.agent.next_rollout_heading_target(state, step_count)
+        next_z = self.agent.next_rollout_z(state, step_count)
+        next_heading = heading_observation(next_root_heading, next_target, next_valid)
+        done = torch.as_tensor(
+            np.logical_or(new_terminated, new_truncated),
+            device=self.agent.device,
+            dtype=torch.bool,
+        )
+        next_step_count = torch.as_tensor(
+            new_td["time"],
+            device=self.agent.device,
+            dtype=torch.long,
+        )
+        continues = self.agent.rollout_heading_context_continues(
+            state,
+            next_step_count,
+            done,
+        )
+        # MJLab auto-reset returns the reset observation for a completed env,
+        # not the terminal body's heading. Such transitions cannot provide a
+        # valid next-heading reward and are excluded from Q_H rather than
+        # assigning the reset yaw to the previous action.
+        reward_valid = state.heading_valid.to(device=self.agent.device, dtype=torch.bool) & ~done.unsqueeze(-1)
+        valid_float = reward_valid.to(dtype=torch.float32)
+        reward = -valid_float * (1.0 - next_heading[:, :1])
+        return {
+            "heading_next": next_heading,
+            "heading_z_next": next_z,
+            "heading_valid": reward_valid,
+            "heading_context_id": state.context_id,
+            "heading_source_type": state.source_type,
+            "heading_reward": reward,
+            "heading_context_continues": continues,
+            "root_heading_xy": current_heading_xy,
+            "next_root_heading_xy": next_root_heading,
+            "transition_terminated": torch.as_tensor(
+                new_terminated, device=self.agent.device, dtype=torch.bool
+            ).unsqueeze(-1),
+            "transition_truncated": torch.as_tensor(
+                new_truncated, device=self.agent.device, dtype=torch.bool
+            ).unsqueeze(-1),
+        }
 
     def _step_prior_collector(
         self,
@@ -869,13 +996,16 @@ class Workspace:
                 state.td,
             )
             step_count = obs.pop("time")
+            current_root_heading = self._collector_root_heading_xy(self.prior_env)
             state.rollout = self._advance_rollout_state(
                 state.rollout,
                 step_count,
                 replay_buffer,
+                current_heading_xy=current_root_heading,
             )
             if state.rollout.z is None:
                 raise RuntimeError("Canonical-plane rollout did not produce z")
+            self._attach_rollout_heading(obs, state.rollout, current_root_heading)
             if local_time < self.cfg.num_seed_steps:
                 action = self.prior_env.action_space.sample().astype(np.float32)
             else:
@@ -895,6 +1025,15 @@ class Workspace:
             )
 
         episode_boundary = np.logical_or(state.terminated, state.truncated)
+        heading_metadata = self._heading_transition_metadata(
+            vector_env=self.prior_env,
+            state=state.rollout,
+            step_count=step_count,
+            current_heading_xy=current_root_heading,
+            new_td=new_td,
+            new_terminated=new_terminated,
+            new_truncated=new_truncated,
+        )
         data = {
             "observation": tree_map(lambda x: x[None, ...], obs),
             "action": action[None, ...],
@@ -904,6 +1043,16 @@ class Workspace:
             "transition_truncated": new_truncated[None, ..., None],
             "step_count": step_count[None, ..., None],
         }
+        for key in (
+            "heading_next",
+            "heading_valid",
+            "heading_context_id",
+            "heading_source_type",
+            "root_heading_xy",
+            "next_root_heading_xy",
+        ):
+            if key in heading_metadata:
+                data[key] = heading_metadata[key][None, ...]
         data["observation"].pop("history", None)
         replay_buffer["prior"].extend(data)
         return (
@@ -1296,7 +1445,7 @@ class Workspace:
                     device=self.cfg.buffer_device,
                     n_dim=2,
                     end_key="episode_boundary",
-                    output_key_t=_prior_trajectory_output_keys(),
+                    output_key_t=_prior_trajectory_output_keys(self.cfg.agent),
                     output_key_tp1=["observation"],
                     compact_depth_history=True,
                     depth_history_offsets=RP1DirectDepthConfig().sampled_ages,
@@ -1595,6 +1744,11 @@ class Workspace:
                 obs = tree_map(lambda x: torch.tensor(x, dtype=dtype_numpytotorch_lower_precision(x.dtype), device=self.agent.device), td)
                 # TODO consistency with obs_space: remove time assigned by TimeAwareObservationWrapper
                 step_count = obs.pop("time")
+                current_root_heading = (
+                    self._collector_root_heading_xy(train_env)
+                    if self._heading_context_enabled
+                    else None
+                )
 
                 history_context = None
                 if "history" in obs:
@@ -1610,10 +1764,12 @@ class Workspace:
                     main_rollout_state,
                     step_count,
                     replay_buffer,
+                    current_heading_xy=current_root_heading,
                 )
                 context = main_rollout_state.z
                 if context is None:
                     raise RuntimeError("Main rollout did not produce z")
+                self._attach_rollout_heading(obs, main_rollout_state, current_root_heading)
                 if local_time < self.cfg.num_seed_steps:
                     action = train_env.action_space.sample().astype(np.float32)
                 else:
@@ -1664,6 +1820,15 @@ class Workspace:
                         optimizer_steps=self._optimizer_steps,
                     )
             new_td, new_reward, new_terminated, new_truncated, new_info = train_env.step(action)
+            heading_metadata = self._heading_transition_metadata(
+                vector_env=train_env,
+                state=main_rollout_state,
+                step_count=step_count,
+                current_heading_xy=current_root_heading,
+                new_td=new_td,
+                new_terminated=new_terminated,
+                new_truncated=new_truncated,
+            )
             if check_rollout_nonfinite:
                 _assert_finite(
                     new_td,
@@ -1761,6 +1926,11 @@ class Workspace:
                         }
             else:
                 raise NotImplementedError("still some work to do for gymnasium < 1.0")
+            if heading_metadata:
+                if not self.cfg.use_trajectory_buffer:
+                    raise RuntimeError("BehaviorContext heading training requires trajectory replay")
+                for key, value in heading_metadata.items():
+                    data[key] = value[None, ...]
             if check_rollout_nonfinite:
                 _assert_finite(
                     data,

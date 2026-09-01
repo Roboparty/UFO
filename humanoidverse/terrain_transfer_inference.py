@@ -14,6 +14,12 @@ import torch
 from torch.utils._pytree import tree_map
 
 from humanoidverse.actor_override import load_actor_module_override, load_actor_override
+from humanoidverse.agents.behavior_context import (
+    align_heading_sequence,
+    heading_observation,
+    repeat_heading_sequence,
+    root_heading_xy,
+)
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
 from humanoidverse.goal_inference import _find_goal_json, load_and_validate_goal_json
 from humanoidverse.mjlab_inference_utils import (
@@ -31,12 +37,14 @@ from humanoidverse.terrains.rp1_simple import (
     RP1_CENTER_PLATFORM_WIDTH,
     RP1_STAIR_LEVELS,
     RP1_STAIR_STEP_HEIGHT_RANGE,
+    RP1_STAIR_STEP_WIDTH,
     RP1_TERRAIN_COMPONENT_NAMES,
     rp1_center_reset_profile,
 )
 from humanoidverse.tracking_inference import _target_states_from_obs, _tracking_z
 from humanoidverse.utils.helpers import get_backward_observation
 from humanoidverse.utils.robot_spec import load_robot_training_spec
+from humanoidverse.utils.torch_utils import my_quat_rotate
 
 SUPPORTED_TERRAINS = (
     "flat",
@@ -141,6 +149,221 @@ def _scalar_aux_reward(info: dict[str, Any], name: str) -> float:
     if value is None:
         return 0.0
     return float(torch.as_tensor(value).reshape(-1)[0].item())
+
+
+_STAIR_DIAGNOSTIC_JOINTS = (
+    "left_hip_pitch_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "right_hip_pitch_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+)
+
+
+def _stair_mechanics_frame(core, *, step: int, raw_action: torch.Tensor, info: dict[str, Any]) -> dict[str, Any]:
+    """Capture inference-only swing, contact, action, and actuator diagnostics."""
+    foot_indices = core.feet_indices
+    foot_pos = core.body_pos[0, foot_indices]
+    foot_rot = core.body_rot[0, foot_indices]
+    # The G1 foot collision capsules end at x=0.132, z=-0.025 with radius 0.01 m.
+    # Transform the capsule endpoint, then subtract the rotation-invariant sphere radius.
+    toe_center_local = torch.tensor([0.132, 0.0, -0.025], device=core.device).expand(2, -1)
+    heel_center_local = torch.tensor([-0.054, 0.0, -0.025], device=core.device).expand(2, -1)
+    toe = foot_pos + my_quat_rotate(foot_rot, toe_center_local)
+    heel = foot_pos + my_quat_rotate(foot_rot, heel_center_local)
+    toe = toe.clone()
+    heel = heel.clone()
+    toe[:, 2] -= 0.01
+    heel[:, 2] -= 0.01
+
+    if hasattr(core, "contact_force_history"):
+        force_history = core.contact_force_history[0, foot_indices]
+        peak_index = torch.linalg.vector_norm(force_history, dim=-1).argmax(dim=-1)
+        peak_force = force_history[torch.arange(2, device=core.device), peak_index]
+    else:
+        peak_force = core.contact_forces[0, foot_indices]
+    foot_speed = torch.linalg.vector_norm(core.body_vel[0, foot_indices], dim=-1)
+
+    selected_indices = [core.dof_names.index(name) for name in _STAIR_DIAGNOSTIC_JOINTS]
+    clipped = core.actions[0]
+    applied = core.applied_actions[0]
+    pd_target = (
+        core.default_dof_pos[0]
+        + core.default_dof_pos_offset[0]
+        + applied * core.action_target_scale[0]
+    )
+    torque_ratio = core.torques[0].abs() / torch.clamp(core.torque_limits, min=1.0e-6)
+
+    def selected(values: torch.Tensor) -> dict[str, float]:
+        return {
+            name: float(values[index].detach().item())
+            for name, index in zip(_STAIR_DIAGNOSTIC_JOINTS, selected_indices)
+        }
+
+    aux_names = (
+        "penalty_action_rate",
+        "limits_dof_pos",
+        "penalty_body_impact",
+        "penalty_slippage",
+        "penalty_ankle_roll",
+    )
+    return {
+        "step": int(step),
+        "root_xyz": core.robot_root_states[0, :3].detach().cpu().tolist(),
+        "feet": {
+            side: {
+                "toe_xyz": toe[index].detach().cpu().tolist(),
+                "heel_xyz": heel[index].detach().cpu().tolist(),
+                "body_xyz": foot_pos[index].detach().cpu().tolist(),
+                "peak_contact_force_xyz": peak_force[index].detach().cpu().tolist(),
+                "peak_contact_force_norm": float(torch.linalg.vector_norm(peak_force[index]).item()),
+                "peak_contact_force_horizontal": float(torch.linalg.vector_norm(peak_force[index, :2]).item()),
+                "foot_speed": float(foot_speed[index].item()),
+            }
+            for index, side in enumerate(("left", "right"))
+        },
+        "raw_action": selected(raw_action[0]),
+        "clipped_action": selected(clipped),
+        "applied_action": selected(applied),
+        "dof_pos": selected(core.dof_pos[0]),
+        "pd_target": selected(pd_target),
+        "torque": selected(core.torques[0]),
+        "torque_ratio": selected(torque_ratio),
+        "raw_action_abs_max_all_joints": float(raw_action[0].abs().max().item()),
+        "torque_ratio_max_all_joints": float(torque_ratio.max().item()),
+        "aux": {name: _scalar_aux_reward(info, name) for name in aux_names},
+    }
+
+
+def _summarize_stair_mechanics(
+    frames: list[dict[str, Any]],
+    *,
+    tile_center_xy: list[float],
+    initial_ground_height: float,
+    step_height: float,
+    action_clip: float,
+) -> dict[str, Any]:
+    """Summarize toe clearance at riser crossings and actuator headroom."""
+    if not frames:
+        raise ValueError("stair mechanics diagnostics require at least one frame")
+    center_x, center_y = tile_center_xy
+    crossing_events: list[dict[str, Any]] = []
+    edge_contact_candidates: list[dict[str, Any]] = []
+    previous_edge_candidate = {"left": False, "right": False}
+
+    def radial_distance(xyz: list[float]) -> float:
+        return max(abs(float(xyz[0]) - center_x), abs(float(xyz[1]) - center_y))
+
+    for side in ("left", "right"):
+        for level in range(1, RP1_STAIR_LEVELS + 1):
+            boundary = RP1_CENTER_PLATFORM_WIDTH / 2.0 + (level - 1) * RP1_STAIR_STEP_WIDTH
+            for previous, current in zip(frames[:-1], frames[1:]):
+                previous_rho = radial_distance(previous["feet"][side]["toe_xyz"])
+                current_rho = radial_distance(current["feet"][side]["toe_xyz"])
+                if previous_rho < boundary <= current_rho and current_rho > previous_rho:
+                    alpha = (boundary - previous_rho) / max(current_rho - previous_rho, 1.0e-9)
+                    previous_z = float(previous["feet"][side]["toe_xyz"][2])
+                    current_z = float(current["feet"][side]["toe_xyz"][2])
+                    crossing_z = previous_z + alpha * (current_z - previous_z)
+                    tread_height = initial_ground_height + level * step_height
+                    crossing_events.append(
+                        {
+                            "foot": side,
+                            "level": level,
+                            "step": int(current["step"]),
+                            "toe_clearance_m": crossing_z - tread_height,
+                            "toe_world_z_m": crossing_z,
+                            "next_tread_world_z_m": tread_height,
+                            "pre_crossing_vertical_force_n": abs(
+                                float(previous["feet"][side]["peak_contact_force_xyz"][2])
+                            ),
+                            "peak_contact_force_n": float(current["feet"][side]["peak_contact_force_norm"]),
+                            "peak_horizontal_force_n": float(
+                                current["feet"][side]["peak_contact_force_horizontal"]
+                            ),
+                            "foot_speed_mps": float(current["feet"][side]["foot_speed"]),
+                            "raw_action": current["raw_action"],
+                            "torque_ratio": current["torque_ratio"],
+                            "aux": current["aux"],
+                        }
+                    )
+                    break
+
+    for frame in frames:
+        for side in ("left", "right"):
+            rho = radial_distance(frame["feet"][side]["toe_xyz"])
+            edge_distance = min(
+                abs(rho - (RP1_CENTER_PLATFORM_WIDTH / 2.0 + level * RP1_STAIR_STEP_WIDTH))
+                for level in range(RP1_STAIR_LEVELS)
+            )
+            foot = frame["feet"][side]
+            candidate = (
+                edge_distance <= 0.08
+                and float(foot["peak_contact_force_horizontal"]) >= 25.0
+                and float(foot["foot_speed"]) >= 0.10
+            )
+            if candidate and not previous_edge_candidate[side]:
+                edge_contact_candidates.append(
+                    {
+                        "foot": side,
+                        "step": int(frame["step"]),
+                        "edge_distance_m": edge_distance,
+                        "peak_contact_force_n": float(foot["peak_contact_force_norm"]),
+                        "peak_horizontal_force_n": float(foot["peak_contact_force_horizontal"]),
+                        "foot_speed_mps": float(foot["foot_speed"]),
+                        "aux": frame["aux"],
+                    }
+                )
+            previous_edge_candidate[side] = candidate
+
+    def distribution(values: list[float]) -> dict[str, float]:
+        tensor = torch.tensor(values, dtype=torch.float32)
+        return {
+            "max": float(tensor.max().item()),
+            "p95": float(torch.quantile(tensor, 0.95).item()),
+            "mean": float(tensor.mean().item()),
+        }
+
+    action_ratios: dict[str, list[float]] = {name: [] for name in _STAIR_DIAGNOSTIC_JOINTS}
+    torque_ratios: dict[str, list[float]] = {name: [] for name in _STAIR_DIAGNOSTIC_JOINTS}
+    for frame in frames:
+        for name in _STAIR_DIAGNOSTIC_JOINTS:
+            action_ratios[name].append(abs(float(frame["raw_action"][name])) / action_clip)
+            torque_ratios[name].append(abs(float(frame["torque_ratio"][name])))
+
+    clearance_values = [float(event["toe_clearance_m"]) for event in crossing_events]
+    return {
+        "frames": len(frames),
+        "step_height_m": step_height,
+        "action_clip": action_clip,
+        "crossing_event_count": len(crossing_events),
+        "crossing_clearance_m": (
+            {
+                "min": min(clearance_values),
+                "mean": sum(clearance_values) / len(clearance_values),
+                "max": max(clearance_values),
+                "below_zero_count": sum(value < 0.0 for value in clearance_values),
+                "below_3cm_count": sum(value < 0.03 for value in clearance_values),
+                "below_5cm_count": sum(value < 0.05 for value in clearance_values),
+            }
+            if clearance_values
+            else None
+        ),
+        "crossing_events": crossing_events,
+        "edge_contact_candidate_count": len(edge_contact_candidates),
+        "edge_contact_candidates": edge_contact_candidates,
+        "action_clip_ratio": {name: distribution(values) for name, values in action_ratios.items()},
+        "action_near_clip_fraction": {
+            name: sum(value >= 0.90 for value in values) / len(values)
+            for name, values in action_ratios.items()
+        },
+        "torque_limit_ratio": {name: distribution(values) for name, values in torque_ratios.items()},
+        "torque_near_limit_fraction": {
+            name: sum(value >= 0.90 for value in values) / len(values)
+            for name, values in torque_ratios.items()
+        },
+    }
 
 
 def _stairs_progress_metrics(
@@ -445,10 +668,12 @@ def _compute_goal_or_tracking_z(args, model, base_cfg):
             z = model.goal_inference(goal_obs)
             identifier = f"{goal.get('motion_name', motion_id)}:{frame_idx}"
         target_states = _target_states_from_obs(obs_dict, device=args.device, num_dof=env.num_dof)
-        # Store the prompt pose in terrain-local coordinates. Each rollout adds
-        # its own physical terrain origin, including the safe spawn height.
+        # Store the prompt pose in terrain-local coordinates. MotionLib root Z
+        # is already the clearance above the canonical motion plane, so keep it
+        # unchanged; each rollout adds its physical terrain origin exactly once.
+        # Subtracting the encoding env's Z here makes depressed RP1 tile origins
+        # count twice and spawns the robot far above the local ground.
         target_states["root_states"] = target_states["root_states"].clone()
-        target_states["root_states"][:, :3] -= env.env_origins[:1].to(args.device)
         target_states["root_states"][:, :2] = 0.0
         return z.detach(), identifier, target_states
     finally:
@@ -726,6 +951,9 @@ def _run_rollout(
         cumulative_planar_path = 0.0
         previous_root_xy = initial_root[:2].clone()
         frames = []
+        mechanics_frames: list[dict[str, Any]] = []
+        mechanics_output = getattr(args, "stair_mechanics_output", None)
+        collect_stair_mechanics = mechanics_output is not None and terrain == "low_stairs_down"
         if args.save_mp4:
             renderer = MujocoQposRenderer(
                 None,
@@ -742,6 +970,27 @@ def _run_rollout(
         truncated_flag = False
         boundary_reset_flag = False
         steps = min(args.episode_length, int(z.shape[0])) if args.prompt_type == "tracking" else args.episode_length
+        heading_targets = None
+        heading_valid = False
+        if bool(getattr(model.cfg, "heading_context_enabled", False)):
+            current_heading = root_heading_xy(wrapped_env._env.base_quat.float())
+            if args.prompt_type == "reward":
+                # An explicit ego-forward reward command owns a fixed world
+                # heading captured when the command starts.
+                heading_targets = current_heading.clone()
+                heading_valid = True
+            elif args.prompt_type == "tracking":
+                reference_heading = root_heading_xy(
+                    target_states["root_states"][:, 3:7].to(args.device).float()
+                )
+                repeats = max(1, (steps + reference_heading.shape[0] - 1) // reference_heading.shape[0])
+                reference_heading = repeat_heading_sequence(reference_heading, repeats)
+                heading_targets = align_heading_sequence(
+                    reference_heading.unsqueeze(0),
+                    current_heading,
+                    torch.zeros(1, device=args.device, dtype=torch.long),
+                )[0]
+                heading_valid = True
         completed = 0
         last_z_step = z[:1]
         for step in range(steps):
@@ -751,6 +1000,17 @@ def _run_rollout(
                     observation,
                     reset_mask=torch.ones(1, device=args.device, dtype=torch.bool) if step == 0 else None,
                 )
+            if heading_valid:
+                target_heading = (
+                    heading_targets
+                    if heading_targets.ndim == 2 and heading_targets.shape[0] == 1
+                    else heading_targets[min(step, heading_targets.shape[0] - 1)].unsqueeze(0)
+                )
+                observation["heading"] = heading_observation(
+                    root_heading_xy(wrapped_env._env.base_quat.float()),
+                    target_heading,
+                    torch.ones((1, 1), device=args.device, dtype=torch.bool),
+                )
             last_z_step = z_step
             action = model.act(observation, z_step, mean=True)
             if comparison_actor is not None:
@@ -759,6 +1019,15 @@ def _run_rollout(
                 action_l2_deviations.append(float(torch.linalg.vector_norm(difference, dim=-1).mean().item()))
                 action_abs_deviations.append(float(difference.abs().mean().item()))
             observation, _reward, terminated, truncated, _info = wrapped_env.step(action, to_numpy=False)
+            if collect_stair_mechanics:
+                mechanics_frames.append(
+                    _stair_mechanics_frame(
+                        wrapped_env._env,
+                        step=step + 1,
+                        raw_action=action,
+                        info=_info,
+                    )
+                )
             if perception_runtime is not None:
                 reset = torch.as_tensor(terminated, device=args.device).bool() | torch.as_tensor(truncated, device=args.device).bool()
                 perception_runtime.after_step(reset)
@@ -802,6 +1071,7 @@ def _run_rollout(
         final_ground_clearance = _root_ground_clearance(wrapped_env)
         final_upright_score = _root_upright_score(wrapped_env)
         stairs_metrics: dict[str, Any] = {}
+        stair_step_height_for_diagnostics: float | None = None
         if terrain == "stairs":
             step_height, terrain_difficulty, terrain_level = _stairs_step_height(wrapped_env)
             num_steps = int(wrapped_env._env.config.terrain.stairs.num_steps)
@@ -847,6 +1117,7 @@ def _run_rollout(
                 wrapped_env,
                 step_height_range=RP1_STAIR_STEP_HEIGHT_RANGE,
             )
+            stair_step_height_for_diagnostics = step_height
             profile, vertical_direction = rp1_center_reset_profile(terrain)
             separated_direction = "stairs_up" if vertical_direction == "ascent" else "stairs_down"
             stairs_metrics = {
@@ -886,6 +1157,30 @@ def _run_rollout(
                 raise RuntimeError(f"No frames rendered for terrain={terrain}")
             media.write_video(str(video_path), frames, fps=args.fps)
             print(f"[INFO] wrote terrain video {video_path}")
+        stair_mechanics_summary = None
+        if collect_stair_mechanics:
+            if stair_step_height_for_diagnostics is None:
+                raise RuntimeError("stair mechanics diagnostics did not resolve the RP1 step height")
+            stair_mechanics_summary = _summarize_stair_mechanics(
+                mechanics_frames,
+                tile_center_xy=wrapped_env._env.env_origins[0, :2].detach().cpu().tolist(),
+                initial_ground_height=initial_ground_height,
+                step_height=stair_step_height_for_diagnostics,
+                action_clip=float(wrapped_env._env.config.robot.control.action_clip_value),
+            )
+            mechanics_path = mechanics_output.expanduser().resolve()
+            mechanics_path.parent.mkdir(parents=True, exist_ok=True)
+            mechanics_payload = {
+                "terrain": terrain,
+                "prompt_identifier": args.prompt_identifier,
+                "checkpoint": str(args.model_folder),
+                "tile_center_xy": wrapped_env._env.env_origins[0, :2].detach().cpu().tolist(),
+                "initial_ground_height": initial_ground_height,
+                "summary": stair_mechanics_summary,
+                "frames": mechanics_frames,
+            }
+            mechanics_path.write_text(json.dumps(mechanics_payload, indent=2) + "\n")
+            print(f"[INFO] wrote stair mechanics diagnostics {mechanics_path}")
         result = {
             "terrain_type": terrain,
             "seed": args.seed,
@@ -933,6 +1228,7 @@ def _run_rollout(
                 args.comparison_actor_info["checksum"] if args.comparison_actor_info is not None else None
             ),
             "video_path": str(video_path) if video_path is not None else None,
+            "stair_mechanics_summary": stair_mechanics_summary,
             **stairs_metrics,
         }
         return result
@@ -1014,6 +1310,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-forward-weight", type=float, default=0.5)
     parser.add_argument("--motion-id", type=int, default=0)
     parser.add_argument(
+        "--tracking-repeats",
+        type=int,
+        default=1,
+        help="Repeat a tracking latent sequence for a longer continuous rollout.",
+    )
+    parser.add_argument(
         "--stairs-start-step",
         type=int,
         default=0,
@@ -1045,6 +1347,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Maximum continuous body-impact severity allowed by strict success metrics.",
+    )
+    parser.add_argument(
+        "--stair-mechanics-output",
+        type=Path,
+        default=None,
+        help=(
+            "Optional inference-only JSON trace for low_stairs_down toe-clearance, "
+            "contact, action, and torque diagnostics."
+        ),
     )
     parser.add_argument("--save-mp4", action="store_true")
     parser.add_argument("--render-size", type=int, default=480)
@@ -1103,6 +1414,12 @@ def main() -> None:
         if args.load_latent is not None:
             raise ValueError("--load-latent currently supports reward prompts only")
         z, identifier, target_states = _compute_goal_or_tracking_z(args, model, base_cfg)
+        if args.prompt_type == "tracking":
+            if args.tracking_repeats < 1:
+                raise ValueError("--tracking-repeats must be positive")
+            if args.tracking_repeats > 1:
+                z = z.repeat((int(args.tracking_repeats), 1))
+                identifier = f"{identifier}:repeat{int(args.tracking_repeats)}"
         if args.prompt_type == "goal" and args.goal_forward_latent is not None:
             forward_z, forward_identifier = _load_reward_latent_for_goal_composition(
                 args.goal_forward_latent,

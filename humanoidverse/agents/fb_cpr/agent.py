@@ -124,7 +124,13 @@ class FBcprAgent(FBAgent):
             self.encode_expert = CudaGraphModule(self.encode_expert, warmup=5)
 
     @torch.no_grad()
-    def sample_mixed_z(self, train_goal: torch.Tensor, expert_encodings: torch.Tensor, *args, **kwargs):
+    def sample_mixed_context_components(
+        self,
+        train_goal: torch.Tensor,
+        expert_encodings: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Sample z and retain the source/permutation needed by companion context."""
+
         with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
             z = self._model.sample_z(self.cfg.train.batch_size, device=self.device)
             p_goal = self.cfg.train.train_goal_ratio
@@ -144,9 +150,14 @@ class FBcprAgent(FBAgent):
             z = torch.where(mix_idxs == 0, goals, z)
 
             # zs obtained by encoding expert trajectories
-            perm = torch.randperm(self.cfg.train.batch_size, device=self.device)
-            z = torch.where(mix_idxs == 1, expert_encodings[perm], z)
+            expert_perm = torch.randperm(self.cfg.train.batch_size, device=self.device)
+            z = torch.where(mix_idxs == 1, expert_encodings[expert_perm], z)
 
+        return z, mix_idxs, expert_perm
+
+    @torch.no_grad()
+    def sample_mixed_z(self, train_goal: torch.Tensor, expert_encodings: torch.Tensor, *args, **kwargs):
+        z, _source_type, _expert_perm = self.sample_mixed_context_components(train_goal, expert_encodings)
         return z
 
     @torch.no_grad()

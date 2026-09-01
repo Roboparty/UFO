@@ -23,6 +23,7 @@ import mediapy as media
 import torch
 
 from humanoidverse.actor_override import load_actor_override
+from humanoidverse.agents.behavior_context import heading_observation, root_heading_xy
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
 from humanoidverse.agents.buffers.transition import DictBuffer
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
@@ -328,6 +329,9 @@ def run_reward_inference(
                 z = z_cpu.to(device).repeat(1, 1)
                 target_states = _default_standing_target_states(wrapped_env, device=device)
                 observation, _info = wrapped_env.reset(to_numpy=False, target_states=target_states)
+                heading_target = None
+                if bool(getattr(model.cfg, "heading_context_enabled", False)) and task.startswith("move-ego-"):
+                    heading_target = root_heading_xy(wrapped_env._env.base_quat.float()).clone()
                 if perception_runtime is not None:
                     perception_runtime.reset()
                 print("[INFO] Reset reward rollout to default standing pose.")
@@ -340,6 +344,12 @@ def run_reward_inference(
                         observation["terrain_actor"] = perception_runtime.terrain_actor(
                             observation,
                             reset_mask=torch.ones(1, device=device, dtype=torch.bool) if step == 0 else None,
+                        )
+                    if heading_target is not None:
+                        observation["heading"] = heading_observation(
+                            root_heading_xy(wrapped_env._env.base_quat.float()),
+                            heading_target,
+                            torch.ones((1, 1), device=device, dtype=torch.bool),
                         )
                     action = model.act(observation, z, mean=True)
                     observation, _reward, terminated, truncated, _info = wrapped_env.step(action, to_numpy=False)

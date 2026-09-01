@@ -15,6 +15,12 @@ import torch
 import torch.distributed as dist
 from scipy.spatial.distance import cdist
 from torch.utils._pytree import tree_map
+
+from humanoidverse.agents.behavior_context import (
+    align_heading_sequence,
+    heading_observation,
+    root_heading_xy,
+)
 from tqdm import tqdm
 
 from humanoidverse.utils.reference_observations import reference_base_ang_vel
@@ -609,6 +615,20 @@ def _expert_motion_slice(expert_buffer, motion_id: int) -> dict[str, torch.Tenso
     return tree_map(lambda value: value[indices], expert_buffer.storage["observation"])
 
 
+def _expert_motion_heading_slice(expert_buffer, motion_id: int) -> torch.Tensor:
+    mapping = getattr(expert_buffer, "_evaluation_motion_index", None)
+    if mapping is None:
+        mapping = {int(value): index for index, value in enumerate(expert_buffer.motion_ids)}
+        expert_buffer._evaluation_motion_index = mapping
+    if "heading_forward_xy" not in expert_buffer.storage:
+        raise RuntimeError("Tracking heading evaluation requires a v3 expert buffer cache")
+    trajectory_index = mapping[motion_id]
+    start = int(expert_buffer.start_idx[trajectory_index, 0].item())
+    length = int(expert_buffer.lengths[trajectory_index].item())
+    indices = torch.arange(start, start + length, device=expert_buffer.start_idx.device) % expert_buffer.capacity
+    return expert_buffer.storage["heading_forward_xy"][indices]
+
+
 @torch.no_grad()
 def _encode_motion_contexts(model, observations, lengths, *, device: str, batch_size: int):
     joined = {
@@ -637,6 +657,10 @@ def _fast_tracking_chunk(
     core = env._env
     model = extract_model(agent)
     observations = [_expert_motion_slice(expert_buffer, motion_id) for motion_id in motion_ids]
+    heading_references = [
+        _expert_motion_heading_slice(expert_buffer, motion_id).float().to(core.device)
+        for motion_id in motion_ids
+    ]
     lengths = [int(observation["state"].shape[0]) for observation in observations]
     if any(length < 3 for length in lengths):
         raise ValueError("Tracking evaluation requires every motion to contain at least three frames")
@@ -669,6 +693,19 @@ def _fast_tracking_chunk(
     }
     observation, _ = env.reset(target_states=target_states, to_numpy=False)
 
+    heading_targets: list[torch.Tensor] = []
+    initial_policy_heading = root_heading_xy(core.base_quat.float())
+    for env_index, local_motion_index in enumerate(
+        torch.arange(core.num_envs, device=core.device).clamp_max(len(motion_ids) - 1).tolist()
+    ):
+        reference = heading_references[local_motion_index]
+        aligned = align_heading_sequence(
+            reference.unsqueeze(0),
+            initial_policy_heading[env_index : env_index + 1],
+            torch.zeros(1, device=core.device, dtype=torch.long),
+        )[0]
+        heading_targets.append(aligned)
+
     all_context = torch.cat(contexts, dim=0)
     context_lengths = torch.tensor([context.shape[0] for context in contexts], device=core.device)
     offsets = torch.cat(
@@ -686,6 +723,14 @@ def _fast_tracking_chunk(
         disable=disable_tqdm,
     ):
         context_indices = offsets[assigned_local] + torch.remainder(step, context_lengths[assigned_local])
+        if bool(getattr(model.cfg, "heading_context_enabled", False)):
+            current_heading = root_heading_xy(core.base_quat.float())
+            target_heading = torch.stack(
+                [target[min(step, target.shape[0] - 1)] for target in heading_targets],
+                dim=0,
+            )
+            valid = torch.ones((core.num_envs, 1), device=core.device, dtype=torch.bool)
+            observation["heading"] = heading_observation(current_heading, target_heading, valid)
         action = agent.act(observation, all_context[context_indices], mean=True)
         observation, _, terminated, truncated, _ = env.step(action, to_numpy=False)
         active = step < context_lengths[assigned_local]
@@ -793,6 +838,7 @@ def _async_tracking_worker(
 
     ctx_dict = {}
     tracking_targets = {}
+    tracking_heading_references = {}
     # target_xpos_dict = {}
     tracking_joint_pos = {}
     dof_states_list = [None] * num_envs
@@ -810,6 +856,9 @@ def _async_tracking_worker(
         ctx_dict[m_id] = ctx
         tracking_targets[m_id] = tree_map(lambda x: x.cpu(), tracking_target)
         tracking_joint_pos[m_id] = tracking_target_dict["dof_pos"].clone()
+        tracking_heading_references[m_id] = root_heading_xy(
+            tracking_target_dict["ref_body_rots"][:, 0].to(core_env.device).float()
+        )
         # import ipdb; ipdb.set_trace()
 
         ref_body_rots = tracking_target_dict["ref_body_rots"][0, 0]
@@ -867,6 +916,18 @@ def _async_tracking_worker(
         joint_vel = [core_env.simulator.dof_state[..., 1]]
 
         max_ctx_len = max([ctx.shape[0] for ctx in ctx_dict.values()])
+        aligned_heading_targets: list[torch.Tensor] = []
+        initial_policy_heading = root_heading_xy(core_env.base_quat.float())
+        for env_id in range(num_envs):
+            m_id = int(assigned_motions[env_id].item())
+            reference = tracking_heading_references[m_id]
+            aligned_heading_targets.append(
+                align_heading_sequence(
+                    reference.unsqueeze(0),
+                    initial_policy_heading[env_id : env_id + 1],
+                    torch.zeros(1, device=core_env.device, dtype=torch.long),
+                )[0]
+            )
         for step in tqdm(range(max_ctx_len), desc="Tracking Evaluation", disable=disable_tqdm):
             ctx_batch = []
             for env_id in range(num_envs):
@@ -875,6 +936,14 @@ def _async_tracking_worker(
                 ctx_t = ctx[step % ctx.shape[0]]
                 ctx_batch.append(ctx_t)
             ctx_batch = torch.stack(ctx_batch)
+            if bool(getattr(model.cfg, "heading_context_enabled", False)):
+                current_heading = root_heading_xy(core_env.base_quat.float())
+                target_heading = torch.stack(
+                    [target[min(step, target.shape[0] - 1)] for target in aligned_heading_targets],
+                    dim=0,
+                )
+                valid = torch.ones((num_envs, 1), device=core_env.device, dtype=torch.bool)
+                observation["heading"] = heading_observation(current_heading, target_heading, valid)
             action = agent.act(observation, ctx_batch, mean=True)
             observation, reward, terminated, truncated, info = env.step(action, to_numpy=False)
             joint_pos.append(core_env.simulator.dof_state[..., 0])

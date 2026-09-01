@@ -41,7 +41,7 @@ DEFAULT_PRIOR_PLANE_ENVS = 128
 DEFAULT_NUM_ENV_STEPS = 192000000
 DEFAULT_CHECKPOINT_EVERY_STEPS = 9600000
 DEFAULT_TRACKING_EVAL_EVERY_STEPS = 3200000
-DEFAULT_SAME_Z_EVAL_EVERY_STEPS = 9600000
+DEFAULT_SAME_Z_EVAL_EVERY_STEPS = 0
 DEFAULT_DATA_PATH = "humanoidverse/data/lafan_29dof_10s-clipped.pkl"
 DEFAULT_WORK_DIR = "runs/ufo"
 DEFAULT_BUFFER_SIZE = 5120000
@@ -125,6 +125,8 @@ def build_ufo_mjlab_config(
     clip_grad_norm: float = 0.0,
     resume_replay_warmup_steps: int = 0,
     cartwheel_aux_safe: bool = False,
+    heading_context: bool = True,
+    heading_reg_coeff: float = 0.0,
     num_agent_updates: int | None = None,
     robot_config: str | Path | None = None,
     terrain_mode: str | None = None,
@@ -134,6 +136,12 @@ def build_ufo_mjlab_config(
     ddp_bucket_cap_mb: float = 25.0,
 ) -> TrainConfig:
     agent = canonical_agent_name(agent)
+    if heading_reg_coeff < 0.0:
+        raise ValueError("heading_reg_coeff must be non-negative")
+    if heading_reg_coeff > 0.0 and not heading_context:
+        raise ValueError("heading_reg_coeff requires heading_context=True")
+    if heading_reg_coeff > 0.0 and agent != "fb_depth":
+        raise ValueError("BehaviorContext heading is only supported by fb_depth")
     if prior_plane_envs is None:
         prior_plane_envs = DEFAULT_PRIOR_PLANE_ENVS if agent == "fb_depth" else 0
     prior_plane_envs = int(prior_plane_envs)
@@ -144,7 +152,6 @@ def build_ufo_mjlab_config(
     for cadence_name, cadence_steps in (
         ("checkpoint_every_steps", checkpoint_every_steps),
         ("tracking_eval_every_steps", tracking_eval_every_steps),
-        ("same_z_eval_every_steps", same_z_eval_every_steps),
     ):
         if int(cadence_steps) <= 0:
             raise ValueError(f"{cadence_name} must be positive")
@@ -189,7 +196,7 @@ def build_ufo_mjlab_config(
                 n_episodes_per_motion=1,
             )
         ]
-        if agent == "fb_depth":
+        if agent == "fb_depth" and int(same_z_eval_every_steps) > 0:
             evaluations.append(
                 SameZTerrainEvaluationConfig(
                     name="SameZTerrainEvaluationConfig",
@@ -211,6 +218,8 @@ def build_ufo_mjlab_config(
         lr_scale=lr_scale,
         clip_grad_norm=clip_grad_norm,
         cartwheel_aux_safe=cartwheel_aux_safe,
+        heading_context=bool(heading_context and agent == "fb_depth"),
+        heading_reg_coeff=float(heading_reg_coeff),
         wandb_project=wandb_project,
     )
     agent_cfg = selected["agent_cfg"]
@@ -428,6 +437,8 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         clip_grad_norm=args.clip_grad_norm,
         resume_replay_warmup_steps=args.resume_replay_warmup_steps,
         cartwheel_aux_safe=bool(args.cartwheel_aux_safe),
+        heading_context=bool(args.heading_context),
+        heading_reg_coeff=float(args.heading_reg_coeff),
         num_agent_updates=args.num_agent_updates,
         robot_config=args.robot_config,
         terrain_mode=args.terrain_mode,
@@ -446,6 +457,8 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, "
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
+        f"heading_context={cfg.agent.model.heading_context_enabled}, "
+        f"heading_reg_coeff={getattr(cfg.agent.train, 'reg_coeff_heading', 0.0):g}, "
         f"resume_replay_warmup_steps={cfg.resume_replay_warmup_steps}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
         f"terrain_mode={args.terrain_mode}, compile={cfg.agent.compile}, "
@@ -553,6 +566,7 @@ def launch(args: argparse.Namespace) -> None:
         + (
             "MUJOCO*",
             "UFO_CACHE_DIR",
+            "UFO_DATA_DIR",
             "BFMZERO_MJLAB_CACHE_DIR",
             "UV_CACHE_DIR",
             "PYTHONPYCACHEPREFIX",
@@ -605,7 +619,7 @@ def parse_args() -> argparse.Namespace:
         "--same-z-eval-every-steps",
         type=int,
         default=DEFAULT_SAME_Z_EVAL_EVERY_STEPS,
-        help="Same-z terrain evaluation cadence in global environment steps.",
+        help="Same-z terrain evaluation cadence in global environment steps. Set <=0 to disable.",
     )
     parser.add_argument(
         "--data-path",
@@ -697,6 +711,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use a cartwheel-safe FB auxiliary reward set: remove locomotion contact/foot-shape penalties and reduce action-rate penalty.",
     )
+    parser.add_argument(
+        "--heading-context",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable z-companion BehaviorContext heading observations for fb_depth. "
+            "Use --no-heading-context for the legacy architecture."
+        ),
+    )
+    parser.add_argument(
+        "--heading-reg-coeff",
+        type=float,
+        default=0.0,
+        help=(
+            "Independent Q_H Actor coefficient. Zero runs the observation-only ablation and "
+            "completely skips Q_H optimization."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=4728)
     parser.add_argument("--use-wandb", action="store_true")
     parser.add_argument("--wandb-project", default=DEFAULT_WANDB_PROJECT)
@@ -761,6 +793,16 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--resume-replay-warmup-steps must be non-negative")
     if args.cartwheel_aux_safe and args.agent not in {"fb", "fb_terrain", "fb_depth"}:
         raise ValueError("--cartwheel-aux-safe is only supported with --agent fb, fb_terrain, or fb_depth")
+    if args.heading_reg_coeff < 0.0:
+        raise ValueError("--heading-reg-coeff must be non-negative")
+    if args.heading_reg_coeff > 0.0 and not args.heading_context:
+        raise ValueError("--heading-reg-coeff requires --heading-context")
+    if (args.heading_context or args.heading_reg_coeff > 0.0) and args.agent != "fb_depth":
+        # The parser default is convenient for fb_depth; silently disable it
+        # for legacy agent presets unless a positive Q_H coefficient was asked.
+        if args.heading_reg_coeff > 0.0:
+            raise ValueError("BehaviorContext heading is only supported with --agent fb_depth")
+        args.heading_context = False
     if args.agent in {"fb_terrain", "fb_depth"} and args.terrain_mode is None:
         args.terrain_mode = "rp1_simple" if args.agent == "fb_depth" else "mixed"
     if args.agent not in {"fb_terrain", "fb_depth"} and args.terrain_mode is not None:

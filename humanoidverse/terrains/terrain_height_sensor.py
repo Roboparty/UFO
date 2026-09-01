@@ -6,8 +6,77 @@ from dataclasses import dataclass
 
 import mujoco
 import torch
+import warp as wp
 from mjlab.entity import Entity
+from mjlab.sensor.raycast_sensor import RayCastSensor, RayCastSensorCfg
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor, TerrainHeightSensorCfg
+
+
+HEIGHT_SCAN_MIN = -5.0
+HEIGHT_SCAN_MAX = 5.0
+
+
+def clipped_height_clearance(
+    sample_height: torch.Tensor,
+    hit_height: torch.Tensor,
+    distance: torch.Tensor,
+    *,
+    offset: float = 0.0,
+) -> torch.Tensor:
+    """Return finite sample-to-terrain clearance, filling invalid rays with the clip maximum."""
+
+    clearance = sample_height - hit_height - float(offset)
+    valid = (distance >= 0.0) & torch.isfinite(distance) & torch.isfinite(clearance)
+    clearance = torch.where(valid, clearance, HEIGHT_SCAN_MAX)
+    return clearance.clamp(HEIGHT_SCAN_MIN, HEIGHT_SCAN_MAX)
+
+
+@dataclass
+class WorldUpTerrainHeightSensorCfg(RayCastSensorCfg):
+    """Body-attached sample points with world-down terrain rays."""
+
+    ray_start_height: float = 20.0
+    local_center: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    def build(self) -> "WorldUpTerrainHeightSensor":
+        return WorldUpTerrainHeightSensor(self)
+
+
+class WorldUpTerrainHeightSensor(RayCastSensor):
+    cfg: WorldUpTerrainHeightSensorCfg
+
+    def initialize(self, mj_model, model, data, device: str) -> None:
+        super().initialize(mj_model, model, data, device)
+        if self._local_offsets is None:
+            raise RuntimeError("world-up terrain ray pattern was not initialized")
+        self._local_offsets = self._local_offsets.clone()
+        self._local_offsets += self._local_offsets.new_tensor(self.cfg.local_center)
+        self._sample_points_w: torch.Tensor | None = None
+
+    @property
+    def sample_points_w(self) -> torch.Tensor:
+        """World-space locations whose vertical terrain clearance is measured."""
+
+        if self._sample_points_w is None:
+            raise RuntimeError("terrain sample points are not available before sensing")
+        return self._sample_points_w
+
+    def prepare_rays(self) -> None:
+        super().prepare_rays()
+        if (
+            self._cached_world_origins is None
+            or self._cached_world_rays is None
+            or self._ray_pnt is None
+            or self._ray_vec is None
+        ):
+            raise RuntimeError("world-up terrain ray origins were not prepared")
+
+        self._sample_points_w = self._cached_world_origins.clone()
+        self._cached_world_origins[..., 2] += self.cfg.ray_start_height
+        self._cached_world_rays.zero_()
+        self._cached_world_rays[..., 2] = -1.0
+        wp.to_torch(self._ray_pnt).view_as(self._cached_world_origins).copy_(self._cached_world_origins)
+        wp.to_torch(self._ray_vec).view_as(self._cached_world_rays).copy_(self._cached_world_rays)
 
 
 def terrain_padding_regions(

@@ -18,11 +18,11 @@ from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHis
 from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
 from humanoidverse.utils.reference_observations import reference_base_ang_vel
 from humanoidverse.utils.storage_paths import expert_buffer_cache_parent
-from humanoidverse.utils.torch_utils import quat_rotate_inverse
+from humanoidverse.utils.torch_utils import my_quat_rotate, quat_rotate_inverse
 
 from ..buffers.trajectory import TrajectoryDictBuffer
 
-EXPERT_BUFFER_CACHE_VERSION = 2
+EXPERT_BUFFER_CACHE_VERSION = 3
 _MOTION_LIB_CACHE_TENSOR_FIELDS = (
     "_motion_lengths",
     "_motion_fps",
@@ -153,6 +153,7 @@ def _expert_observation_schema(env) -> dict[str, Any]:
         "terminated": "bool",
         "truncated": "bool",
         "motion_id": "int64",
+        "heading_forward_xy": 2,
     }
     creation_config = getattr(env, "_creation_config", None)
     if creation_config is not None and bool(getattr(creation_config, "include_history_noaction", False)):
@@ -389,6 +390,10 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
         max_local_self_obs = torch.cat([v for v in obs_dict.values()], dim=-1)
 
         base_quat = ref_body_rots[:, 0]
+        local_forward = torch.zeros((base_quat.shape[0], 3), device=base_quat.device, dtype=base_quat.dtype)
+        local_forward[:, 0] = 1.0
+        heading_forward_xy = my_quat_rotate(base_quat, local_forward)[:, :2]
+        heading_forward_xy = torch.nn.functional.normalize(heading_forward_xy, dim=-1)
         ref_dof_pos = motion_res["dof_pos"] - env.default_dof_pos[0]
         ref_dof_vel = motion_res["dof_vel"]
         ref_ang_vel = reference_base_ang_vel(env, base_quat, ref_body_angular_vels[:, 0])
@@ -457,6 +462,10 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
             "terminated": torch.zeros(curr_motion_len, dtype=bool).to(env.device),
             "truncated": truncated,
             "motion_id": torch.ones(curr_motion_len, dtype=torch.long) * i,
+            # Training-only companion metadata. B and D filters never consume
+            # this key; exact tracking contexts use it to carry the motion's
+            # relative root-heading trajectory alongside tracking z.
+            "heading_forward_xy": heading_forward_xy,
         }
         if add_history_noaction:
             ep["observation"]["history_noaction"] = history_actor
@@ -466,6 +475,8 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
         episodes=episodes,
         seq_length=agent_cfg.model.seq_length,
         device=device,
+        output_key_t=["observation", "motion_id", "heading_forward_xy"],
+        output_key_tp1=["observation", "heading_forward_xy"],
     )
 
     assert expert_buffer.storage["observation"]["state"].shape[0] == expert_buffer.storage["truncated"].shape[0]
@@ -473,6 +484,7 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
     assert expert_buffer.storage["observation"]["privileged_state"].shape[0] == expert_buffer.storage["truncated"].shape[0]
     assert expert_buffer.storage["terminated"].shape[0] == expert_buffer.storage["truncated"].shape[0]
     assert expert_buffer.storage["motion_id"].shape[0] == expert_buffer.storage["truncated"].shape[0]
+    assert expert_buffer.storage["heading_forward_xy"].shape[0] == expert_buffer.storage["truncated"].shape[0]
 
     expert_buffer.file_names = file_names
     return expert_buffer

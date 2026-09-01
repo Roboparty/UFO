@@ -173,8 +173,10 @@ def test_rp1_encoder_actor_and_preset_schema() -> None:
     preset = build_fb_depth_agent(device="cpu", compile=False)
     assert preset.model.archi.actor.depth_key == "depth_image"
     assert preset.model.archi.actor.depth_latent_dim == 256
-    assert preset.model.archi.f.input_filter.key[-1] == "terrain_priv"
-    assert preset.model.archi.critic.input_filter.key[-1] == "terrain_priv"
+    assert "terrain_priv" in preset.model.archi.f.input_filter.key
+    assert preset.model.archi.f.input_filter.key[-1] == "heading"
+    assert "terrain_priv" in preset.model.archi.critic.input_filter.key
+    assert preset.model.archi.critic.input_filter.key[-1] == "heading"
     assert "terrain_actor" not in preset.model.obs_normalizer.normalizers
     assert "depth_image" in preset.model.obs_normalizer.normalizers
 

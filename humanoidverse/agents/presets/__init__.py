@@ -23,6 +23,8 @@ def build_agent_preset(
     clip_grad_norm: float,
     cartwheel_aux_safe: bool,
     wandb_project: str,
+    heading_context: bool = True,
+    heading_reg_coeff: float = 0.0,
 ) -> dict[str, Any]:
     if agent == "fb":
         return {
@@ -61,6 +63,8 @@ def build_agent_preset(
                 lr_scale=lr_scale,
                 clip_grad_norm=clip_grad_norm,
                 cartwheel_aux_safe=cartwheel_aux_safe,
+                heading_context=heading_context,
+                heading_reg_coeff=heading_reg_coeff,
             ),
             "wandb_group": "pbfm_direct_depth_v0",
             "wandb_project": wandb_project,

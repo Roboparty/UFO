@@ -49,7 +49,11 @@ from humanoidverse.perception.instinct_direct_depth import (
 )
 from humanoidverse.terrains import make_terrain_entity_cfg, terrain_component_names
 from humanoidverse.terrains.rp1_simple import add_rp1_nonflat_guard_ring, add_rp1_outer_walls
-from humanoidverse.terrains.terrain_height_sensor import PbfmTerrainHeightSensorCfg
+from humanoidverse.terrains.terrain_height_sensor import (
+    PbfmTerrainHeightSensorCfg,
+    WorldUpTerrainHeightSensorCfg,
+    clipped_height_clearance,
+)
 from humanoidverse.terrains.terrain_observation import (
     RobotCentricGridPatternCfg,
     flat_zero_observations,
@@ -229,6 +233,103 @@ def tangential_contact_speed(
     tangent_velocity = body_vel - normal_velocity * force_direction
     loaded = force_norm / weight > force_threshold_ratio
     return (torch.linalg.vector_norm(tangent_velocity, dim=-1) * loaded).sum(dim=1)
+
+
+def fixed_sole_weights(
+    local_xy: torch.Tensor,
+    edge_weight: float = 0.1,
+    center_weight: float = 1.0,
+) -> torch.Tensor:
+    """Return a terrain-independent 2-D sole-edge-to-center weight map."""
+
+    if local_xy.ndim != 2 or local_xy.shape[-1] != 2 or local_xy.shape[0] == 0:
+        raise ValueError(f"local_xy must be a non-empty (points, 2) tensor, got {tuple(local_xy.shape)}")
+    if not 0.0 <= edge_weight <= center_weight:
+        raise ValueError(
+            f"Expected 0 <= edge_weight <= center_weight, got {edge_weight} and {center_weight}"
+        )
+
+    def axis_center_profile(values: torch.Tensor) -> torch.Tensor:
+        span = values.max() - values.min()
+        if float(span) <= 0.0:
+            return torch.ones_like(values)
+        fraction = ((values - values.min()) / span).clamp(0.0, 1.0)
+        profile = 1.0 - 2.0 * torch.abs(fraction - 0.5)
+        return profile / profile.max().clamp_min(torch.finfo(values.dtype).eps)
+
+    x_profile = axis_center_profile(local_xy[:, 0])
+    y_profile = axis_center_profile(local_xy[:, 1])
+    center_profile = torch.minimum(x_profile, y_profile)
+    return edge_weight + (center_weight - edge_weight) * center_profile
+
+
+def feet_stumble_penalty(
+    force_history: torch.Tensor,
+    horizontal_ratio: float = 1.0,
+    force_threshold: float = 20.0,
+    force_scale: float = 100.0,
+    max_penalty: float = 1.0,
+) -> torch.Tensor:
+    """Penalize the largest horizontal-dominant foot contact in a policy step."""
+
+    if force_history.ndim != 4 or force_history.shape[-1] != 3:
+        raise ValueError(f"Expected force history shaped (N, contacts, history, 3), got {tuple(force_history.shape)}")
+    if force_scale <= 0.0 or max_penalty <= 0.0:
+        raise ValueError("force_scale and max_penalty must be positive")
+    if force_history.shape[1] == 0 or force_history.shape[2] == 0:
+        return torch.zeros(force_history.shape[0], dtype=force_history.dtype, device=force_history.device)
+    force_xy = torch.linalg.norm(force_history[..., :2], dim=-1)
+    force_z = torch.abs(force_history[..., 2])
+    excess = torch.relu(force_xy - horizontal_ratio * force_z - force_threshold)
+    return torch.clamp(excess / force_scale, max=max_penalty).amax(dim=(1, 2))
+
+
+def _support_deficiency(
+    clearance: torch.Tensor,
+    point_weights: torch.Tensor | None,
+    *,
+    height_tolerance: float,
+    transition_width: float,
+) -> torch.Tensor:
+    width = max(float(transition_width), 1.0e-6)
+    support = torch.sigmoid((height_tolerance - clearance) / width)
+    unsupported = 1.0 - support
+    boundary_eps = 8.0 * torch.finfo(clearance.dtype).eps
+    unsupported = torch.where(
+        clearance > height_tolerance + boundary_eps,
+        unsupported,
+        torch.zeros_like(unsupported),
+    )
+    if point_weights is None:
+        return unsupported.mean(dim=-1)
+    weights = point_weights.to(device=unsupported.device, dtype=unsupported.dtype)
+    return (unsupported * weights).sum(dim=-1) / weights.sum().clamp_min(torch.finfo(unsupported.dtype).eps)
+
+
+def feet_at_plane_penalty(
+    clearance: torch.Tensor,
+    is_contact: torch.Tensor,
+    point_weights: torch.Tensor,
+    *,
+    height_tolerance: float = 0.030,
+    transition_width: float = 0.005,
+) -> torch.Tensor:
+    """Penalize unsupported sole area for both feet on every terrain type."""
+
+    if clearance.ndim != 3 or is_contact.shape != clearance.shape[:2]:
+        raise ValueError(
+            f"Expected clearance=(N, 2, points), is_contact=(N, 2), got "
+            f"{tuple(clearance.shape)}, {tuple(is_contact.shape)}"
+        )
+    if point_weights.ndim != 1 or point_weights.numel() != clearance.shape[-1]:
+        raise ValueError(f"Expected one weight per terrain point, got {tuple(point_weights.shape)}")
+    weighted = _support_deficiency(
+        clearance,
+        point_weights,
+        height_tolerance=height_tolerance,
+        transition_width=transition_width,
+    )
+    return torch.sum(weighted * is_contact.to(weighted.dtype), dim=1)
 
 
 def select_pre_descent_directions(
@@ -867,6 +968,7 @@ def make_mjlab_ufo_env_cfg(
     mjcf_path: str | None,
     auto_reset: bool,
     robot_training: dict[str, Any] | None = None,
+    evaluation_fast_path: bool = False,
 ):
     """Create an MJLab ManagerBasedRlEnvCfg with UFO robot metadata."""
     import mujoco
@@ -885,6 +987,7 @@ def make_mjlab_ufo_env_cfg(
     from mjlab.scene import SceneCfg
     from mjlab.sensor import ObjRef
     from mjlab.sensor.contact_sensor import ContactMatch, ContactSensorCfg
+    from mjlab.sensor.raycast_sensor import GridPatternCfg
     from mjlab.sim import MujocoCfg, SimulationCfg
 
     dof_names = tuple(_to_list(config.robot.dof_names))
@@ -1013,6 +1116,39 @@ def make_mjlab_ufo_env_cfg(
                     padding_ray_group=0 if terrain_mode == "rp1_simple" else 5,
                     reduction="none",
                     debug_vis=bool(terrain_priv_cfg.get("debug_vis", False)),
+                )
+            )
+        if bool(config.rewards.get("terrain_aware_auxiliary", False)) and not evaluation_fast_path:
+            terrain_ray_groups = (0,) if terrain_mode in {"rp1_simple", "plane", "flat"} else (5,)
+            sensors.extend(
+                (
+                    ContactSensorCfg(
+                        name="foot_collision_contacts",
+                        primary=ContactMatch(
+                            mode="geom",
+                            pattern="(left|right)_foot.*_collision",
+                            entity="robot",
+                        ),
+                        fields=("force", "normal", "tangent"),
+                        reduce="maxforce",
+                        num_slots=2,
+                        global_frame=True,
+                        history_length=int(config.simulator.config.sim.control_decimation),
+                    ),
+                    WorldUpTerrainHeightSensorCfg(
+                        name="foot_height_scanners",
+                        frame=(
+                            ObjRef(type="body", name="left_ankle_roll_link", entity="robot"),
+                            ObjRef(type="body", name="right_ankle_roll_link", entity="robot"),
+                        ),
+                        pattern=GridPatternCfg(size=(0.23, 0.04), resolution=0.01),
+                        ray_alignment="base",
+                        ray_start_height=20.0,
+                        local_center=(0.025, 0.0, -0.045),
+                        max_distance=25.0,
+                        include_geom_groups=terrain_ray_groups,
+                        debug_vis=False,
+                    ),
                 )
             )
         if direct_depth_cfg is not None:
@@ -1425,6 +1561,15 @@ class HumanoidVerseMjlabCore:
         self.current_noise_curriculum_value = float(self.config.obs.get("noise_initial_value", 1.0))
         self._init_motion_lib(motion_lib_override)
         self.history_handler = HVHistoryHandler(self.num_envs, hv_config.obs.obs_auxiliary, hv_config.obs.obs_dims, self.device)
+        self.feet_height_sensor = self.mjlab_env.scene.sensors.get("foot_height_scanners")
+        self.feet_height_dim = 0
+        if self.feet_height_sensor is not None:
+            if self.feet_height_sensor.num_frames != 2:
+                raise ValueError(
+                    f"Expected two foot height scan frames, got {self.feet_height_sensor.num_frames}"
+                )
+            self.feet_height_dim = int(self.feet_height_sensor.num_rays_per_frame)
+            self._feet_at_plane_weights = fixed_sole_weights(self.feet_height_sensor._local_offsets[:, :2])
         self.use_contact_in_obs_max = bool(hv_config.get("use_contact_in_obs_max", False))
         self.simulator = _MjlabSimulatorView(self)
 
@@ -1605,6 +1750,19 @@ class HumanoidVerseMjlabCore:
             if name in self.body_names[: self.num_bodies]:
                 history[:, self.body_names.index(name), :, :] = sensor.data.force_history[:, i, :, :]
         return history
+
+    def _read_foot_contact_force_history(self) -> torch.Tensor:
+        history = self._read_contact_force_history()
+        return history[:, self.feet_indices]
+
+    def _read_foot_collision_force_history(self) -> torch.Tensor:
+        """Return separate world-frame contact histories for each sole geometry/slot."""
+
+        sensor = self.mjlab_env.scene.sensors.get("foot_collision_contacts")
+        history_length = int(self.config.simulator.config.sim.control_decimation)
+        if sensor is None or sensor.data.force_history is None:
+            return torch.zeros(self.num_envs, 0, history_length, 3, device=self.device)
+        return sensor.data.force_history
 
     def _read_robot_weight(self) -> torch.Tensor:
         scene_body_ids = self.robot.data.indexing.body_ids[self._body_ids]
@@ -2004,6 +2162,11 @@ class HumanoidVerseMjlabCore:
         obs["time"] = self.episode_length_buf.unsqueeze(-1)
         if include_history_actor:
             obs["history_actor"] = raw_obs["history_actor"]
+        # Behavior heading is a workspace/inference command, not privileged
+        # simulator state. The environment contributes only a fixed-shape
+        # placeholder so the observation contract is stable; collectors
+        # overwrite it after atomically advancing their BehaviorContext.
+        obs["heading"] = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         if self.terrain_enabled:
             if self.direct_depth_enabled:
                 if self._direct_depth_runtime is None:
@@ -2080,6 +2243,23 @@ class HumanoidVerseMjlabCore:
         aux["feet_heading_alignment"] = torch.abs(wrap_to_pi(torch.atan2(forward_left[:, 1], forward_left[:, 0]) - heading_root)) + torch.abs(
             wrap_to_pi(torch.atan2(forward_right[:, 1], forward_right[:, 0]) - heading_root)
         )
+        foot_collision_history = self._read_foot_collision_force_history()
+        aux["feet_stumble"] = feet_stumble_penalty(foot_collision_history)
+        if self.feet_height_sensor is not None:
+            foot_sensor = self.feet_height_sensor
+            foot_contact_history = self._read_foot_contact_force_history()
+            vertical_foot_contact = torch.abs(foot_contact_history[..., 2]).amax(dim=2) > 1.0
+            foot_hits = foot_sensor.data.hit_pos_w.reshape(self.num_envs, 2, self.feet_height_dim, 3)
+            foot_distances = foot_sensor.data.distances.reshape(self.num_envs, 2, self.feet_height_dim)
+            sole_z = foot_sensor.sample_points_w.reshape(self.num_envs, 2, self.feet_height_dim, 3)[..., 2]
+            clearance = clipped_height_clearance(sole_z, foot_hits[..., 2], foot_distances)
+            aux["feet_at_plane"] = feet_at_plane_penalty(
+                clearance,
+                vertical_foot_contact,
+                self._feet_at_plane_weights,
+            )
+        else:
+            aux["feet_at_plane"] = torch.zeros(self.num_envs, device=self.device)
         reward = torch.zeros(self.num_envs, device=self.device)
         for name, scale in self.reward_scales.items():
             if name not in aux:
@@ -2648,6 +2828,7 @@ class HumanoidVerseMjlabConfig(BaseConfig):
             mjcf_path=self.mjcf_path,
             auto_reset=self.auto_reset,
             robot_training=self.robot_training,
+            evaluation_fast_path=self.evaluation_fast_path,
         )
         mjlab_env = ManagerBasedRlEnv(mjlab_cfg, device=self.device)
         core = HumanoidVerseMjlabCore(

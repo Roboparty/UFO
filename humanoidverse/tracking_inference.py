@@ -18,6 +18,11 @@ import torch
 from torch.utils._pytree import tree_map
 
 from humanoidverse.actor_override import load_actor_override
+from humanoidverse.agents.behavior_context import (
+    align_heading_sequence,
+    heading_observation,
+    root_heading_xy,
+)
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
 from humanoidverse.export.backward_encoder import (
     UnsupportedBackwardEncoderExport,
@@ -291,6 +296,16 @@ def run_tracking_inference(
             target_states = _target_states_from_obs(obs_dict, device=device, num_dof=num_dof)
             target_states = _center_target_states_on_terrain(target_states, env)
             observation, _ = wrapped_env.reset(to_numpy=False, target_states=target_states)
+            heading_targets = None
+            if bool(getattr(model.cfg, "heading_context_enabled", False)):
+                reference_heading = root_heading_xy(
+                    obs_dict["ref_body_rots"][:, 0].to(device).float()
+                )
+                heading_targets = align_heading_sequence(
+                    reference_heading.unsqueeze(0),
+                    root_heading_xy(env.base_quat.float()),
+                    torch.zeros(1, device=device, dtype=torch.long),
+                )[0]
             if perception_runtime is not None:
                 perception_runtime.reset()
             episode_len = int(z.shape[0])
@@ -309,6 +324,14 @@ def run_tracking_inference(
                     observation["terrain_actor"] = perception_runtime.terrain_actor(
                         observation,
                         reset_mask=torch.ones(1, device=device, dtype=torch.bool) if step == 0 else None,
+                    )
+                if heading_targets is not None:
+                    target = heading_targets[min(step, heading_targets.shape[0] - 1)].unsqueeze(0)
+                    valid = torch.ones((1, 1), device=device, dtype=torch.bool)
+                    observation["heading"] = heading_observation(
+                        root_heading_xy(env.base_quat.float()),
+                        target,
+                        valid,
                     )
                 action = model.act(observation, z[step].unsqueeze(0), mean=True)
                 observation, _reward, terminated, truncated, _info = wrapped_env.step(action, to_numpy=False)

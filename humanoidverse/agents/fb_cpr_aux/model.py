@@ -15,12 +15,15 @@ from ..nn_models import ForwardArchiConfig, RewardNormalizerConfig
 
 class FBcprAuxModelArchiConfig(FBcprModelArchiConfig):
     aux_critic: ForwardArchiConfig = ForwardArchiConfig()
+    heading_critic: ForwardArchiConfig = ForwardArchiConfig()
 
 
 class FBcprAuxModelConfig(FBcprModelConfig):
     name: tp.Literal["FBcprAuxModel"] = "FBcprAuxModel"
     archi: FBcprAuxModelArchiConfig = FBcprAuxModelArchiConfig()
     norm_aux_reward: RewardNormalizerConfig = RewardNormalizerConfig()
+    heading_context_enabled: bool = False
+    heading_critic_enabled: bool = False
 
     @property
     def object_class(self):
@@ -36,6 +39,8 @@ class FBcprAuxModel(FBcprModel):
         super().__init__(obs_space, action_dim, cfg)
         self.cfg = cfg
         self._aux_critic = cfg.archi.aux_critic.build(obs_space, cfg.archi.z_dim, action_dim, output_dim=1)
+        if cfg.heading_critic_enabled:
+            self._heading_critic = cfg.archi.heading_critic.build(obs_space, cfg.archi.z_dim, action_dim, output_dim=1)
         self._aux_reward_normalizer = cfg.norm_aux_reward.build()
 
         # make sure the model is in eval mode and never computes gradients
@@ -46,8 +51,17 @@ class FBcprAuxModel(FBcprModel):
     def _prepare_for_train(self) -> None:
         super()._prepare_for_train()
         self._target_aux_critic = copy.deepcopy(self._aux_critic)
+        if self.cfg.heading_critic_enabled:
+            self._target_heading_critic = copy.deepcopy(self._heading_critic)
 
     @torch.no_grad()
     def aux_critic(self, obs: torch.Tensor | dict[str, torch.Tensor], z: torch.Tensor, action: torch.Tensor):
         with autocast(device_type=self.device, dtype=self.amp_dtype, enabled=self.cfg.amp):
             return self._aux_critic(self._normalize(obs), z, action)
+
+    @torch.no_grad()
+    def heading_critic(self, obs: torch.Tensor | dict[str, torch.Tensor], z: torch.Tensor, action: torch.Tensor):
+        if not self.cfg.heading_critic_enabled:
+            raise RuntimeError("Heading critic is disabled in this checkpoint")
+        with autocast(device_type=self.device, dtype=self.amp_dtype, enabled=self.cfg.amp):
+            return self._heading_critic(self._normalize(obs), z, action)
