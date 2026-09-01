@@ -27,6 +27,22 @@ def test_invalid_heading_is_exact_zero() -> None:
     torch.testing.assert_close(result, torch.zeros_like(result), rtol=0.0, atol=0.0)
 
 
+def test_valid_zero_error_is_identical_to_invalid_context() -> None:
+    current = _xy([15.0, -120.0])
+    invalid = heading_observation(current, _xy([80.0, 45.0]), torch.zeros((2, 1), dtype=torch.bool))
+    valid_zero_error = heading_observation(current, current, torch.ones((2, 1), dtype=torch.bool))
+    assert valid_zero_error.shape == (2, 2)
+    torch.testing.assert_close(valid_zero_error, invalid, rtol=0.0, atol=0.0)
+
+
+def test_heading_error_is_zero_centered_and_signed() -> None:
+    current = _xy([0.0, 0.0, 0.0])
+    target = _xy([90.0, -90.0, 180.0])
+    result = heading_observation(current, target, torch.ones((3, 1), dtype=torch.bool))
+    expected = torch.tensor([[1.0, 1.0], [1.0, -1.0], [2.0, 0.0]])
+    torch.testing.assert_close(result, expected, rtol=0.0, atol=1.0e-6)
+
+
 def test_heading_vectors_cross_pi_without_discontinuity() -> None:
     reference = _xy([170.0, 179.0, -179.0, -170.0]).unsqueeze(0)
     aligned = align_heading_sequence(reference, _xy([30.0]), torch.tensor([0]))[0]

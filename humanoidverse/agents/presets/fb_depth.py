@@ -63,8 +63,8 @@ def build_fb_depth_agent(
     normalizers.pop("terrain_actor", None)
     normalizers["depth_image"] = IdentityNormalizerConfig(name="IdentityNormalizerConfig")
     if heading_context:
-        # Invalid heading contexts must remain exactly [0,0,0]; BatchNorm
-        # would turn those rows into a non-zero hidden command.
+        # Invalid and valid zero-error contexts must both remain exactly
+        # [0,0]; BatchNorm would turn them into a hidden source command.
         normalizers["heading"] = IdentityNormalizerConfig(name="IdentityNormalizerConfig")
     depth_normalizer = base.model.obs_normalizer.model_copy(update={"normalizers": normalizers})
     depth_model = base.model.model_copy(

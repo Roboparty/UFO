@@ -11,7 +11,6 @@ import torch
 
 from humanoidverse.utils.torch_utils import my_quat_rotate
 
-
 HEADING_SOURCE_INVALID = 0
 HEADING_SOURCE_FORWARD_COMMAND = 1
 HEADING_SOURCE_EXACT_TRACKING = 2
@@ -89,11 +88,13 @@ def heading_observation(
     target_heading_xy: torch.Tensor,
     valid: torch.Tensor,
 ) -> torch.Tensor:
-    """Return ``[valid*cos(error), valid*sin(error), valid]``.
+    """Return the zero-centered error ``[valid*(1-cos(error)), valid*sin(error)]``.
 
-    Invalid contexts are exactly zero before and after the identity heading
-    normalizer.  ``sin(error)`` is positive when the target lies to the left of
-    the robot's current forward direction.
+    Invalid contexts and valid zero-error contexts are deliberately identical:
+    both are exactly ``[0, 0]`` before and after the identity normalizer.  This
+    prevents heading validity from becoming a behavior-source identifier.
+    ``sin(error)`` is positive when the target lies to the left of the robot's
+    current forward direction.
     """
 
     current_heading_xy = normalize_heading_xy(current_heading_xy)
@@ -111,11 +112,15 @@ def heading_observation(
     safe_target = torch.where(valid.bool(), target_heading_xy, current_heading_xy)
     safe_target = normalize_heading_xy(safe_target)
     cos = torch.sum(current_heading_xy * safe_target, dim=-1, keepdim=True)
+    # Re-normalizing two equal float32 headings can leave cos just below one.
+    # Snap that numerical residue to one so valid zero-error and invalid
+    # contexts are bitwise-identical zeros at the network boundary.
+    cos = torch.where(cos > 1.0 - 1.0e-6, torch.ones_like(cos), cos)
     sin = (
         current_heading_xy[:, 0] * safe_target[:, 1]
         - current_heading_xy[:, 1] * safe_target[:, 0]
     ).unsqueeze(-1)
-    return torch.cat((valid * cos, valid * sin, valid), dim=-1)
+    return torch.cat((valid * (1.0 - cos), valid * sin), dim=-1)
 
 
 def relative_heading_target(

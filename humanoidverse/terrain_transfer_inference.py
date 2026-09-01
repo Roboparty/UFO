@@ -940,6 +940,8 @@ def _run_rollout(
         )
         course_completed = False
         velocities: list[float] = []
+        ego_forward_velocities: list[float] = []
+        heading_target_cosines: list[float] = []
         prompt_values: list[float] = []
         tracking_errors: list[float] = []
         action_l2_deviations: list[float] = []
@@ -949,6 +951,8 @@ def _run_rollout(
         body_impacts: list[float] = []
         planar_radii = [0.0]
         cumulative_planar_path = 0.0
+        body_forward_path = 0.0
+        body_backward_path = 0.0
         previous_root_xy = initial_root[:2].clone()
         frames = []
         mechanics_frames: list[dict[str, Any]] = []
@@ -1000,17 +1004,29 @@ def _run_rollout(
                     observation,
                     reset_mask=torch.ones(1, device=args.device, dtype=torch.bool) if step == 0 else None,
                 )
-            if heading_valid:
-                target_heading = (
-                    heading_targets
-                    if heading_targets.ndim == 2 and heading_targets.shape[0] == 1
-                    else heading_targets[min(step, heading_targets.shape[0] - 1)].unsqueeze(0)
-                )
-                observation["heading"] = heading_observation(
-                    root_heading_xy(wrapped_env._env.base_quat.float()),
-                    target_heading,
-                    torch.ones((1, 1), device=args.device, dtype=torch.bool),
-                )
+            if bool(getattr(model.cfg, "heading_context_enabled", False)):
+                current_heading = root_heading_xy(wrapped_env._env.base_quat.float())
+                if args.heading_inference_mode == "invalid_zero":
+                    observation["heading"] = torch.zeros(
+                        (1, 2), device=args.device, dtype=current_heading.dtype
+                    )
+                elif args.heading_inference_mode == "valid_zero_error":
+                    observation["heading"] = heading_observation(
+                        current_heading,
+                        current_heading,
+                        torch.ones((1, 1), device=args.device, dtype=torch.bool),
+                    )
+                elif heading_valid:
+                    target_heading = (
+                        heading_targets
+                        if heading_targets.ndim == 2 and heading_targets.shape[0] == 1
+                        else heading_targets[min(step, heading_targets.shape[0] - 1)].unsqueeze(0)
+                    )
+                    observation["heading"] = heading_observation(
+                        current_heading,
+                        target_heading,
+                        torch.ones((1, 1), device=args.device, dtype=torch.bool),
+                    )
             last_z_step = z_step
             action = model.act(observation, z_step, mean=True)
             if comparison_actor is not None:
@@ -1041,13 +1057,27 @@ def _run_rollout(
             )
             max_planar_displacement = max(max_planar_displacement, planar_displacement)
             current_root_xy = wrapped_env._env.robot_root_states[0, :2].clone()
-            cumulative_planar_path += float(torch.linalg.vector_norm(current_root_xy - previous_root_xy).item())
+            root_delta_xy = current_root_xy - previous_root_xy
+            current_body_heading = root_heading_xy(wrapped_env._env.base_quat.float())[0]
+            signed_body_step = float(torch.dot(root_delta_xy, current_body_heading).item())
+            cumulative_planar_path += float(torch.linalg.vector_norm(root_delta_xy).item())
+            body_forward_path += max(signed_body_step, 0.0)
+            body_backward_path += max(-signed_body_step, 0.0)
             previous_root_xy = current_root_xy
             planar_radii.append(planar_displacement)
             course_completed = bool(
                 course_completion_radius is not None and planar_displacement >= course_completion_radius
             )
-            velocities.append(float(torch.linalg.vector_norm(wrapped_env._env.robot_root_states[0, 7:9]).item()))
+            root_velocity_xy = wrapped_env._env.robot_root_states[0, 7:9]
+            velocities.append(float(torch.linalg.vector_norm(root_velocity_xy).item()))
+            ego_forward_velocities.append(float(torch.dot(root_velocity_xy, current_body_heading).item()))
+            if heading_targets is not None:
+                diagnostic_target = (
+                    heading_targets
+                    if heading_targets.ndim == 2 and heading_targets.shape[0] == 1
+                    else heading_targets[min(step, heading_targets.shape[0] - 1)].unsqueeze(0)
+                )[0]
+                heading_target_cosines.append(float(torch.dot(current_body_heading, diagnostic_target).item()))
             prompt_values.append(_prompt_value(model, observation, z_step))
             clearance = _root_ground_clearance(wrapped_env)
             ground_clearances.append(clearance)
@@ -1186,6 +1216,7 @@ def _run_rollout(
             "seed": args.seed,
             "prompt_type": args.prompt_type,
             "prompt_identifier": args.prompt_identifier,
+            "heading_inference_mode": args.heading_inference_mode,
             "z_shape": list(z.shape),
             "z_checksum": checksum,
             "episode_length": completed,
@@ -1199,6 +1230,26 @@ def _run_rollout(
             "forward_displacement": float((final_root[0] - initial_root[0]).item()),
             "max_forward_displacement": max_forward_displacement,
             "max_planar_displacement": max_planar_displacement,
+            "body_forward_path": body_forward_path,
+            "body_backward_path": body_backward_path,
+            "mean_ego_forward_velocity": (
+                sum(ego_forward_velocities) / max(len(ego_forward_velocities), 1)
+            ),
+            "backward_motion_fraction": (
+                sum(value < -0.05 for value in ego_forward_velocities)
+                / max(sum(abs(value) > 0.05 for value in ego_forward_velocities), 1)
+            ),
+            "mean_heading_target_cosine": (
+                sum(heading_target_cosines) / len(heading_target_cosines)
+                if heading_target_cosines
+                else None
+            ),
+            "min_heading_target_cosine": (
+                min(heading_target_cosines) if heading_target_cosines else None
+            ),
+            "final_heading_target_cosine": (
+                heading_target_cosines[-1] if heading_target_cosines else None
+            ),
             "course_completion_radius": course_completion_radius,
             "course_completed": course_completed if terrain == "course" else None,
             "mean_root_velocity": sum(velocities) / max(len(velocities), 1),
@@ -1271,6 +1322,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fall-clearance", type=float, default=0.45)
     parser.add_argument("--output", type=Path, default=Path("terrain_transfer_results.json"))
     parser.add_argument("--reward-task", default="move-ego-0-0.7")
+    parser.add_argument(
+        "--heading-inference-mode",
+        choices=("dynamic", "invalid_zero", "valid_zero_error"),
+        default="dynamic",
+        help=(
+            "Inference-only heading counterfactual: use the deployed dynamic error, "
+            "mask heading to [0,0], or expose a valid context while forcing zero error."
+        ),
+    )
     parser.add_argument("--save-latent", type=Path, default=None)
     parser.add_argument("--load-latent", type=Path, default=None)
     parser.add_argument(

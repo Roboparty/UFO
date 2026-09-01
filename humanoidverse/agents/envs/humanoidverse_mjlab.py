@@ -2166,7 +2166,7 @@ class HumanoidVerseMjlabCore:
         # simulator state. The environment contributes only a fixed-shape
         # placeholder so the observation contract is stable; collectors
         # overwrite it after atomically advancing their BehaviorContext.
-        obs["heading"] = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
+        obs["heading"] = torch.zeros((self.num_envs, 2), device=self.device, dtype=torch.float32)
         if self.terrain_enabled:
             if self.direct_depth_enabled:
                 if self._direct_depth_runtime is None:

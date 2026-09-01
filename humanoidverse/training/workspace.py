@@ -955,7 +955,10 @@ class Workspace:
         # assigning the reset yaw to the previous action.
         reward_valid = state.heading_valid.to(device=self.agent.device, dtype=torch.bool) & ~done.unsqueeze(-1)
         valid_float = reward_valid.to(dtype=torch.float32)
-        reward = -valid_float * (1.0 - next_heading[:, :1])
+        # heading_observation is zero-centered, so its first component is
+        # already valid * (1 - cos(error)).  Keep validity as replay metadata
+        # for loss masking rather than exposing it as a network input.
+        reward = -valid_float * next_heading[:, :1]
         return {
             "heading_next": next_heading,
             "heading_z_next": next_z,
