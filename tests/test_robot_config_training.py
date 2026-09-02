@@ -114,6 +114,23 @@ def _write_tiny_robot_with_training(root: Path, *, missing_actuator_joint: bool 
 
 
 class RobotConfigTrainingTest(unittest.TestCase):
+    def test_fb_depth_default_uses_main_terrain_lsgan_prior(self) -> None:
+        cfg = build_ufo_mjlab_config(
+            device="cpu",
+            work_dir="/tmp/ufo_unit_main_lsgan",
+            num_envs=16,
+            num_env_steps=2048,
+            seed=1,
+            use_wandb=False,
+            wandb_run_name=None,
+            smoke=True,
+            agent="fb_depth",
+        )
+        self.assertEqual(cfg.prior_plane_envs, 0)
+        self.assertTrue(cfg.agent.train.behavior_prior_enabled)
+        self.assertEqual(cfg.agent.train.discriminator_loss, "lsgan")
+        self.assertEqual(cfg.agent.train.discriminator_reward, "amp")
+
     def test_fb_depth_no_d_disables_prior_collector_and_actor_weight(self) -> None:
         cfg = build_ufo_mjlab_config(
             device="cpu",

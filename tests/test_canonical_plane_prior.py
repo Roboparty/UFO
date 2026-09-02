@@ -74,6 +74,65 @@ def test_discriminator_conditioning_diagnostics_compares_same_state_z_contexts()
     assert metrics["disc_diag/relabel_logit_shift/mean"].item() == pytest.approx(-3.0)
 
 
+def test_amp_discriminator_reward_is_bounded_and_has_expected_dead_zone() -> None:
+    agent = FBcprAuxAgent.__new__(FBcprAuxAgent)
+    agent.cfg = SimpleNamespace(
+        train=SimpleNamespace(discriminator_reward="amp"),
+    )
+    logits = torch.tensor([[-2.0], [-1.0], [0.0], [1.0], [3.0], [4.0]])
+
+    reward = agent.discriminator_reward_from_logits(logits)
+
+    torch.testing.assert_close(
+        reward,
+        torch.tensor([[0.0], [0.0], [0.75], [1.0], [0.0], [0.0]]),
+    )
+    assert reward.min().item() >= 0.0
+    assert reward.max().item() <= 1.0
+
+
+def test_lsgan_discriminator_reports_data_and_gp_components_separately() -> None:
+    class _StateDiscriminator(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.offset = torch.nn.Parameter(torch.zeros(()))
+
+        def compute_logits(self, obs, z):
+            del z
+            return obs["state"] + self.offset
+
+    discriminator = _StateDiscriminator()
+    agent = FBcprAuxAgent.__new__(FBcprAuxAgent)
+    agent._model = SimpleNamespace(
+        device="cpu",
+        amp_dtype=torch.bfloat16,
+        _discriminator=discriminator,
+    )
+    agent.cfg = SimpleNamespace(
+        model=SimpleNamespace(amp=False),
+        train=SimpleNamespace(discriminator_loss="lsgan"),
+    )
+    agent._distributed_training_stages = {}
+    agent._sync_gradients_if_manual = lambda _parameters: None
+    agent.discriminator_optimizer = torch.optim.SGD(discriminator.parameters(), lr=0.0)
+
+    metrics = agent.update_discriminator(
+        expert_obs={"state": torch.full((2, 1), 0.5)},
+        expert_z=torch.zeros(2, 1),
+        train_obs={"state": torch.full((2, 1), -0.5)},
+        train_z=torch.zeros(2, 1),
+        grad_penalty=None,
+    )
+
+    assert metrics["disc/expert_lsgan"].item() == pytest.approx(0.125)
+    assert metrics["disc/policy_lsgan"].item() == pytest.approx(0.125)
+    assert metrics["disc/data_loss"].item() == pytest.approx(0.25)
+    assert metrics["disc/gp_raw"].item() == pytest.approx(0.0)
+    assert metrics["disc/gp_weighted"].item() == pytest.approx(0.0)
+    assert metrics["disc/gp_fraction"].item() == pytest.approx(0.0)
+    assert metrics["disc/total_loss"].item() == pytest.approx(0.25)
+
+
 def _terrain_env_cfg() -> HumanoidVerseMjlabConfig:
     return HumanoidVerseMjlabConfig(
         lafan_tail_path="motions.pkl",
@@ -453,6 +512,9 @@ def test_agent_routes_discriminator_prior_and_fb_aux_main_without_crossing_strea
             result["transition_terminated"] = torch.tensor([[False], [True]])
             result["transition_truncated"] = torch.tensor([[False], [False]])
         else:
+            if not expert:
+                result["transition_terminated"] = torch.tensor([[False], [False]])
+                result["transition_truncated"] = torch.tensor([[False], [True]])
             result["aux_rewards"] = {"balance": torch.ones(batch_size, 1)}
         return result
 
@@ -534,6 +596,27 @@ def test_agent_routes_discriminator_prior_and_fb_aux_main_without_crossing_strea
     assert torch.all(seen["Actor"]["prior_obs"]["state"] == 20.0)
     torch.testing.assert_close(seen["QD"]["discount"], torch.tensor([[0.99], [0.0]]))
     assert agent.z_buffer.add_calls == 1
+
+    # With no dedicated prior replay, the same Agent restores the original UFO
+    # data topology: D uses main rollout-z, then Q_D and Actor use the atomically
+    # relabeled main context. The explicit action-outcome truncation stops Q_D.
+    seen.clear()
+    sampled = iter((torch.full((batch_size, 3), 11.0),))
+    agent.update(
+        {
+            "expert_slicer": _Replay(_batch(30.0, prior=False, expert=True)),
+            "train": _Replay(_batch(10.0, prior=False)),
+        },
+        step=1,
+    )
+    assert torch.all(seen["D"]["train_obs"]["state"] == 10.0)
+    assert torch.all(seen["D"]["train_z"] == 10.0)
+    assert torch.all(seen["QD"]["obs"]["state"] == 10.0)
+    assert torch.all(seen["QD"]["z"] == 11.0)
+    torch.testing.assert_close(seen["QD"]["discount"], torch.tensor([[0.99], [0.0]]))
+    assert seen["Actor"]["prior_is_main"] is True
+    assert torch.all(seen["Actor"]["prior_z"] == 11.0)
+    assert agent.z_buffer.add_calls == 2
 
 
 class _ActorDistribution:
@@ -629,6 +712,55 @@ def test_actor_combines_main_and_plane_losses_in_one_optimizer_step() -> None:
         clip_grad_norm=None,
     )
     assert actor.batch_sizes == [4]
+    assert critic.batch_sizes == [2]
+    assert aux_critic.batch_sizes == [2]
+    assert forward.batch_sizes == [2]
+    assert agent.actor_optimizer.steps == 1
+
+
+def test_actor_main_prior_reuses_one_action_and_one_optimizer_step() -> None:
+    actor = _CountingActor(action_dim=2)
+    critic = _CountingQ()
+    aux_critic = _CountingQ()
+    forward = _CountingForward()
+    agent = FBcprAuxAgent.__new__(FBcprAuxAgent)
+    agent._model = SimpleNamespace(
+        device="cpu",
+        amp_dtype=torch.bfloat16,
+        cfg=SimpleNamespace(actor_std=0.05),
+        _actor=actor,
+        _critic=critic,
+        _aux_critic=aux_critic,
+        _forward_map=forward,
+    )
+    agent.cfg = SimpleNamespace(
+        model=SimpleNamespace(amp=False),
+        train=SimpleNamespace(
+            stddev_clip=1.0,
+            actor_pessimism_penalty=0.5,
+            scale_reg=True,
+            reg_coeff=0.01,
+            reg_coeff_aux=0.03,
+        ),
+    )
+    agent._distributed_training_stages = {}
+    agent._sync_gradients_if_manual = lambda _parameters: None
+    agent.actor_optimizer = _CountingOptimizer(actor.parameters())
+    main_obs = {"state": torch.zeros(2, 1)}
+    main_z = torch.ones(2, 3)
+
+    agent.update_actor(
+        main_obs=main_obs,
+        main_z=main_z,
+        prior_obs=main_obs,
+        prior_z=main_z,
+        prior_is_main=True,
+        clip_grad_norm=None,
+    )
+
+    # FB, Aux and Q_D share the same two sampled main actions rather than
+    # duplicating the batch as the dedicated-plane two-stream path does.
+    assert actor.batch_sizes == [2]
     assert critic.batch_sizes == [2]
     assert aux_critic.batch_sizes == [2]
     assert forward.batch_sizes == [2]

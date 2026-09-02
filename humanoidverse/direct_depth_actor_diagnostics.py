@@ -366,7 +366,7 @@ def run_gradient_diagnostic(
     model,
     agent_config: Mapping[str, Any],
     main_replay: MemoryMappedTrajectoryReplay,
-    prior_replay: MemoryMappedTrajectoryReplay,
+    prior_replay: MemoryMappedTrajectoryReplay | None,
     expert_buffer: TrajectoryDictBuffer,
     batch_size: int,
     batches: int,
@@ -387,7 +387,8 @@ def run_gradient_diagnostic(
         torch.manual_seed(seed + batch_index)
         np.random.seed(seed + batch_index)
         main_batch = main_replay.sample(batch_size)
-        prior_batch = prior_replay.sample(batch_size)
+        dedicated_prior = prior_replay is not None
+        prior_batch = prior_replay.sample(batch_size) if dedicated_prior else main_batch
         expert_batch = expert_buffer.sample(batch_size)
 
         main_obs = _to_device(main_batch["observation"], device)
@@ -409,33 +410,49 @@ def run_gradient_diagnostic(
                 p_goal=float(train["train_goal_ratio"]),
                 p_expert=float(train["expert_asm_ratio"]),
             )
-            prior_sampled_z = _sample_mixed_z(
-                model,
-                prior_next_obs,
-                expert_z,
-                p_goal=float(train["train_goal_ratio"]),
-                p_expert=float(train["expert_asm_ratio"]),
+            prior_sampled_z = (
+                _sample_mixed_z(
+                    model,
+                    prior_next_obs,
+                    expert_z,
+                    p_goal=float(train["train_goal_ratio"]),
+                    p_expert=float(train["expert_asm_ratio"]),
+                )
+                if dedicated_prior
+                else main_sampled_z
             )
             relabel_ratio = train.get("relabel_ratio")
             if relabel_ratio is None:
                 main_z = main_batch["z"].to(device)
-                prior_z = prior_batch["z"].to(device)
+                prior_z = prior_batch["z"].to(device) if dedicated_prior else main_z
             else:
                 main_mask = torch.rand((batch_size, 1), device=device) <= float(relabel_ratio)
-                prior_mask = torch.rand((batch_size, 1), device=device) <= float(relabel_ratio)
+                prior_mask = (
+                    torch.rand((batch_size, 1), device=device) <= float(relabel_ratio)
+                    if dedicated_prior
+                    else main_mask
+                )
                 main_z = torch.where(main_mask, main_sampled_z, main_batch["z"].to(device))
-                prior_z = torch.where(prior_mask, prior_sampled_z, prior_batch["z"].to(device))
+                prior_z = (
+                    torch.where(prior_mask, prior_sampled_z, prior_batch["z"].to(device))
+                    if dedicated_prior
+                    else main_z
+                )
 
-        combined_obs = tree_map(
-            lambda main_value, prior_value: torch.cat((main_value, prior_value), dim=0),
-            main_obs,
-            prior_obs,
-        )
-        combined_z = torch.cat((main_z, prior_z), dim=0)
+        if dedicated_prior:
+            combined_obs = tree_map(
+                lambda main_value, prior_value: torch.cat((main_value, prior_value), dim=0),
+                main_obs,
+                prior_obs,
+            )
+            combined_z = torch.cat((main_z, prior_z), dim=0)
+        else:
+            combined_obs = main_obs
+            combined_z = main_z
         distribution = actor(combined_obs, combined_z, model.cfg.actor_std)
         combined_action = distribution.sample(clip=float(train["stddev_clip"]))
         main_action = combined_action[:batch_size]
-        prior_action = combined_action[batch_size:]
+        prior_action = combined_action[batch_size:] if dedicated_prior else main_action
 
         q_discriminator = _pessimistic_value(
             model._critic(prior_obs, prior_z, prior_action),
@@ -1020,13 +1037,19 @@ def main() -> None:
     model.to(args.device).eval()
     agent_config = _load_json(checkpoint_dir / "config.json")
     main_replay = MemoryMappedTrajectoryReplay(buffer_dir / f"train_rank_{args.buffer_rank}")
-    prior_replay = MemoryMappedTrajectoryReplay(buffer_dir / f"prior_rank_{args.buffer_rank}")
+    prior_buffer_dir = buffer_dir / f"prior_rank_{args.buffer_rank}"
+    prior_replay = (
+        MemoryMappedTrajectoryReplay(prior_buffer_dir)
+        if prior_buffer_dir.exists()
+        else None
+    )
     report: dict[str, Any] = {
         "run_dir": str(args.run_dir),
         "checkpoint_dir": str(checkpoint_dir),
         "checkpoint_global_step": _checkpoint_step(checkpoint_dir),
         "buffer_rank": args.buffer_rank,
         "expert_cache": str(expert_cache),
+        "behavior_prior_source": "plane" if prior_replay is not None else "main",
         "seed": args.seed,
     }
     if not args.skip_gradient:

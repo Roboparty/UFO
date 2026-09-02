@@ -59,6 +59,8 @@ def test_repeated_turning_heading_does_not_jump_back() -> None:
 
 def test_fb_depth_routes_heading_but_keeps_b_and_d_agnostic() -> None:
     cfg = build_fb_depth_agent(device="cpu", compile=False)
+    assert cfg.train.discriminator_loss == "lsgan"
+    assert cfg.train.discriminator_reward == "amp"
     assert cfg.model.heading_context_enabled
     assert not cfg.model.heading_critic_enabled
     assert cfg.train.reg_coeff_heading == 0.0

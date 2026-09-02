@@ -82,6 +82,11 @@ def build_fb_depth_agent(
         update={
             "reg_coeff_heading": float(heading_reg_coeff),
             "behavior_prior_enabled": bool(behavior_prior),
+            # Direct-depth formal runs use the original main-policy behavior
+            # prior topology with an AMP-style bounded LSGAN reward. Other FB
+            # presets retain their historical BCE/log-odds defaults.
+            "discriminator_loss": "lsgan",
+            "discriminator_reward": "amp",
             # A disabled branch must have zero Actor weight even if an old
             # config is later inspected or resumed through generic tooling.
             "reg_coeff": base.train.reg_coeff if behavior_prior else 0.0,

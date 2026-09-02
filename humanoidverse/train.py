@@ -37,7 +37,10 @@ _ensure_compile_cache()
 
 DEFAULT_AGENT = "fb"
 DEFAULT_NUM_ENVS = 1024
-DEFAULT_PRIOR_PLANE_ENVS = 128
+# A zero-sized dedicated collector selects the original UFO topology: the
+# behavior prior consumes main-terrain replay. Positive values remain available
+# as an explicit canonical-plane ablation.
+DEFAULT_PRIOR_PLANE_ENVS = 0
 DEFAULT_NUM_ENV_STEPS = 192000000
 DEFAULT_CHECKPOINT_EVERY_STEPS = 9600000
 DEFAULT_TRACKING_EVAL_EVERY_STEPS = 3200000
@@ -454,6 +457,14 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         gradient_sync=args.gradient_sync,
         ddp_bucket_cap_mb=args.ddp_bucket_cap_mb,
     )
+    behavior_prior_enabled = bool(
+        getattr(cfg.agent.train, "behavior_prior_enabled", True)
+    )
+    behavior_prior_source = (
+        "disabled"
+        if not behavior_prior_enabled
+        else ("plane" if cfg.prior_plane_envs > 0 else "main")
+    )
     print(
         "[INFO] UFO train: "
         f"agent={args.agent}, device={device}, rank={rank}/{world_size}, seed={seed}, work_dir={log_dir}, "
@@ -466,7 +477,10 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
         f"heading_context={cfg.agent.model.heading_context_enabled}, "
         f"heading_reg_coeff={getattr(cfg.agent.train, 'reg_coeff_heading', 0.0):g}, "
-        f"behavior_prior_enabled={getattr(cfg.agent.train, 'behavior_prior_enabled', True)}, "
+        f"behavior_prior_enabled={behavior_prior_enabled}, "
+        f"behavior_prior_source={behavior_prior_source}, "
+        f"discriminator_loss={getattr(cfg.agent.train, 'discriminator_loss', 'bce')}, "
+        f"discriminator_reward={getattr(cfg.agent.train, 'discriminator_reward', 'log_odds')}, "
         f"resume_replay_warmup_steps={cfg.resume_replay_warmup_steps}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
         f"terrain_mode={args.terrain_mode}, compile={cfg.agent.compile}, "
@@ -665,8 +679,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "Canonical-plane policy environments per rank for the fb_depth D/Q_D prior stream "
-            f"(default: {DEFAULT_PRIOR_PLANE_ENVS}; use 0 only for legacy/ablation runs)."
+            "Optional canonical-plane policy environments per rank for the fb_depth D/Q_D stream. "
+            "The default 0 uses original-UFO main-terrain replay; positive values select the "
+            "canonical-plane ablation."
         ),
     )
     parser.add_argument(
@@ -675,7 +690,8 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help=(
             "Enable the discriminator/Q_D behavior-prior branch. "
-            "Use --no-behavior-prior with --prior-plane-envs 0 for the formal no-D ablation."
+            "With --prior-plane-envs 0 it uses main-terrain replay; use "
+            "--no-behavior-prior for the formal no-D ablation."
         ),
     )
     parser.add_argument(

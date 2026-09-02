@@ -34,6 +34,8 @@ class FBcprAgentTrainConfig(FBAgentTrainConfig):
     # a fraction of 'relabel_ratio' transitions in each mini-batch are relabeled with a z sampled from the above distribution
     relabel_ratio: float | None = 1
     grad_penalty_discriminator: float = 10.0
+    discriminator_loss: Literal["bce", "lsgan"] = "bce"
+    discriminator_reward: Literal["log_odds", "amp"] = "log_odds"
     # Commented out as example but not useful
     # grad_penalty_obs_weight: float | None = None  # must be in (0,1)
     weight_decay_discriminator: float = 0.0
@@ -358,14 +360,29 @@ class FBcprAgent(FBAgent):
             else:
                 expert_logits = discriminator_stage(obs=expert_obs, z=expert_z)
                 unlabeled_logits = discriminator_stage(obs=train_obs, z=train_z)
-            # these are equivalent to binary cross entropy
-            expert_loss = -torch.nn.functional.logsigmoid(expert_logits)
-            unlabeled_loss = torch.nn.functional.softplus(unlabeled_logits)
-            loss = torch.mean(expert_loss + unlabeled_loss)
+            if self.cfg.train.discriminator_loss == "bce":
+                # Raw-logit binary cross entropy, retained for the original
+                # UFO/MetaMotivo agents and controlled ablations.
+                expert_loss = -torch.nn.functional.logsigmoid(expert_logits)
+                unlabeled_loss = torch.nn.functional.softplus(unlabeled_logits)
+                data_loss = torch.mean(expert_loss + unlabeled_loss)
+            elif self.cfg.train.discriminator_loss == "lsgan":
+                # AMP-style least-squares targets: expert=+1, policy=-1.
+                expert_loss = 0.5 * (expert_logits - 1.0).square()
+                unlabeled_loss = 0.5 * (unlabeled_logits + 1.0).square()
+                data_loss = expert_loss.mean() + unlabeled_loss.mean()
+            else:  # pragma: no cover - protected by the pydantic Literal
+                raise ValueError(
+                    f"Unsupported discriminator loss: {self.cfg.train.discriminator_loss!r}"
+                )
+
+            weighted_gp = torch.zeros((), device=data_loss.device, dtype=data_loss.dtype)
+            loss = data_loss
 
             if grad_penalty is not None:
                 wgan_gp = self.gradient_penalty_wgan(expert_obs, expert_z, train_obs, train_z)
-                loss += grad_penalty * wgan_gp
+                weighted_gp = float(grad_penalty) * wgan_gp
+                loss = loss + weighted_gp
 
         self.discriminator_optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -377,10 +394,55 @@ class FBcprAgent(FBAgent):
                 "disc_loss": loss.detach(),
                 "disc_expert_loss": expert_loss.detach().mean().detach(),
                 "disc_train_loss": unlabeled_loss.detach().mean().detach(),
+                "disc/data_loss": data_loss.detach(),
+                "disc/gp_weighted": weighted_gp.detach(),
+                "disc/total_loss": loss.detach(),
+                "disc/gp_fraction": (
+                    weighted_gp / (data_loss.detach().abs() + weighted_gp.abs()).clamp_min(1.0e-8)
+                ).detach(),
             }
+            if self.cfg.train.discriminator_loss == "lsgan":
+                output_metrics["disc/expert_lsgan"] = expert_loss.detach().mean()
+                output_metrics["disc/policy_lsgan"] = unlabeled_loss.detach().mean()
             if grad_penalty is not None:
                 output_metrics["disc_wgan_gp_loss"] = wgan_gp.detach()
+                output_metrics["disc/gp_raw"] = wgan_gp.detach()
+            else:
+                output_metrics["disc/gp_raw"] = torch.zeros_like(loss.detach())
         return output_metrics
+
+    def discriminator_reward(
+        self,
+        obs: torch.Tensor | dict[str, torch.Tensor],
+        z: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate the configured behavior-prior reward.
+
+        ``log_odds`` preserves the historical implementation.  ``amp`` uses
+        the bounded least-squares reward from AMP, which is exactly in [0, 1]
+        and therefore prevents discriminator-logit drift from changing the
+        Q_D return scale.
+        """
+
+        logits = self._model._discriminator.compute_logits(obs=obs, z=z)
+        return self.discriminator_reward_from_logits(logits)
+
+    def discriminator_reward_from_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """Map raw discriminator outputs to the configured scalar reward."""
+
+        reward_mode = getattr(
+            getattr(self.cfg, "train", None),
+            "discriminator_reward",
+            "log_odds",
+        )
+        if reward_mode == "log_odds":
+            probability = torch.sigmoid(logits).clamp(1.0e-6, 1.0 - 1.0e-6)
+            return torch.log(probability) - torch.log1p(-probability)
+        if reward_mode == "amp":
+            return (1.0 - 0.25 * (logits - 1.0).square()).clamp_min(0.0)
+        raise ValueError(  # pragma: no cover - protected by the pydantic Literal
+            f"Unsupported discriminator reward: {reward_mode!r}"
+        )
 
     def update_critic(
         self,
@@ -394,7 +456,7 @@ class FBcprAgent(FBAgent):
             num_parallel = self.cfg.model.archi.critic.num_parallel
             # compute target critic
             with torch.no_grad():
-                reward = self._model._discriminator.compute_reward(obs=obs, z=z)
+                reward = self.discriminator_reward(obs=obs, z=z)
                 dist = self._model._actor(next_obs, z, self._model.cfg.actor_std)
                 next_action = dist.sample(clip=self.cfg.train.stddev_clip)
                 next_Qs = self._model._target_critic(next_obs, z, next_action)  # num_parallel x batch x 1

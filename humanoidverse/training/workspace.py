@@ -248,6 +248,11 @@ def _trajectory_output_keys(agent: Agent) -> list[str]:
         "truncated",
         "step_count",
         "reward",
+        # Action-outcome-aligned flags. Unlike the legacy trajectory fields,
+        # these live in the same slot as (s_t, a_t) and are safe for Bellman
+        # discounts even when MJLab returns an auto-reset observation.
+        "transition_terminated",
+        "transition_truncated",
     ]
     if getattr(agent, "aux_rewards", None):
         keys.append("aux_rewards")
@@ -263,8 +268,6 @@ def _trajectory_output_keys(agent: Agent) -> list[str]:
                 "heading_context_continues",
                 "root_heading_xy",
                 "next_root_heading_xy",
-                "transition_terminated",
-                "transition_truncated",
             ]
         )
     return keys
@@ -1831,6 +1834,21 @@ class Workspace:
                 new_td=new_td,
                 new_terminated=new_terminated,
                 new_truncated=new_truncated,
+            )
+            # Q_D needs outcome flags even when BehaviorContext heading is
+            # disabled. Heading-enabled collection already produced the same
+            # values above; setdefault keeps a single source of truth.
+            heading_metadata.setdefault(
+                "transition_terminated",
+                torch.as_tensor(
+                    new_terminated, device=self.agent.device, dtype=torch.bool
+                ).unsqueeze(-1),
+            )
+            heading_metadata.setdefault(
+                "transition_truncated",
+                torch.as_tensor(
+                    new_truncated, device=self.agent.device, dtype=torch.bool
+                ).unsqueeze(-1),
             )
             if check_rollout_nonfinite:
                 _assert_finite(
