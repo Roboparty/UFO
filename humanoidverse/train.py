@@ -127,6 +127,7 @@ def build_ufo_mjlab_config(
     cartwheel_aux_safe: bool = False,
     heading_context: bool = True,
     heading_reg_coeff: float = 0.0,
+    behavior_prior: bool = True,
     num_agent_updates: int | None = None,
     robot_config: str | Path | None = None,
     terrain_mode: str | None = None,
@@ -142,7 +143,11 @@ def build_ufo_mjlab_config(
         raise ValueError("heading_reg_coeff requires heading_context=True")
     if heading_reg_coeff > 0.0 and agent != "fb_depth":
         raise ValueError("BehaviorContext heading is only supported by fb_depth")
-    if prior_plane_envs is None:
+    if not behavior_prior and prior_plane_envs not in (None, 0):
+        raise ValueError("behavior_prior=False requires prior_plane_envs=0")
+    if not behavior_prior:
+        prior_plane_envs = 0
+    elif prior_plane_envs is None:
         prior_plane_envs = DEFAULT_PRIOR_PLANE_ENVS if agent == "fb_depth" else 0
     prior_plane_envs = int(prior_plane_envs)
     if prior_plane_envs < 0:
@@ -220,6 +225,7 @@ def build_ufo_mjlab_config(
         cartwheel_aux_safe=cartwheel_aux_safe,
         heading_context=bool(heading_context and agent == "fb_depth"),
         heading_reg_coeff=float(heading_reg_coeff),
+        behavior_prior=bool(behavior_prior),
         wandb_project=wandb_project,
     )
     agent_cfg = selected["agent_cfg"]
@@ -439,6 +445,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         cartwheel_aux_safe=bool(args.cartwheel_aux_safe),
         heading_context=bool(args.heading_context),
         heading_reg_coeff=float(args.heading_reg_coeff),
+        behavior_prior=bool(args.behavior_prior),
         num_agent_updates=args.num_agent_updates,
         robot_config=args.robot_config,
         terrain_mode=args.terrain_mode,
@@ -459,6 +466,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
         f"heading_context={cfg.agent.model.heading_context_enabled}, "
         f"heading_reg_coeff={getattr(cfg.agent.train, 'reg_coeff_heading', 0.0):g}, "
+        f"behavior_prior_enabled={getattr(cfg.agent.train, 'behavior_prior_enabled', True)}, "
         f"resume_replay_warmup_steps={cfg.resume_replay_warmup_steps}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
         f"terrain_mode={args.terrain_mode}, compile={cfg.agent.compile}, "
@@ -662,6 +670,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--behavior-prior",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable the discriminator/Q_D behavior-prior branch. "
+            "Use --no-behavior-prior with --prior-plane-envs 0 for the formal no-D ablation."
+        ),
+    )
+    parser.add_argument(
         "--expert-buffer-cache",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -783,6 +800,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--prior-plane-envs must be non-negative")
     if args.prior_plane_envs not in (None, 0) and args.agent != "fb_depth":
         raise ValueError("--prior-plane-envs is only supported with --agent fb_depth")
+    if not args.behavior_prior and args.prior_plane_envs not in (None, 0):
+        raise ValueError("--no-behavior-prior requires --prior-plane-envs 0")
+    if not args.behavior_prior and args.agent != "fb_depth":
+        raise ValueError("--no-behavior-prior is currently defined only for --agent fb_depth")
     if args.num_agent_updates is not None and args.num_agent_updates <= 0:
         raise ValueError("--num-agent-updates must be positive")
     if args.lr_scale <= 0:

@@ -19,6 +19,7 @@ from .model import FBcprModel, FBcprModelConfig
 
 
 class FBcprAgentTrainConfig(FBAgentTrainConfig):
+    behavior_prior_enabled: bool = True
     lr_discriminator: float = 1e-4
     lr_critic: float = 1e-4
     critic_target_tau: float = 0.005
@@ -414,14 +415,39 @@ class FBcprAgent(FBAgent):
         self.critic_optimizer.step()
 
         with torch.no_grad():
+            online_Q_mean, online_Q_unc, _ = self.get_targets_uncertainty(Qs, 0.0)
+            target_Q_abs_scale = Q_mean.abs().mean()
             output_metrics = {
                 "target_Q": target_Q.mean().detach(),
                 "Q1": Qs.mean().detach(),
                 "mean_next_Q": Q_mean.mean().detach(),
                 "unc_Q": Q_unc.mean().detach(),
+                # ``unc_Q`` is target-critic disagreement, not a loss.  Keep
+                # the historical key and additionally expose its scale-aware
+                # form plus the individual ensemble heads.  The old ``Q1``
+                # key is actually an all-head mean and is retained only for
+                # dashboard compatibility.
+                "qd/target_abs_scale": target_Q_abs_scale.detach(),
+                "qd/relative_uncertainty": (
+                    Q_unc.mean() / target_Q_abs_scale.clamp_min(1.0e-8)
+                ).detach(),
+                "qd/online_uncertainty": online_Q_unc.mean().detach(),
+                "qd/online_abs_scale": online_Q_mean.abs().mean().detach(),
                 "critic_loss": critic_loss.mean().detach(),
                 "mean_disc_reward": reward.mean().detach(),
             }
+            # The production configuration has two heads.  Logging them
+            # separately is essential: the legacy ``Q1`` metric cannot reveal
+            # head divergence because it averages the ensemble first.
+            if num_parallel >= 2:
+                output_metrics.update(
+                    {
+                        "qd/online_head0_mean": Qs[0].mean().detach(),
+                        "qd/online_head1_mean": Qs[1].mean().detach(),
+                        "qd/target_head0_mean": next_Qs[0].mean().detach(),
+                        "qd/target_head1_mean": next_Qs[1].mean().detach(),
+                    }
+                )
         return output_metrics
 
     def update_actor(

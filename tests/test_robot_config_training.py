@@ -114,6 +114,24 @@ def _write_tiny_robot_with_training(root: Path, *, missing_actuator_joint: bool 
 
 
 class RobotConfigTrainingTest(unittest.TestCase):
+    def test_fb_depth_no_d_disables_prior_collector_and_actor_weight(self) -> None:
+        cfg = build_ufo_mjlab_config(
+            device="cpu",
+            work_dir="/tmp/ufo_unit_no_d",
+            num_envs=16,
+            num_env_steps=2048,
+            seed=1,
+            use_wandb=False,
+            wandb_run_name=None,
+            smoke=True,
+            agent="fb_depth",
+            behavior_prior=False,
+            prior_plane_envs=0,
+        )
+        self.assertEqual(cfg.prior_plane_envs, 0)
+        self.assertFalse(cfg.agent.train.behavior_prior_enabled)
+        self.assertEqual(cfg.agent.train.reg_coeff, 0.0)
+
     def test_old_g1_default_builds_cfg(self) -> None:
         cfg = build_ufo_mjlab_config(
             device="cpu",

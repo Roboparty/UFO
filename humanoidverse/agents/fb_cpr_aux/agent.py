@@ -69,6 +69,30 @@ class RelabeledBehaviorContext:
     source_type: torch.Tensor
 
 
+def _distribution_metrics(prefix: str, values: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Summarize a diagnostic distribution without synchronizing to the CPU."""
+
+    flat = values.detach().float().reshape(-1)
+    if flat.numel() == 0:
+        zero = torch.zeros((), device=values.device, dtype=torch.float32)
+        return {
+            f"{prefix}/mean": zero,
+            f"{prefix}/p10": zero,
+            f"{prefix}/p50": zero,
+            f"{prefix}/p90": zero,
+        }
+    quantiles = torch.quantile(
+        flat,
+        torch.tensor((0.1, 0.5, 0.9), device=flat.device, dtype=flat.dtype),
+    )
+    return {
+        f"{prefix}/mean": flat.mean(),
+        f"{prefix}/p10": quantiles[0],
+        f"{prefix}/p50": quantiles[1],
+        f"{prefix}/p90": quantiles[2],
+    }
+
+
 class FBcprAuxAgentConfig(BaseConfig):
     name: tp.Literal["FBcprAuxAgent"] = "FBcprAuxAgent"
 
@@ -93,6 +117,10 @@ class FBcprAuxAgentConfig(BaseConfig):
 
 class FBcprAuxAgent(FBcprAgent):
     config_class = FBcprAuxAgentConfig
+
+    @property
+    def _behavior_prior_enabled(self) -> bool:
+        return bool(getattr(self.cfg.train, "behavior_prior_enabled", True))
 
     @property
     def _heading_context_enabled(self) -> bool:
@@ -153,6 +181,59 @@ class FBcprAuxAgent(FBcprAgent):
             self.update_aux_critic = CudaGraphModule(self.update_aux_critic, warmup=5)
             if self._heading_critic_enabled:
                 self.update_heading_critic = CudaGraphModule(self.update_heading_critic, warmup=5)
+
+    @torch.no_grad()
+    def _discriminator_conditioning_diagnostics(
+        self,
+        *,
+        expert_obs: torch.Tensor | dict[str, torch.Tensor],
+        expert_z: torch.Tensor,
+        prior_obs: torch.Tensor | dict[str, torch.Tensor],
+        prior_rollout_z: torch.Tensor,
+        prior_relabel_z: torch.Tensor,
+        max_samples: int = 256,
+    ) -> dict[str, torch.Tensor]:
+        """Compare D logits before and after prior-context relabeling.
+
+        D is trained with ``prior_rollout_z`` while Q_D consumes
+        ``prior_relabel_z``.  Keeping both evaluations on the same states and
+        the same post-update discriminator separates saturation from a
+        conditioning-distribution mismatch.  A small subset keeps this
+        training-only diagnostic cheap.
+        """
+
+        batch_size = min(
+            int(expert_z.shape[0]),
+            int(prior_rollout_z.shape[0]),
+            int(prior_relabel_z.shape[0]),
+            int(max_samples),
+        )
+        expert_obs = tree_map(lambda x: x[:batch_size], expert_obs)
+        prior_obs = tree_map(lambda x: x[:batch_size], prior_obs)
+        expert_z = expert_z[:batch_size]
+        prior_rollout_z = prior_rollout_z[:batch_size]
+        prior_relabel_z = prior_relabel_z[:batch_size]
+
+        with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
+            expert_logits = self._model._discriminator.compute_logits(expert_obs, expert_z)
+            rollout_logits = self._model._discriminator.compute_logits(prior_obs, prior_rollout_z)
+            relabel_logits = self._model._discriminator.compute_logits(prior_obs, prior_relabel_z)
+
+        metrics: dict[str, torch.Tensor] = {}
+        metrics.update(_distribution_metrics("disc_diag/expert_logit", expert_logits))
+        metrics.update(_distribution_metrics("disc_diag/policy_rollout_logit", rollout_logits))
+        metrics.update(_distribution_metrics("disc_diag/policy_relabel_logit", relabel_logits))
+
+        relabeled = (prior_relabel_z.float() - prior_rollout_z.float()).abs().amax(dim=-1) > 1.0e-6
+        logit_shift = (relabel_logits - rollout_logits).reshape(-1)
+        metrics["disc_diag/relabel_fraction"] = relabeled.float().mean()
+        metrics.update(
+            _distribution_metrics(
+                "disc_diag/relabel_logit_shift",
+                logit_shift[relabeled],
+            )
+        )
+        return metrics
 
     def _relabel_main_and_prior_z(
         self,
@@ -219,6 +300,77 @@ class FBcprAuxAgent(FBcprAgent):
             heading_valid=expert_selected,
             source_type=source_type,
         )
+
+    def _relabel_main_z(
+        self,
+        *,
+        main_next_obs: torch.Tensor | dict[str, torch.Tensor],
+        expert_z: torch.Tensor,
+        main_rollout_z: torch.Tensor,
+    ) -> torch.Tensor:
+        """Relabel only the main stream for the formal no-D configuration."""
+
+        sampled_main_z = self.sample_mixed_z(
+            train_goal=main_next_obs,
+            expert_encodings=expert_z,
+        ).clone()
+        self.z_buffer.add(sampled_main_z)
+        if self.cfg.train.relabel_ratio is None:
+            return main_rollout_z
+        main_mask = torch.rand(
+            (main_rollout_z.shape[0], 1),
+            device=self.device,
+        ) <= self.cfg.train.relabel_ratio
+        return torch.where(main_mask, sampled_main_z, main_rollout_z)
+
+    def _relabel_main_context(
+        self,
+        *,
+        main_obs: dict[str, torch.Tensor],
+        main_next_obs: dict[str, torch.Tensor],
+        main_batch: dict[str, tp.Any],
+        expert_z: torch.Tensor,
+        expert_heading_xy: torch.Tensor,
+        expert_next_heading_xy: torch.Tensor,
+        main_rollout_z: torch.Tensor,
+    ) -> tuple[RelabeledBehaviorContext, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """Atomically relabel main z/heading without sampling a dummy prior stream."""
+
+        sampled = self._sample_mixed_behavior_context(
+            train_goal=main_next_obs,
+            expert_z=expert_z,
+            root_heading_xy=main_batch["root_heading_xy"].to(self.device),
+            next_root_heading_xy=main_batch["next_root_heading_xy"].to(self.device),
+            expert_heading_xy=expert_heading_xy,
+            expert_next_heading_xy=expert_next_heading_xy,
+        )
+        self.z_buffer.add(sampled.z)
+        original = RelabeledBehaviorContext(
+            z=main_rollout_z,
+            heading=main_obs["heading"],
+            next_heading=main_next_obs["heading"],
+            heading_valid=main_batch["heading_valid"].to(self.device),
+            source_type=main_batch["heading_source_type"].to(self.device),
+        )
+        if self.cfg.train.relabel_ratio is None:
+            return original, main_obs, main_next_obs
+
+        mask = torch.rand(
+            (main_rollout_z.shape[0], 1),
+            device=self.device,
+        ) <= self.cfg.train.relabel_ratio
+        merged = RelabeledBehaviorContext(
+            z=torch.where(mask, sampled.z, original.z),
+            heading=torch.where(mask, sampled.heading, original.heading),
+            next_heading=torch.where(mask, sampled.next_heading, original.next_heading),
+            heading_valid=torch.where(mask, sampled.heading_valid, original.heading_valid),
+            source_type=torch.where(mask, sampled.source_type, original.source_type),
+        )
+        relabeled_obs = dict(main_obs)
+        relabeled_next_obs = dict(main_next_obs)
+        relabeled_obs["heading"] = merged.heading
+        relabeled_next_obs["heading"] = merged.next_heading
+        return merged, relabeled_obs, relabeled_next_obs
 
     def _relabel_main_and_prior_context(
         self,
@@ -302,26 +454,35 @@ class FBcprAuxAgent(FBcprAgent):
         )
 
     def update(self, replay_buffer, step: int) -> Dict[str, torch.Tensor]:
+        behavior_prior_enabled = self._behavior_prior_enabled
         expert_batch = replay_buffer["expert_slicer"].sample(self.cfg.train.batch_size)
         main_batch = replay_buffer["train"].sample(self.cfg.train.batch_size)
-        prior_batch = replay_buffer.get("prior", replay_buffer["train"]).sample(self.cfg.train.batch_size)
+        prior_batch = (
+            replay_buffer["prior"].sample(self.cfg.train.batch_size)
+            if behavior_prior_enabled
+            else None
+        )
 
         main_obs, main_action, main_next_obs = (
             tree_map(lambda x: x.to(self.device), main_batch["observation"]),
             main_batch["action"].to(self.device),
             tree_map(lambda x: x.to(self.device), main_batch["next"]["observation"]),
         )
-        prior_obs, prior_action, prior_next_obs = (
-            tree_map(lambda x: x.to(self.device), prior_batch["observation"]),
-            prior_batch["action"].to(self.device),
-            tree_map(lambda x: x.to(self.device), prior_batch["next"]["observation"]),
-        )
         main_discount = self.cfg.train.discount * ~main_batch["next"]["terminated"].to(self.device)
-        prior_discount = prior_transition_discount(
-            prior_batch,
-            gamma=self.cfg.train.discount,
-            device=self.device,
-        )
+        prior_obs = prior_action = prior_next_obs = prior_discount = None
+        if behavior_prior_enabled:
+            if prior_batch is None:
+                raise RuntimeError("behavior_prior_enabled requires replay_buffer['prior']")
+            prior_obs, prior_action, prior_next_obs = (
+                tree_map(lambda x: x.to(self.device), prior_batch["observation"]),
+                prior_batch["action"].to(self.device),
+                tree_map(lambda x: x.to(self.device), prior_batch["next"]["observation"]),
+            )
+            prior_discount = prior_transition_discount(
+                prior_batch,
+                gamma=self.cfg.train.discount,
+                device=self.device,
+            )
         expert_obs, expert_next_obs = (
             tree_map(lambda x: x.to(self.device), expert_batch["observation"]),
             tree_map(lambda x: x.to(self.device), expert_batch["next"]["observation"]),
@@ -348,7 +509,11 @@ class FBcprAuxAgent(FBcprAgent):
                 "next_root_heading_xy",
             }
             missing_main = sorted(required_main.difference(main_batch))
-            missing_prior = sorted(required_prior.difference(prior_batch))
+            missing_prior = (
+                sorted(required_prior.difference(prior_batch))
+                if behavior_prior_enabled and prior_batch is not None
+                else []
+            )
             if missing_main or missing_prior:
                 raise RuntimeError(
                     "Heading-context replay metadata is incomplete; start a new replay buffer. "
@@ -358,9 +523,10 @@ class FBcprAuxAgent(FBcprAgent):
             # whose command may already have switched. Rebind s_{t+1} to the
             # context that generated action_t.
             main_next_obs = dict(main_next_obs)
-            prior_next_obs = dict(prior_next_obs)
             main_next_obs["heading"] = main_batch["heading_next"].to(self.device)
-            prior_next_obs["heading"] = prior_batch["heading_next"].to(self.device)
+            if behavior_prior_enabled:
+                prior_next_obs = dict(prior_next_obs)
+                prior_next_obs["heading"] = prior_batch["heading_next"].to(self.device)
 
         # Shared running statistics are updated by the main terrain stream
         # only. The canonical-plane prior is transformed in eval mode below.
@@ -372,17 +538,18 @@ class FBcprAuxAgent(FBcprAgent):
                 self._model._obs_normalizer(main_obs),
                 self._model._obs_normalizer(main_next_obs),
             )
-            prior_obs, prior_next_obs = (
-                self._model._obs_normalizer(prior_obs),
-                self._model._obs_normalizer(prior_next_obs),
-            )
+            if behavior_prior_enabled:
+                prior_obs, prior_next_obs = (
+                    self._model._obs_normalizer(prior_obs),
+                    self._model._obs_normalizer(prior_next_obs),
+                )
             expert_obs, expert_next_obs = (
                 self._model._obs_normalizer(expert_obs),
                 self._model._obs_normalizer(expert_next_obs),
             )
 
         prior_terrain_var = None
-        if isinstance(prior_obs, dict) and "terrain_priv" in prior_obs:
+        if behavior_prior_enabled and isinstance(prior_obs, dict) and "terrain_priv" in prior_obs:
             raw_prior = prior_batch["observation"].get("terrain_priv")
             raw_prior_next = prior_batch["next"]["observation"].get("terrain_priv")
             if raw_prior is None or raw_prior_next is None:
@@ -411,54 +578,103 @@ class FBcprAuxAgent(FBcprAgent):
 
         torch.compiler.cudagraph_mark_step_begin()
         expert_z = self.encode_expert(next_obs=expert_next_obs)
-        main_z = main_batch["z"].to(self.device)
-        prior_z = prior_batch["z"].to(self.device)
+        main_rollout_z = main_batch["z"].to(self.device)
+        prior_rollout_z = (
+            prior_batch["z"].to(self.device)
+            if behavior_prior_enabled and prior_batch is not None
+            else None
+        )
+        main_z = main_rollout_z
+        prior_z = prior_rollout_z
         main_collection_obs = main_obs
         main_collection_next_obs = main_next_obs
 
         # D sees the prior policy's original rollout z, matching the existing
         # algorithm. Relabeling happens independently below for both critics.
-        grad_penalty = self.cfg.train.grad_penalty_discriminator if self.cfg.train.grad_penalty_discriminator > 0 else None
-        metrics = self.update_discriminator(
-            expert_obs=expert_obs,
-            expert_z=expert_z,
-            train_obs=prior_obs,
-            train_z=prior_z,
-            grad_penalty=grad_penalty,
-        )
+        metrics: dict[str, torch.Tensor] = {}
+        if behavior_prior_enabled:
+            grad_penalty = (
+                self.cfg.train.grad_penalty_discriminator
+                if self.cfg.train.grad_penalty_discriminator > 0
+                else None
+            )
+            metrics.update(
+                self.update_discriminator(
+                    expert_obs=expert_obs,
+                    expert_z=expert_z,
+                    train_obs=prior_obs,
+                    train_z=prior_z,
+                    grad_penalty=grad_penalty,
+                )
+            )
 
         if self._heading_context_enabled:
             expert_heading_xy = expert_batch["heading_forward_xy"].to(self.device)
             expert_next_heading_xy = expert_batch["next"]["heading_forward_xy"].to(self.device)
-            (
-                main_context,
-                prior_context,
-                main_obs,
-                main_next_obs,
-                prior_obs,
-                prior_next_obs,
-            ) = self._relabel_main_and_prior_context(
-                main_obs=main_obs,
-                main_next_obs=main_next_obs,
-                prior_obs=prior_obs,
-                prior_next_obs=prior_next_obs,
-                main_batch=main_batch,
-                prior_batch=prior_batch,
-                expert_z=expert_z,
-                expert_heading_xy=expert_heading_xy,
-                expert_next_heading_xy=expert_next_heading_xy,
-                main_rollout_z=main_z,
-                prior_rollout_z=prior_z,
-            )
-            main_z, prior_z = main_context.z, prior_context.z
+            if behavior_prior_enabled:
+                (
+                    main_context,
+                    prior_context,
+                    main_obs,
+                    main_next_obs,
+                    prior_obs,
+                    prior_next_obs,
+                ) = self._relabel_main_and_prior_context(
+                    main_obs=main_obs,
+                    main_next_obs=main_next_obs,
+                    prior_obs=prior_obs,
+                    prior_next_obs=prior_next_obs,
+                    main_batch=main_batch,
+                    prior_batch=prior_batch,
+                    expert_z=expert_z,
+                    expert_heading_xy=expert_heading_xy,
+                    expert_next_heading_xy=expert_next_heading_xy,
+                    main_rollout_z=main_rollout_z,
+                    prior_rollout_z=prior_rollout_z,
+                )
+                main_z, prior_z = main_context.z, prior_context.z
+            else:
+                main_context, main_obs, main_next_obs = self._relabel_main_context(
+                    main_obs=main_obs,
+                    main_next_obs=main_next_obs,
+                    main_batch=main_batch,
+                    expert_z=expert_z,
+                    expert_heading_xy=expert_heading_xy,
+                    expert_next_heading_xy=expert_next_heading_xy,
+                    main_rollout_z=main_rollout_z,
+                )
+                main_z = main_context.z
+                prior_context = None
         else:
-            main_z, prior_z = self._relabel_main_and_prior_z(
-                main_next_obs=main_next_obs,
-                prior_next_obs=prior_next_obs,
-                expert_z=expert_z,
-                main_rollout_z=main_z,
-                prior_rollout_z=prior_z,
+            if behavior_prior_enabled:
+                main_z, prior_z = self._relabel_main_and_prior_z(
+                    main_next_obs=main_next_obs,
+                    prior_next_obs=prior_next_obs,
+                    expert_z=expert_z,
+                    main_rollout_z=main_rollout_z,
+                    prior_rollout_z=prior_rollout_z,
+                )
+            else:
+                main_z = self._relabel_main_z(
+                    main_next_obs=main_next_obs,
+                    expert_z=expert_z,
+                    main_rollout_z=main_rollout_z,
+                )
+
+        # Compute the heavier logit quantiles only once per collector step,
+        # rather than once for every optimizer update at that step.  This is
+        # diagnostics-only and does not alter gradients, losses, or RNG state.
+        if behavior_prior_enabled and getattr(self, "_last_discriminator_diagnostic_step", None) != int(step):
+            metrics.update(
+                self._discriminator_conditioning_diagnostics(
+                    expert_obs=expert_obs,
+                    expert_z=expert_z,
+                    prior_obs=prior_obs,
+                    prior_rollout_z=prior_rollout_z,
+                    prior_relabel_z=prior_z,
+                )
             )
+            self._last_discriminator_diagnostic_step = int(step)
 
         q_loss_coef = self.cfg.train.q_loss_coef if self.cfg.train.q_loss_coef > 0 else None
         clip_grad_norm = self.cfg.train.clip_grad_norm if self.cfg.train.clip_grad_norm > 0 else None
@@ -475,15 +691,16 @@ class FBcprAuxAgent(FBcprAgent):
                 clip_grad_norm=clip_grad_norm,
             )
         )
-        metrics.update(
-            self.update_critic(
-                obs=prior_obs,
-                action=prior_action,
-                discount=prior_discount,
-                next_obs=prior_next_obs,
-                z=prior_z,
+        if behavior_prior_enabled:
+            metrics.update(
+                self.update_critic(
+                    obs=prior_obs,
+                    action=prior_action,
+                    discount=prior_discount,
+                    next_obs=prior_next_obs,
+                    z=prior_z,
+                )
             )
-        )
         # compute scalar auxiliary reward as a weighted sum of the auxiliary rewards
         aux_reward = torch.zeros(
             (self.cfg.train.batch_size, 1),
@@ -531,8 +748,8 @@ class FBcprAuxAgent(FBcprAgent):
             self._run_actor_update(
                 main_obs=main_obs,
                 main_z=main_z,
-                prior_obs=prior_obs,
-                prior_z=prior_z,
+                prior_obs=prior_obs if behavior_prior_enabled else None,
+                prior_z=prior_z if behavior_prior_enabled else None,
                 heading_obs=main_collection_obs if heading_branch_active else None,
                 heading_z=main_batch["z"].to(self.device) if heading_branch_active else None,
                 heading_valid=(
@@ -541,7 +758,12 @@ class FBcprAuxAgent(FBcprAgent):
                 clip_grad_norm=clip_grad_norm,
             )
         )
-        metrics["prior/discount_mean"] = prior_discount.float().mean().detach()
+        metrics["cfg/behavior_prior_enabled"] = torch.tensor(
+            float(behavior_prior_enabled),
+            device=self.device,
+        )
+        if behavior_prior_enabled:
+            metrics["prior/discount_mean"] = prior_discount.float().mean().detach()
         if prior_terrain_var is not None:
             metrics["prior/terrain_priv_normalized_var_max"] = prior_terrain_var.detach()
         if self._heading_context_enabled:
@@ -549,7 +771,8 @@ class FBcprAuxAgent(FBcprAgent):
                 main_batch["heading_valid"].float().mean().to(self.device)
             )
             metrics["heading/relabel_valid_fraction_main"] = main_context.heading_valid.float().mean().detach()
-            metrics["heading/relabel_valid_fraction_prior"] = prior_context.heading_valid.float().mean().detach()
+            if behavior_prior_enabled:
+                metrics["heading/relabel_valid_fraction_prior"] = prior_context.heading_valid.float().mean().detach()
             metrics["cfg/reg_coeff_heading"] = torch.tensor(
                 self.cfg.train.reg_coeff_heading, device=self.device
             )
@@ -565,11 +788,12 @@ class FBcprAuxAgent(FBcprAgent):
                 self._target_backward_map_paramlist,
                 self.cfg.train.fb_target_tau,
             )
-            _soft_update_params(
-                self._critic_map_paramlist,
-                self._target_critic_map_paramlist,
-                self.cfg.train.critic_target_tau,
-            )
+            if behavior_prior_enabled:
+                _soft_update_params(
+                    self._critic_map_paramlist,
+                    self._target_critic_map_paramlist,
+                    self.cfg.train.critic_target_tau,
+                )
             _soft_update_params(
                 self._aux_critic_map_paramlist,
                 self._aux_target_critic_map_paramlist,
@@ -682,8 +906,8 @@ class FBcprAuxAgent(FBcprAgent):
         self,
         main_obs: torch.Tensor | dict[str, torch.Tensor],
         main_z: torch.Tensor,
-        prior_obs: torch.Tensor | dict[str, torch.Tensor],
-        prior_z: torch.Tensor,
+        prior_obs: torch.Tensor | dict[str, torch.Tensor] | None,
+        prior_z: torch.Tensor | None,
         heading_obs: torch.Tensor | dict[str, torch.Tensor] | None = None,
         heading_z: torch.Tensor | None = None,
         heading_valid: torch.Tensor | None = None,
@@ -692,32 +916,35 @@ class FBcprAuxAgent(FBcprAgent):
         actor_stage = self._training_stage("actor")
         actor = self._model._actor if actor_stage is None else actor_stage
         with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
-            # One actor forward and one optimizer step preserve DDP reducer and
-            # optimization semantics while the two loss branches use their own
-            # state distributions.
-            if heading_obs is None:
-                combined_obs = tree_map(lambda main, prior: torch.cat((main, prior), dim=0), main_obs, prior_obs)
-                combined_z = torch.cat((main_z, prior_z), dim=0)
-            else:
+            # One Actor forward and optimizer step combines exactly the active
+            # objective branches.  The formal no-D path omits the prior batch
+            # entirely instead of feeding main terrain data through Q_D.
+            obs_parts = [main_obs]
+            z_parts = [main_z]
+            if prior_obs is not None:
+                if prior_z is None:
+                    raise ValueError("prior_obs requires prior_z")
+                obs_parts.append(prior_obs)
+                z_parts.append(prior_z)
+            elif prior_z is not None:
+                raise ValueError("prior_z requires prior_obs")
+            if heading_obs is not None:
                 if heading_z is None or heading_valid is None:
                     raise ValueError("Heading Actor branch requires heading_z and heading_valid")
-                combined_obs = tree_map(
-                    lambda main, prior, heading: torch.cat((main, prior, heading), dim=0),
-                    main_obs,
-                    prior_obs,
-                    heading_obs,
-                )
-                combined_z = torch.cat((main_z, prior_z, heading_z), dim=0)
+                obs_parts.append(heading_obs)
+                z_parts.append(heading_z)
+            combined_obs = tree_map(lambda *parts: torch.cat(parts, dim=0), *obs_parts)
+            combined_z = torch.cat(z_parts, dim=0)
             dist = actor(combined_obs, combined_z, self._model.cfg.actor_std)
             combined_action = dist.sample(clip=self.cfg.train.stddev_clip)
             main_batch_size = main_z.shape[0]
             main_action = combined_action[:main_batch_size]
-            prior_action = combined_action[main_batch_size : 2 * main_batch_size]
-            heading_action = combined_action[2 * main_batch_size :] if heading_obs is not None else None
-
-            # Canonical-plane behavior anchor.
-            Qs_discriminator = self._model._critic(prior_obs, prior_z, prior_action)
-            _, _, Q_discriminator = self.get_targets_uncertainty(Qs_discriminator, self.cfg.train.actor_pessimism_penalty)  # batch
+            offset = main_batch_size
+            prior_action = None
+            if prior_obs is not None:
+                prior_action = combined_action[offset : offset + main_batch_size]
+                offset += main_batch_size
+            heading_action = combined_action[offset:] if heading_obs is not None else None
 
             # Main RP1 terrain realization and physical auxiliary objectives.
             Qs_aux = self._model._aux_critic(main_obs, main_z, main_action)
@@ -729,10 +956,21 @@ class FBcprAuxAgent(FBcprAgent):
 
             weight = Q_fb.abs().mean().detach() if self.cfg.train.scale_reg else 1.0
             actor_loss = (
-                -Q_discriminator.mean() * self.cfg.train.reg_coeff * weight
                 - Q_aux.mean() * self.cfg.train.reg_coeff_aux * weight
                 - Q_fb.mean()
             )
+            Q_discriminator_mean = torch.zeros((), device=self.device, dtype=Q_fb.dtype)
+            if prior_obs is not None:
+                Qs_discriminator = self._model._critic(prior_obs, prior_z, prior_action)
+                _, _, Q_discriminator = self.get_targets_uncertainty(
+                    Qs_discriminator,
+                    self.cfg.train.actor_pessimism_penalty,
+                )
+                Q_discriminator_mean = Q_discriminator.mean()
+                actor_loss = (
+                    actor_loss
+                    - Q_discriminator_mean * self.cfg.train.reg_coeff * weight
+                )
             Q_heading_mean = torch.zeros((), device=self.device, dtype=Q_fb.dtype)
             if heading_action is not None:
                 Qs_heading = self._model._heading_critic(heading_obs, heading_z, heading_action)
@@ -755,7 +993,7 @@ class FBcprAuxAgent(FBcprAgent):
         with torch.no_grad():
             output_metrics = {
                 "actor_loss": actor_loss.detach(),
-                "Q_discriminator": Q_discriminator.mean().detach(),
+                "Q_discriminator": Q_discriminator_mean.detach(),
                 "Q_aux": Q_aux.mean().detach(),
                 "Q_fb": Q_fb.mean().detach(),
                 "Q_heading": Q_heading_mean.detach(),

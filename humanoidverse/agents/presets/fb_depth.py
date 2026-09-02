@@ -13,6 +13,7 @@ def build_fb_depth_agent(
     *,
     heading_context: bool = True,
     heading_reg_coeff: float = 0.0,
+    behavior_prior: bool = True,
     **kwargs,
 ):
     if heading_reg_coeff < 0.0:
@@ -77,7 +78,15 @@ def build_fb_depth_agent(
             "heading_critic_enabled": bool(heading_context and heading_reg_coeff > 0.0),
         }
     )
-    depth_train = base.train.model_copy(update={"reg_coeff_heading": float(heading_reg_coeff)})
+    depth_train = base.train.model_copy(
+        update={
+            "reg_coeff_heading": float(heading_reg_coeff),
+            "behavior_prior_enabled": bool(behavior_prior),
+            # A disabled branch must have zero Actor weight even if an old
+            # config is later inspected or resumed through generic tooling.
+            "reg_coeff": base.train.reg_coeff if behavior_prior else 0.0,
+        }
+    )
     return base.model_copy(update={"model": depth_model, "train": depth_train})
 
 

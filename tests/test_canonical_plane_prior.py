@@ -16,7 +16,11 @@ from humanoidverse.agents.evaluations.same_z_terrain import (
     make_same_z_terrain_eval_config,
 )
 from humanoidverse.agents.fb.agent import FBAgent, RolloutContextState
-from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgent, prior_transition_discount
+from humanoidverse.agents.fb_cpr_aux.agent import (
+    FBcprAuxAgent,
+    _distribution_metrics,
+    prior_transition_discount,
+)
 from humanoidverse.agents.nn_models import eval_mode
 from humanoidverse.agents.normalizers import BatchNormNormalizerConfig, ObsNormalizerConfig
 from humanoidverse.perception.instinct_direct_depth import RP1DirectDepthConfig, RP1DirectDepthRuntime
@@ -28,6 +32,46 @@ from humanoidverse.training.workspace import (
     clone_motion_lib_for_collector,
     make_canonical_plane_training_config,
 )
+
+
+def test_distribution_metrics_reports_mean_and_quantiles() -> None:
+    metrics = _distribution_metrics(
+        "probe",
+        torch.tensor([-3.0, -1.0, 1.0, 3.0]),
+    )
+
+    assert metrics["probe/mean"].item() == pytest.approx(0.0)
+    assert metrics["probe/p10"].item() == pytest.approx(-2.4)
+    assert metrics["probe/p50"].item() == pytest.approx(0.0)
+    assert metrics["probe/p90"].item() == pytest.approx(2.4)
+
+
+def test_discriminator_conditioning_diagnostics_compares_same_state_z_contexts() -> None:
+    class _ZLogitDiscriminator:
+        def compute_logits(self, _obs, z):
+            return z[:, :1]
+
+    agent = FBcprAuxAgent.__new__(FBcprAuxAgent)
+    agent._model = SimpleNamespace(
+        device="cpu",
+        amp_dtype=torch.bfloat16,
+        _discriminator=_ZLogitDiscriminator(),
+    )
+    agent.cfg = SimpleNamespace(model=SimpleNamespace(amp=False))
+    obs = {"state": torch.zeros(2, 1)}
+    metrics = agent._discriminator_conditioning_diagnostics(
+        expert_obs=obs,
+        expert_z=torch.tensor([[4.0], [6.0]]),
+        prior_obs=obs,
+        prior_rollout_z=torch.tensor([[-2.0], [-2.0]]),
+        prior_relabel_z=torch.tensor([[-2.0], [-5.0]]),
+    )
+
+    assert metrics["disc_diag/expert_logit/mean"].item() == pytest.approx(5.0)
+    assert metrics["disc_diag/policy_rollout_logit/mean"].item() == pytest.approx(-2.0)
+    assert metrics["disc_diag/policy_relabel_logit/mean"].item() == pytest.approx(-3.5)
+    assert metrics["disc_diag/relabel_fraction"].item() == pytest.approx(0.5)
+    assert metrics["disc_diag/relabel_logit_shift/mean"].item() == pytest.approx(-3.0)
 
 
 def _terrain_env_cfg() -> HumanoidVerseMjlabConfig:
@@ -471,6 +515,7 @@ def test_agent_routes_discriminator_prior_and_fb_aux_main_without_crossing_strea
         return {name: torch.tensor(0.0)}
 
     agent.update_discriminator = lambda **kwargs: _record("D", **kwargs)
+    agent._discriminator_conditioning_diagnostics = lambda **_kwargs: {}
     agent.update_fb = lambda **kwargs: _record("FB", **kwargs)
     agent.update_critic = lambda **kwargs: _record("QD", **kwargs)
     agent.update_aux_critic = lambda **kwargs: _record("Aux", **kwargs)
@@ -587,4 +632,49 @@ def test_actor_combines_main_and_plane_losses_in_one_optimizer_step() -> None:
     assert critic.batch_sizes == [2]
     assert aux_critic.batch_sizes == [2]
     assert forward.batch_sizes == [2]
+    assert agent.actor_optimizer.steps == 1
+
+
+def test_actor_no_d_omits_prior_forward_and_keeps_one_optimizer_step() -> None:
+    actor = _CountingActor(action_dim=2)
+    critic = _CountingQ()
+    aux_critic = _CountingQ()
+    forward = _CountingForward()
+    agent = FBcprAuxAgent.__new__(FBcprAuxAgent)
+    agent._model = SimpleNamespace(
+        device="cpu",
+        amp_dtype=torch.bfloat16,
+        cfg=SimpleNamespace(actor_std=0.05),
+        _actor=actor,
+        _critic=critic,
+        _aux_critic=aux_critic,
+        _forward_map=forward,
+    )
+    agent.cfg = SimpleNamespace(
+        model=SimpleNamespace(amp=False),
+        train=SimpleNamespace(
+            stddev_clip=1.0,
+            actor_pessimism_penalty=0.5,
+            scale_reg=True,
+            reg_coeff=0.0,
+            reg_coeff_aux=0.02,
+        ),
+    )
+    agent._distributed_training_stages = {}
+    agent._sync_gradients_if_manual = lambda _parameters: None
+    agent.actor_optimizer = _CountingOptimizer(actor.parameters())
+    main_obs = {"state": torch.zeros(2, 1)}
+    metrics = agent.update_actor(
+        main_obs=main_obs,
+        main_z=torch.ones(2, 3),
+        prior_obs=None,
+        prior_z=None,
+        clip_grad_norm=None,
+    )
+
+    assert actor.batch_sizes == [2]
+    assert critic.batch_sizes == []
+    assert aux_critic.batch_sizes == [2]
+    assert forward.batch_sizes == [2]
+    assert metrics["Q_discriminator"].item() == pytest.approx(0.0)
     assert agent.actor_optimizer.steps == 1
