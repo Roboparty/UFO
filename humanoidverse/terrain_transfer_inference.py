@@ -907,17 +907,31 @@ def _run_rollout(
                 f"[INFO] stairs down-edge start: margin={args.stairs_down_edge_margin:.3f}, "
                 f"local_xy=({start_offset:.3f}, 0.000)"
             )
-        elif terrain in {"stairs", "stairs_up", "stairs_down"} and args.stairs_start_step > 0:
-            stairs_cfg = wrapped_env._env.config.terrain.stairs
-            if args.stairs_start_step > int(stairs_cfg.num_steps):
+        elif terrain in {
+            "stairs",
+            "stairs_up",
+            "stairs_down",
+            "low_stairs_up",
+            "low_stairs_down",
+        } and args.stairs_start_step > 0:
+            if terrain in {"low_stairs_up", "low_stairs_down"}:
+                num_steps = RP1_STAIR_LEVELS
+                platform_width = RP1_CENTER_PLATFORM_WIDTH
+                step_depth = RP1_STAIR_STEP_WIDTH
+            else:
+                stairs_cfg = wrapped_env._env.config.terrain.stairs
+                num_steps = int(stairs_cfg.num_steps)
+                platform_width = float(stairs_cfg.platform_width)
+                step_depth = float(stairs_cfg.step_depth)
+            if args.stairs_start_step > num_steps:
                 raise ValueError(
                     f"--stairs-start-step={args.stairs_start_step} exceeds "
-                    f"num_steps={int(stairs_cfg.num_steps)}"
+                    f"num_steps={num_steps}"
                 )
             start_offset = _stairs_step_center_offset(
                 args.stairs_start_step,
-                platform_width=float(stairs_cfg.platform_width),
-                step_depth=float(stairs_cfg.step_depth),
+                platform_width=platform_width,
+                step_depth=step_depth,
             )
             target_states["root_states"][:, 0] += start_offset
             print(

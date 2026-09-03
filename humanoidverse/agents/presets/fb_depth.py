@@ -49,14 +49,32 @@ def build_fb_depth_agent(
             update={"input_filter": DictInputFilterConfig(name="DictInputFilterConfig", key=context_keys)}
         )
 
-    archi_update = {"actor": depth_actor}
+    # The scalar behavior-prior and auxiliary value functions do not need to
+    # duplicate the full 2048x6 successor-feature capacity.  Preserve their
+    # twin ensembles and target networks while reducing only critic capacity.
+    discriminator_critic = archi.critic.model_copy(
+        update={"hidden_dim": 1024, "hidden_layers": 4}
+    )
+    aux_critic = archi.aux_critic.model_copy(update={"hidden_layers": 4})
+    archi_update = {
+        "actor": depth_actor,
+        "critic": discriminator_critic,
+        "aux_critic": aux_critic,
+    }
     if heading_context:
+        # Heading value prediction is a much simpler scalar objective than
+        # FB or the heterogeneous auxiliary return.  Keep the twin ensemble
+        # and target-network semantics, but do not duplicate a full 2048x6
+        # critic solely for Q_H.
+        heading_critic = with_context_filter(archi.aux_critic).model_copy(
+            update={"hidden_dim": 1024, "hidden_layers": 3}
+        )
         archi_update.update(
             {
                 "f": with_context_filter(archi.f),
-                "critic": with_context_filter(archi.critic),
-                "aux_critic": with_context_filter(archi.aux_critic),
-                "heading_critic": with_context_filter(archi.aux_critic),
+                "critic": with_context_filter(discriminator_critic),
+                "aux_critic": with_context_filter(aux_critic),
+                "heading_critic": heading_critic,
             }
         )
     depth_archi = archi.model_copy(update=archi_update)

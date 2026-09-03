@@ -101,7 +101,7 @@ def test_terrain_transfer_exposes_exact_rp1_training_families() -> None:
     assert set(RP1_TERRAIN_COMPONENT_NAMES).issubset(SUPPORTED_TERRAINS)
     assert _is_rp1_training_family("low_stairs_down")
     assert not _is_rp1_training_family("stairs")
-    assert RP1_STAIR_STEP_HEIGHT_RANGE == (0.05, 0.15)
+    assert RP1_STAIR_STEP_HEIGHT_RANGE == (0.06, 0.18)
 
 
 def test_assign_rp1_training_tile_uses_requested_family_and_row() -> None:

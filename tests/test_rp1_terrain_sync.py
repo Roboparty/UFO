@@ -63,8 +63,8 @@ def test_rp1_generator_matches_pinned_source_core_with_g1_perimeter() -> None:
     }
     assert {name: type(sub) for name, sub in cfg.sub_terrains.items()} == expected_types
     assert cfg.sub_terrains["perlin_rough"].height_range == (0.01, 0.03)
-    assert cfg.sub_terrains["low_stairs_up"].step_height_range == (0.05, 0.15)
-    assert cfg.sub_terrains["low_stairs_down"].step_height_range == (0.05, 0.15)
+    assert cfg.sub_terrains["low_stairs_up"].step_height_range == (0.06, 0.18)
+    assert cfg.sub_terrains["low_stairs_down"].step_height_range == (0.06, 0.18)
     assert cfg.sub_terrains["low_platforms"].grid_height_range == (0.03, 0.10)
     assert cfg.sub_terrains["hf_pyramid_slope_inv"].slope_range == (0.0, 0.2)
     assert cfg.sub_terrains["boxes"].num_obstacles == 50

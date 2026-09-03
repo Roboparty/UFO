@@ -72,12 +72,25 @@ def test_fb_depth_routes_heading_but_keeps_b_and_d_agnostic() -> None:
     assert "heading" not in cfg.model.archi.b.input_filter.key
     assert "heading" not in cfg.model.archi.discriminator.input_filter.key
     assert cfg.model.obs_normalizer.normalizers["heading"].name == "IdentityNormalizerConfig"
+    assert cfg.model.archi.f.hidden_dim == 2048
+    assert cfg.model.archi.f.hidden_layers == 6
+    assert cfg.model.archi.critic.hidden_dim == 1024
+    assert cfg.model.archi.critic.hidden_layers == 4
+    assert cfg.model.archi.critic.num_parallel == 2
+    assert cfg.model.archi.aux_critic.hidden_dim == 2048
+    assert cfg.model.archi.aux_critic.hidden_layers == 4
+    assert cfg.model.archi.aux_critic.num_parallel == 2
 
     qh_cfg = build_fb_depth_agent(
         device="cpu", compile=False, heading_reg_coeff=0.01
     )
     assert qh_cfg.model.heading_context_enabled
     assert qh_cfg.model.heading_critic_enabled
+    assert qh_cfg.model.archi.heading_critic.hidden_dim == 1024
+    assert qh_cfg.model.archi.heading_critic.hidden_layers == 3
+    assert qh_cfg.model.archi.heading_critic.num_parallel == 2
+    assert qh_cfg.model.archi.aux_critic.hidden_dim == 2048
+    assert qh_cfg.model.archi.aux_critic.hidden_layers == 4
 
 
 def test_qh_continuation_stops_at_tracking_context_boundary() -> None:
