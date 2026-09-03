@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
+from humanoidverse.agents.buffers.trajectory import TrajectoryDictBuffer, TrajectoryDictBufferMultiDim
+from humanoidverse.agents.fb_cpr.agent import FBcprAgent
 from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgent
 from humanoidverse.agents.presets.fb_depth import build_fb_depth_agent
 from humanoidverse.agents.selective_prior import (
@@ -15,6 +16,7 @@ from humanoidverse.agents.selective_prior import (
     active_finalized_mask,
     actor_prior_interior_mask,
     qd_interior_mask,
+    resolve_prior_proposals,
 )
 
 
@@ -61,6 +63,44 @@ def test_fresh_finalized_mask_expires_without_relabeling_unknown_as_bad() -> Non
     assert mask[:, 0].tolist() == [True, False, False]
 
 
+def test_gate_conflict_is_unknown_and_good_requires_delayed_second_pass() -> None:
+    label, candidate_step = resolve_prior_proposals(
+        good=torch.tensor([True, True, True]),
+        bad=torch.tensor([True, False, False]),
+        getup=torch.tensor([False, False, False]),
+        getup_success=torch.tensor([False, False, False]),
+        old_label=torch.tensor([PriorLabel.UNKNOWN, PriorLabel.UNKNOWN, PriorLabel.CANDIDATE]),
+        old_label_teacher_version=torch.tensor([0, 0, 0]),
+        old_candidate_step=torch.tensor([0, 0, 10]),
+        old_candidate_teacher_version=torch.tensor([0, 0, 4]),
+        step=25,
+        teacher_version=4,
+        candidate_min_age_steps=10,
+    )
+
+    assert label.tolist() == [PriorLabel.UNKNOWN, PriorLabel.CANDIDATE, PriorLabel.VALIDATED]
+    assert candidate_step[1].item() == 25
+
+
+def test_new_teacher_requires_a_fresh_delayed_candidate_pass() -> None:
+    label, candidate_step = resolve_prior_proposals(
+        good=torch.tensor([True, True]),
+        bad=torch.tensor([False, False]),
+        getup=torch.tensor([False, False]),
+        getup_success=torch.tensor([False, False]),
+        old_label=torch.tensor([PriorLabel.CANDIDATE, PriorLabel.VALIDATED]),
+        old_label_teacher_version=torch.tensor([0, 3]),
+        old_candidate_step=torch.tensor([1, 0]),
+        old_candidate_teacher_version=torch.tensor([3, 0]),
+        step=100,
+        teacher_version=4,
+        candidate_min_age_steps=10,
+    )
+
+    assert label.tolist() == [PriorLabel.CANDIDATE, PriorLabel.CANDIDATE]
+    assert candidate_step.tolist() == [100, 100]
+
+
 def _make_replay() -> TrajectoryDictBufferMultiDim:
     replay = TrajectoryDictBufferMultiDim(
         capacity=5,
@@ -88,6 +128,59 @@ def _make_replay() -> TrajectoryDictBufferMultiDim:
         }
     )
     return replay
+
+
+def test_masked_expert_sampling_preserves_contiguous_sequences() -> None:
+    episodes = []
+    for motion_id in (0, 1):
+        states = torch.arange(6, dtype=torch.float32).unsqueeze(-1) + 10 * motion_id
+        episodes.append(
+            {
+                "observation": {"state": states},
+                "motion_id": torch.full((6, 1), motion_id, dtype=torch.long),
+            }
+        )
+    replay = TrajectoryDictBuffer(
+        episodes,
+        seq_length=2,
+        output_key_t=["observation", "motion_id"],
+        output_key_tp1=["observation"],
+    )
+    holdout = replay.storage["motion_id"].reshape(-1).eq(1)
+
+    batch, (indices,) = replay.sample_from_mask(
+        holdout,
+        batch_size=8,
+        seq_length=2,
+        return_indices=True,
+    )
+
+    assert batch["motion_id"].eq(1).all()
+    assert indices.reshape(-1, 2).diff(dim=1).eq(1).all()
+    assert batch["observation"]["state"].reshape(-1, 2).diff(dim=1).eq(1).all()
+
+
+def test_encode_expert_uses_actual_selective_batch_size() -> None:
+    agent = FBcprAgent.__new__(FBcprAgent)
+    agent._model = SimpleNamespace(
+        device="cpu",
+        amp_dtype=torch.bfloat16,
+        _backward_map=lambda obs: obs,
+        project_z=lambda z: z,
+    )
+    # Deliberately leave the historical main batch size at 1024. A selective
+    # E/V/B quota supplies only two real 8-frame sequences here.
+    agent.cfg = SimpleNamespace(
+        model=SimpleNamespace(amp=False, seq_length=8),
+        train=SimpleNamespace(batch_size=1024),
+    )
+    sequence = torch.arange(16, dtype=torch.float32).unsqueeze(-1)
+
+    encoded = agent.encode_expert(sequence)
+
+    assert encoded.shape == (16, 1)
+    torch.testing.assert_close(encoded[:8], torch.full((8, 1), 3.5))
+    torch.testing.assert_close(encoded[8:], torch.full((8, 1), 11.5))
 
 
 def test_masked_replay_sampling_reuses_original_storage_and_has_real_successor() -> None:
@@ -192,6 +285,45 @@ def test_selective_discriminator_uses_raw_logits_and_effective_class_mass() -> N
     assert metrics["disc/data_loss"].item() == pytest.approx(expected)
 
 
+def test_only_heldout_calibration_updates_d_readiness() -> None:
+    class _Discriminator(torch.nn.Module):
+        def compute_logits(self, obs, z):
+            del z
+            return obs["state"]
+
+    agent = FBcprAuxAgent.__new__(FBcprAuxAgent)
+    agent._model = SimpleNamespace(_discriminator=_Discriminator(), device="cpu")
+    agent.cfg = SimpleNamespace(
+        train=SimpleNamespace(
+            selective_prior_d_positive_min=0.5,
+            selective_prior_d_bad_max=0.0,
+            selective_prior_d_expert_validated_gap_max=0.35,
+            selective_prior_d_expert_validated_auc_max=0.65,
+            selective_prior_d_validated_bad_auc_min=0.8,
+            selective_prior_d_ready_streak=10,
+            selective_prior_d_min_updates=999,
+        )
+    )
+    agent._selective_prior_state = SelectivePriorState(
+        phase=PriorPhase.FIT_D,
+        discriminator_update_count=1,
+    )
+    positive = {"state": torch.ones(8, 1)}
+    bad = {"state": -torch.ones(8, 1)}
+
+    metrics = agent.evaluate_selective_discriminator_calibration(
+        expert_obs=positive,
+        expert_z=torch.zeros(8, 1),
+        validated_obs=positive,
+        validated_z=torch.zeros(8, 1),
+        bad_obs=bad,
+        bad_z=torch.zeros(8, 1),
+    )
+
+    assert metrics["prior/d_calibration_ready"].item() == 1.0
+    assert agent._selective_prior_state.d_ready_streak == 1
+
+
 def test_delayed_gate_promotes_only_same_context_exact_tracking_windows() -> None:
     class _IdentityTeacher(torch.nn.Module):
         def forward(self, obs):
@@ -200,6 +332,12 @@ def test_delayed_gate_promotes_only_same_context_exact_tracking_windows() -> Non
     class _IdentityNormalizer(torch.nn.Module):
         def forward(self, obs):
             return obs
+
+    class _DriftingOnlineNormalizer(torch.nn.Module):
+        def forward(self, obs):
+            shifted = dict(obs)
+            shifted["state"] = shifted["state"] + torch.tensor([0.0, 100.0])
+            return shifted
 
     time, env, z_dim = 10, 2, 2
     replay = TrajectoryDictBufferMultiDim(
@@ -221,6 +359,11 @@ def test_delayed_gate_promotes_only_same_context_exact_tracking_windows() -> Non
             "prior_teacher_version",
             "prior_confidence",
             "prior_generation",
+            "prior_candidate_step",
+            "prior_candidate_teacher_version",
+            "prior_reference_index",
+            "prior_z_encoder_version",
+            "prior_policy_version",
         ],
         output_key_tp1=["observation"],
     )
@@ -244,6 +387,11 @@ def test_delayed_gate_promotes_only_same_context_exact_tracking_windows() -> Non
             "prior_teacher_version": torch.zeros(time, env, 1, dtype=torch.long),
             "prior_confidence": torch.zeros(time, env, 1),
             "prior_generation": torch.arange(time).reshape(time, 1, 1).expand(-1, env, -1),
+            "prior_candidate_step": torch.zeros(time, env, 1, dtype=torch.long),
+            "prior_candidate_teacher_version": torch.zeros(time, env, 1, dtype=torch.long),
+            "prior_reference_index": torch.arange(time).reshape(time, 1, 1).expand(-1, env, -1),
+            "prior_z_encoder_version": torch.zeros(time, env, 1, dtype=torch.long),
+            "prior_policy_version": torch.zeros(time, env, 1, dtype=torch.long),
         }
     )
     agent = FBcprAuxAgent.__new__(FBcprAuxAgent)
@@ -251,7 +399,7 @@ def test_delayed_gate_promotes_only_same_context_exact_tracking_windows() -> Non
         device="cpu",
         amp_dtype=torch.bfloat16,
         amp=False,
-        _obs_normalizer=_IdentityNormalizer(),
+        _obs_normalizer=_DriftingOnlineNormalizer(),
         _target_backward_map=_IdentityTeacher(),
         project_z=lambda value: value,
     )
@@ -259,7 +407,9 @@ def test_delayed_gate_promotes_only_same_context_exact_tracking_windows() -> Non
         model=SimpleNamespace(amp=False),
         train=SimpleNamespace(
             selective_prior_gate_teacher_refresh_updates=999,
+            selective_prior_gate_bootstrap_updates=0,
             selective_prior_expansion_refresh_updates=999,
+            selective_prior_candidate_min_age_local_steps=10,
             selective_prior_gate_window=2,
             selective_prior_gate_future=2,
             selective_prior_gate_windows_per_refresh=8,
@@ -272,6 +422,7 @@ def test_delayed_gate_promotes_only_same_context_exact_tracking_windows() -> Non
         ),
     )
     agent._gate_backward_teacher = _IdentityTeacher()
+    agent._gate_obs_normalizer = _IdentityNormalizer()
     agent._selective_prior_state = SelectivePriorState()
     agent._last_selective_mask_step = None
     agent._cached_selective_masks = None
@@ -281,7 +432,7 @@ def test_delayed_gate_promotes_only_same_context_exact_tracking_windows() -> Non
     metrics = agent._refresh_selective_prior_labels(replay, step=100)
 
     assert metrics["prior/gate_good_window_fraction"].item() == pytest.approx(1.0)
-    assert (replay.storage["prior_label"] == PriorLabel.VALIDATED).any()
+    assert (replay.storage["prior_label"] == PriorLabel.CANDIDATE).any()
     assert not (replay.storage["prior_label"] == PriorLabel.BAD).any()
 
 
@@ -338,7 +489,7 @@ def test_bootstrap_phase_trains_main_objectives_but_not_prior_branch() -> None:
     agent._selective_prior_state = SelectivePriorState()
     agent._last_selective_mask_step = None
     agent._cached_selective_masks = None
-    agent._refresh_selective_prior_labels = lambda *_args: {}
+    agent._refresh_selective_prior_labels = lambda *_args, **_kwargs: {}
     agent._selective_prior_active_masks = lambda *_args: {}
     agent._selective_prior_phase_from_coverage = lambda *_args: {}
     agent.encode_expert = lambda **_kwargs: torch.ones(batch_size, 2)

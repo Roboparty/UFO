@@ -18,6 +18,10 @@ class PriorLabel(IntEnum):
     UNKNOWN = 0
     VALIDATED = 1
     BAD = 2
+    # Candidate is deliberately not part of FINALIZED_LABELS. It has passed
+    # one D-independent gate observation but must age and pass a later,
+    # outcome-aware revalidation before entering any prior objective.
+    CANDIDATE = 3
 
 
 class PriorPhase(IntEnum):
@@ -40,6 +44,8 @@ class SelectivePriorState:
     discriminator_bank_version: int = -1
     qd_bank_version: int = -1
     update_count: int = 0
+    behavior_encoder_version: int = 0
+    policy_version: int = 0
     discriminator_update_count: int = 0
     qd_update_count: int = 0
     d_ready_streak: int = 0
@@ -133,16 +139,61 @@ def actor_prior_interior_mask(
 
 
 def approximate_pairwise_auc(positive: torch.Tensor, negative: torch.Tensor) -> torch.Tensor:
-    """Deterministic rank AUC with half credit for ties."""
+    """Exact empirical pairwise AUC with half credit for ties."""
 
     positive = positive.detach().float().reshape(-1)
     negative = negative.detach().float().reshape(-1)
-    count = min(positive.numel(), negative.numel())
-    if count == 0:
+    if positive.numel() == 0 or negative.numel() == 0:
         return torch.full((), float("nan"), device=positive.device)
-    positive = positive[:count]
-    negative = negative[:count]
-    return (positive.gt(negative).float() + 0.5 * positive.eq(negative).float()).mean()
+    comparison = positive[:, None] - negative[None, :]
+    return (comparison.gt(0).float() + 0.5 * comparison.eq(0).float()).mean()
+
+
+def resolve_prior_proposals(
+    *,
+    good: torch.Tensor,
+    bad: torch.Tensor,
+    getup: torch.Tensor,
+    getup_success: torch.Tensor,
+    old_label: torch.Tensor,
+    old_label_teacher_version: torch.Tensor,
+    old_candidate_step: torch.Tensor,
+    old_candidate_teacher_version: torch.Tensor,
+    step: int,
+    teacher_version: int,
+    candidate_min_age_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resolve overlapping gate evidence without relying on enum ordering."""
+
+    good_only = good.to(torch.bool) & ~bad.to(torch.bool)
+    bad_only = bad.to(torch.bool) & ~good.to(torch.bool)
+    old_label = old_label.to(torch.long)
+    old_candidate_step = old_candidate_step.to(torch.long)
+    same_teacher_candidate = old_label.eq(int(PriorLabel.CANDIDATE))
+    same_teacher_candidate &= old_candidate_teacher_version.to(torch.long).eq(int(teacher_version))
+    aged_candidate = same_teacher_candidate & (
+        int(step) - old_candidate_step >= int(candidate_min_age_steps)
+    )
+    second_pass_validated = good_only & aged_candidate & ~getup.to(torch.bool)
+    getup_validated = good_only & getup.to(torch.bool) & getup_success.to(torch.bool)
+    # A new verifier coordinate system must re-admit old support through the
+    # delayed candidate path.  A single favorable pass cannot silently renew
+    # a label issued by another teacher snapshot.
+    revalidated = good_only & old_label.eq(int(PriorLabel.VALIDATED))
+    revalidated &= old_label_teacher_version.to(torch.long).eq(int(teacher_version))
+    validated = second_pass_validated | getup_validated | revalidated
+    candidate = good_only & ~validated
+
+    label = torch.full_like(old_label, int(PriorLabel.UNKNOWN), dtype=torch.int8)
+    label[candidate] = int(PriorLabel.CANDIDATE)
+    label[validated] = int(PriorLabel.VALIDATED)
+    label[bad_only] = int(PriorLabel.BAD)
+    candidate_step = torch.where(
+        candidate & same_teacher_candidate,
+        old_candidate_step,
+        torch.full_like(old_candidate_step, int(step)),
+    )
+    return label, candidate_step
 
 
 __all__ = [
@@ -156,4 +207,5 @@ __all__ = [
     "finalized_mask",
     "fresh_mask",
     "qd_interior_mask",
+    "resolve_prior_proposals",
 ]

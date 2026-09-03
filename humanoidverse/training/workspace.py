@@ -264,6 +264,8 @@ def _trajectory_output_keys(agent: Agent) -> list[str]:
                 "root_heading_xy",
                 "next_root_heading_xy",
                 "prior_motion_id",
+                "prior_reference_index",
+                "prior_z_encoder_version",
             ]
         )
     if bool(getattr(agent.train, "selective_prior_enabled", False)):
@@ -274,6 +276,9 @@ def _trajectory_output_keys(agent: Agent) -> list[str]:
                 "prior_teacher_version",
                 "prior_confidence",
                 "prior_generation",
+                "prior_candidate_step",
+                "prior_candidate_teacher_version",
+                "prior_policy_version",
             ]
         )
     return keys
@@ -995,6 +1000,12 @@ class Workspace:
             "root_heading_xy": current_heading_xy,
             "next_root_heading_xy": next_root_heading,
             "prior_motion_id": (state.motion_id if state.motion_id is not None else torch.full_like(state.context_id, -1)),
+            "prior_reference_index": (
+                state.reference_index if state.reference_index is not None else torch.full_like(state.context_id, -1)
+            ),
+            "prior_z_encoder_version": (
+                state.z_encoder_version if state.z_encoder_version is not None else torch.full_like(state.context_id, -1)
+            ),
             "transition_terminated": torch.as_tensor(new_terminated, device=self.agent.device, dtype=torch.bool).unsqueeze(-1),
             "transition_truncated": torch.as_tensor(new_truncated, device=self.agent.device, dtype=torch.bool).unsqueeze(-1),
         }
@@ -1480,11 +1491,21 @@ class Workspace:
                 )
             if not isinstance(replay_buffer["train"], TrajectoryDictBufferMultiDim):
                 raise RuntimeError("Selective online prior requires TrajectoryDictBufferMultiDim")
+            missing_resumed_replay = self._checkpoint_local_time > 0 and not loaded_checkpoint_buffer
+            if missing_resumed_replay:
+                # A restored D/Q_D phase without its versioned admission bank
+                # is never valid. Fail closed at load time rather than relying
+                # on a later coverage check to happen to disable Actor-D.
+                self.agent.reset_selective_prior_to_bootstrap(reason="checkpoint_replay_missing")
             status_prior = self._checkpoint_status.get("selective_prior")
             agent_prior = self.agent._selective_prior_state.state_dict()
-            if self._checkpoint_local_time > 0 and (
-                not isinstance(status_prior, dict)
-                or any(int(status_prior.get(key, -(10**9))) != int(value) for key, value in agent_prior.items())
+            if (
+                not missing_resumed_replay
+                and self._checkpoint_local_time > 0
+                and (
+                    not isinstance(status_prior, dict)
+                    or any(int(status_prior.get(key, -(10**9))) != int(value) for key, value in agent_prior.items())
+                )
             ):
                 self.agent.reset_selective_prior_to_bootstrap(reason="checkpoint_status_agent_state_mismatch")
             migrated = False
@@ -1495,11 +1516,26 @@ class Workspace:
                 ("prior_teacher_version", torch.int64),
                 ("prior_confidence", torch.float32),
                 ("prior_generation", torch.int64),
+                ("prior_reference_index", torch.int64),
+                ("prior_z_encoder_version", torch.int64),
+                ("prior_candidate_step", torch.int64),
+                ("prior_candidate_teacher_version", torch.int64),
+                ("prior_policy_version", torch.int64),
             ):
                 migrated |= replay_buffer["train"].ensure_scalar_field(
                     key,
                     dtype=dtype,
-                    fill_value=-1 if key == "prior_motion_id" else 0,
+                    fill_value=(
+                        -1
+                        if key
+                        in {
+                            "prior_motion_id",
+                            "prior_reference_index",
+                            "prior_z_encoder_version",
+                            "prior_policy_version",
+                        }
+                        else 0
+                    ),
                 )
             if migrated:
                 print(
@@ -1568,7 +1604,18 @@ class Workspace:
         terminated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
         truncated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
         done = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
-        main_rollout_state = RolloutContextState()
+        # A collector restart (resume or post-evaluation reset) is an actual
+        # behavior-context boundary even though it is not inserted as a replay
+        # transition. Seed IDs from rank-local time so adjacent ring slots can
+        # never bootstrap across that administrative reset.
+        main_rollout_state = RolloutContextState(
+            context_id=torch.full(
+                (self.cfg.online_parallel_envs, 1),
+                int(self._checkpoint_local_time) + 1,
+                device=self.agent.device,
+                dtype=torch.long,
+            )
+        )
         prior_collector_state = self._reset_prior_collector() if self.prior_env is not None else None
         completed_main_iterations = self._checkpoint_local_time // self.cfg.online_parallel_envs if loaded_prior_checkpoint_buffer else 0
         prior_env_steps = completed_main_iterations * self.cfg.prior_plane_envs
@@ -1667,7 +1714,14 @@ class Workspace:
                     terminated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
                     truncated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
                     done = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
-                    main_rollout_state = RolloutContextState()
+                    main_rollout_state = RolloutContextState(
+                        context_id=torch.full(
+                            (self.cfg.online_parallel_envs, 1),
+                            int(local_time) + 1,
+                            device=self.agent.device,
+                            dtype=torch.long,
+                        )
+                    )
                     # The priority evaluator temporarily switches the shared
                     # motion library into evaluation mode.  Main and plane
                     # collectors must both restart after it is restored.
@@ -1980,6 +2034,13 @@ class Workspace:
                         "prior_label_step": np.zeros(metadata_shape, dtype=np.int64),
                         "prior_teacher_version": np.zeros(metadata_shape, dtype=np.int64),
                         "prior_confidence": np.zeros(metadata_shape, dtype=np.float32),
+                        "prior_candidate_step": np.zeros(metadata_shape, dtype=np.int64),
+                        "prior_candidate_teacher_version": np.zeros(metadata_shape, dtype=np.int64),
+                        "prior_policy_version": np.full(
+                            metadata_shape,
+                            int(self.agent._selective_prior_state.policy_version),
+                            dtype=np.int64,
+                        ),
                         # Collection time is the ring generation. Delayed gate
                         # writes are discarded if this slot has been replaced.
                         "prior_generation": np.full(

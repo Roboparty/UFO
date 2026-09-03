@@ -141,7 +141,7 @@ class TrajectoryDictBuffer:
         buffer._get_idxs = torch.compile(get_idxs, mode="reduce-overhead")
         return buffer
 
-    def sample(self, batch_size: int = 1, seq_length: int | None = None):
+    def sample(self, batch_size: int = 1, seq_length: int | None = None, *, return_indices: bool = False):
         seq_length = seq_length or self.seq_length
         if batch_size < seq_length:
             raise ValueError(
@@ -167,12 +167,15 @@ class TrajectoryDictBuffer:
             priorities=self.priorities[traj_idx],
         )
         idxs = idxs.to(torch.long).unbind(-1)
+        sampled_idxs = idxs
         for k in self.output_key_t:
             output[k] = tree_map(lambda x: x[idxs], self.storage[k])
         # increment the time index to get the next states
         idxs = ((idxs[0] + 1) % self.capacity, *idxs[1:])
         for k in self.output_key_tp1:
             output["next"][k] = tree_map(lambda x: x[idxs], self.storage[k])
+        if return_indices:
+            return output, sampled_idxs
         return output
 
     def update_priorities(self, priorities: torch.Tensor, idxs: torch.Tensor) -> None:
@@ -180,6 +183,55 @@ class TrajectoryDictBuffer:
         assert len(priorities) == len(self.priorities)
         self.priorities[idxs] = priorities
         self.priorities = self.priorities / torch.sum(self.priorities)
+
+    @torch.no_grad()
+    def sample_from_mask(
+        self,
+        mask: torch.Tensor,
+        batch_size: int,
+        *,
+        seq_length: int | None = None,
+        return_indices: bool = False,
+    ):
+        """Sample contiguous expert sequences from a train/holdout view.
+
+        ``encode_expert`` averages each sequence into one behavior latent, so
+        independently sampled frames must never be grouped after the fact.
+        """
+
+        if mask.shape != (self.capacity,):
+            raise ValueError(f"Expert mask shape {tuple(mask.shape)} does not match capacity {self.capacity}")
+        seq_length = int(seq_length or self.seq_length)
+        if batch_size < seq_length or batch_size % seq_length != 0:
+            raise ValueError(
+                "Masked expert batch must contain a whole number of sequences: "
+                f"batch_size={batch_size}, seq_length={seq_length}"
+            )
+        allowed = mask.to(device=self.device, dtype=torch.bool)
+        done = get_key(self.storage, self.end_key).reshape(self.capacity, -1).any(dim=-1)
+        start_count = self.capacity - seq_length
+        if start_count <= 0:
+            raise ValueError("Expert buffer is too short for the requested sequence and successor")
+        eligible_start = torch.ones(start_count, device=self.device, dtype=torch.bool)
+        for offset in range(seq_length):
+            eligible_start &= allowed[offset : offset + start_count]
+            # The next observation of every returned frame must remain inside
+            # the same trajectory, including the final frame in the sequence.
+            eligible_start &= ~done[offset : offset + start_count]
+        candidates = torch.nonzero(eligible_start, as_tuple=False).reshape(-1)
+        if candidates.numel() == 0:
+            raise ValueError("No contiguous expert sequences satisfy the requested mask")
+        num_sequences = batch_size // seq_length
+        choice = torch.randint(candidates.numel(), (num_sequences,), device=candidates.device)
+        starts = candidates[choice]
+        idx = (starts[:, None] + torch.arange(seq_length, device=starts.device)[None, :]).reshape(-1)
+        output = {key: tree_map(lambda value: value[idx], self.storage[key]) for key in self.output_key_t}
+        if self.output_key_tp1:
+            next_idx = idx + 1
+            output["next"] = {key: tree_map(lambda value: value[next_idx], self.storage[key]) for key in self.output_key_tp1}
+        if return_indices:
+            return output, (idx,)
+        return output
 
     @property
     def capacity(self):

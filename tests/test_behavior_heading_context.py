@@ -57,6 +57,30 @@ def test_repeated_turning_heading_does_not_jump_back() -> None:
     torch.testing.assert_close(repeated[-1], _xy([180.0])[0], atol=1.0e-5, rtol=0.0)
 
 
+def test_collector_restart_preserves_seeded_context_boundary() -> None:
+    agent = FBAgent.__new__(FBAgent)
+    agent._model = SimpleNamespace(
+        device=torch.device("cpu"),
+        sample_z=lambda count, device: torch.zeros(count, 2, device=device),
+    )
+    agent.cfg = SimpleNamespace(
+        model=SimpleNamespace(heading_context_enabled=False),
+        train=SimpleNamespace(
+            rollout_expert_trajectories=False,
+            update_z_every_step=100,
+            use_mix_rollout=False,
+        ),
+    )
+    seeded = torch.tensor([[1_000_001], [1_000_001]], dtype=torch.long)
+
+    context = agent.advance_rollout_context(
+        RolloutContextState(context_id=seeded),
+        step_count=torch.ones(2, dtype=torch.long),
+    )
+
+    torch.testing.assert_close(context.context_id, seeded)
+
+
 def test_fb_depth_routes_heading_but_keeps_b_and_d_agnostic() -> None:
     cfg = build_fb_depth_agent(device="cpu", compile=False)
     assert cfg.train.discriminator_loss == "lsgan"

@@ -171,8 +171,14 @@ class FBcprAgent(FBAgent):
         # encode expert trajectories through B
         with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
             B_expert = self._model._backward_map(next_obs).detach()  # batch x d
+            batch_size = tree_get_batch_size(next_obs)
+            if batch_size % self.cfg.model.seq_length != 0:
+                raise ValueError(
+                    "Expert encoding batch must be divisible by model seq_length: "
+                    f"batch_size={batch_size}, seq_length={self.cfg.model.seq_length}"
+                )
             B_expert = B_expert.view(
-                self.cfg.train.batch_size // self.cfg.model.seq_length,
+                batch_size // self.cfg.model.seq_length,
                 self.cfg.model.seq_length,
                 B_expert.shape[-1],
             )  # N x L x d

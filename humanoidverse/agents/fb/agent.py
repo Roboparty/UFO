@@ -49,6 +49,10 @@ class RolloutContextState:
     tracking_heading_target_xy: torch.Tensor | None = None
     motion_id: torch.Tensor | None = None
     tracking_motion_id: torch.Tensor | None = None
+    reference_index: torch.Tensor | None = None
+    tracking_reference_index: torch.Tensor | None = None
+    z_encoder_version: torch.Tensor | None = None
+    tracking_z_encoder_version: torch.Tensor | None = None
 
 
 class _FBTrainingStage(torch.nn.Module):
@@ -455,7 +459,11 @@ class FBAgent:
         return preds_mean, preds_unc, preds_mean - pessimism_penalty * preds_unc
 
     def _sample_tracking_context(self, replay_buffer, batch_dim, traj_length):
-        batch = replay_buffer["expert_slicer"].sample(batch_dim * traj_length, seq_length=traj_length)  # N*T x obs_dim
+        batch, sampled_idxs = replay_buffer["expert_slicer"].sample(
+            batch_dim * traj_length,
+            seq_length=traj_length,
+            return_indices=True,
+        )  # N*T x obs_dim
         z = self._model.backward_map(batch["next"]["observation"])  # NT x z_dim
         z = z.view(batch_dim, traj_length, z.shape[-1])  # N x T x z_dim
         for step in range(traj_length):
@@ -471,7 +479,11 @@ class FBAgent:
         if "motion_id" not in batch:
             raise RuntimeError("Exact tracking contexts require expert motion_id metadata")
         motion_id = batch["motion_id"].to(device=self.device, dtype=torch.long).view(batch_dim, traj_length, -1)[..., :1]
-        return self._model.project_z(z), heading_reference_xy, motion_id
+        reference_index = sampled_idxs[0].to(device=self.device, dtype=torch.long).view(batch_dim, traj_length, 1)
+        selective_state = getattr(self, "_selective_prior_state", None)
+        encoder_version = int(getattr(selective_state, "behavior_encoder_version", 0))
+        encoder_version = torch.full_like(reference_index, encoder_version)
+        return self._model.project_z(z), heading_reference_xy, motion_id, reference_index, encoder_version
 
     def advance_rollout_context(
         self,
@@ -506,20 +518,41 @@ class FBAgent:
         tracking_heading_target_xy = state.tracking_heading_target_xy
         motion_id = state.motion_id
         tracking_motion_id = state.tracking_motion_id
+        reference_index = state.reference_index
+        tracking_reference_index = state.tracking_reference_index
+        z_encoder_version = state.z_encoder_version
+        tracking_z_encoder_version = state.tracking_z_encoder_version
 
         if z is None:
             z = self._model.sample_z(num_envs, device=device)
             heading_target_xy = torch.zeros((num_envs, 2), device=device)
             heading_valid = torch.zeros((num_envs, 1), device=device, dtype=torch.bool)
-            context_id = torch.ones((num_envs, 1), device=device, dtype=torch.long)
+            context_id = (
+                state.context_id.to(device=device, dtype=torch.long).clone()
+                if state.context_id is not None
+                else torch.ones((num_envs, 1), device=device, dtype=torch.long)
+            )
+            if context_id.shape != (num_envs, 1):
+                raise ValueError(
+                    "Initial rollout context_id must have shape "
+                    f"({num_envs}, 1), got {tuple(context_id.shape)}"
+                )
             source_type = torch.full((num_envs, 1), HEADING_SOURCE_INVALID, device=device, dtype=torch.long)
             motion_id = torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
+            reference_index = torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
+            z_encoder_version = torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
             if self.cfg.train.rollout_expert_trajectories:
                 if replay_buffer is None:
                     raise ValueError("Expert rollout contexts require an expert replay buffer")
                 n_elem = int(self.cfg.train.rollout_expert_trajectories_percentage * num_envs)
                 expert_env_ids = torch.randperm(num_envs, device=device)[:n_elem]
-                tracking_z, tracking_heading_reference_xy, tracking_motion_id = self._sample_tracking_context(
+                (
+                    tracking_z,
+                    tracking_heading_reference_xy,
+                    tracking_motion_id,
+                    tracking_reference_index,
+                    tracking_z_encoder_version,
+                ) = self._sample_tracking_context(
                     replay_buffer,
                     n_elem,
                     self.cfg.train.rollout_expert_trajectories_length,
@@ -556,6 +589,16 @@ class FBAgent:
                 if state.motion_id is not None
                 else torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
             )
+            reference_index = (
+                state.reference_index.to(device).clone()
+                if state.reference_index is not None
+                else torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
+            )
+            z_encoder_version = (
+                state.z_encoder_version.to(device).clone()
+                if state.z_encoder_version is not None
+                else torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
+            )
 
         expert_mask = torch.zeros(num_envs, device=device, dtype=torch.bool)
         if expert_env_ids is not None:
@@ -575,12 +618,21 @@ class FBAgent:
             heading_valid[reset_random] = False
             source_type[reset_random] = HEADING_SOURCE_INVALID
             motion_id[reset_random] = -1
+            reference_index[reset_random] = -1
+            z_encoder_version[reset_random] = -1
             context_id[reset_random] += 1
 
         if self.cfg.train.rollout_expert_trajectories:
             if replay_buffer is None:
                 raise ValueError("Expert rollout contexts require an expert replay buffer")
-            if expert_env_ids is None or tracking_z is None or tracking_heading_target_xy is None or tracking_motion_id is None:
+            if (
+                expert_env_ids is None
+                or tracking_z is None
+                or tracking_heading_target_xy is None
+                or tracking_motion_id is None
+                or tracking_reference_index is None
+                or tracking_z_encoder_version is None
+            ):
                 raise RuntimeError("Expert rollout context was not initialized")
             trajectory_length = self.cfg.train.rollout_expert_trajectories_length
             mod_time = counts[expert_env_ids] % trajectory_length
@@ -588,7 +640,13 @@ class FBAgent:
             # Initialization already sampled every row above. On later calls,
             # refresh only expert environments whose own context expired.
             if state.z is not None and refresh_rows.numel() > 0:
-                refreshed_z, refreshed_reference_xy, refreshed_motion_id = self._sample_tracking_context(
+                (
+                    refreshed_z,
+                    refreshed_reference_xy,
+                    refreshed_motion_id,
+                    refreshed_reference_index,
+                    refreshed_encoder_version,
+                ) = self._sample_tracking_context(
                     replay_buffer,
                     int(refresh_rows.numel()),
                     trajectory_length,
@@ -605,6 +663,10 @@ class FBAgent:
                 tracking_heading_target_xy[refresh_rows] = refreshed_targets
                 tracking_motion_id = tracking_motion_id.clone()
                 tracking_motion_id[refresh_rows] = refreshed_motion_id
+                tracking_reference_index = tracking_reference_index.clone()
+                tracking_reference_index[refresh_rows] = refreshed_reference_index
+                tracking_z_encoder_version = tracking_z_encoder_version.clone()
+                tracking_z_encoder_version[refresh_rows] = refreshed_encoder_version
                 context_id[refreshed_env_ids] += 1
 
             rows = torch.arange(expert_env_ids.numel(), device=device)
@@ -613,6 +675,8 @@ class FBAgent:
             heading_valid[expert_env_ids] = heading_enabled
             source_type[expert_env_ids] = HEADING_SOURCE_EXACT_TRACKING
             motion_id[expert_env_ids] = tracking_motion_id[rows, mod_time]
+            reference_index[expert_env_ids] = tracking_reference_index[rows, mod_time]
+            z_encoder_version[expert_env_ids] = tracking_z_encoder_version[rows, mod_time]
 
         return RolloutContextState(
             z=z,
@@ -625,6 +689,10 @@ class FBAgent:
             tracking_heading_target_xy=tracking_heading_target_xy,
             motion_id=motion_id,
             tracking_motion_id=tracking_motion_id,
+            reference_index=reference_index,
+            tracking_reference_index=tracking_reference_index,
+            z_encoder_version=z_encoder_version,
+            tracking_z_encoder_version=tracking_z_encoder_version,
         )
 
     def next_rollout_heading_target(
@@ -709,6 +777,10 @@ class FBAgent:
                 tracking_heading_target_xy=getattr(self, "tracking_heading_target_xy", None),
                 motion_id=getattr(self, "rollout_motion_id", None),
                 tracking_motion_id=getattr(self, "tracking_motion_id", None),
+                reference_index=getattr(self, "rollout_reference_index", None),
+                tracking_reference_index=getattr(self, "tracking_reference_index", None),
+                z_encoder_version=getattr(self, "rollout_z_encoder_version", None),
+                tracking_z_encoder_version=getattr(self, "tracking_z_encoder_version", None),
             ),
             step_count,
             replay_buffer,
@@ -722,6 +794,10 @@ class FBAgent:
         self.tracking_heading_target_xy = state.tracking_heading_target_xy
         self.rollout_motion_id = state.motion_id
         self.tracking_motion_id = state.tracking_motion_id
+        self.rollout_reference_index = state.reference_index
+        self.tracking_reference_index = state.tracking_reference_index
+        self.rollout_z_encoder_version = state.z_encoder_version
+        self.tracking_z_encoder_version = state.tracking_z_encoder_version
         assert state.z is not None
         return state.z
 
