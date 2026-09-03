@@ -47,6 +47,8 @@ class RolloutContextState:
     expert_env_ids: torch.Tensor | None = None
     tracking_z: torch.Tensor | None = None
     tracking_heading_target_xy: torch.Tensor | None = None
+    motion_id: torch.Tensor | None = None
+    tracking_motion_id: torch.Tensor | None = None
 
 
 class _FBTrainingStage(torch.nn.Module):
@@ -154,8 +156,7 @@ class FBAgent:
         if hasattr(self._model, "_heading_critic"):
             stages["heading_critic"] = _MethodTrainingStage(self._model._heading_critic)
         self._distributed_training_stages = {
-            name: wrap_distributed_stage(stage, bucket_cap_mb=bucket_cap_mb)
-            for name, stage in stages.items()
+            name: wrap_distributed_stage(stage, bucket_cap_mb=bucket_cap_mb) for name, stage in stages.items()
         }
 
     def _training_stage(self, name: str) -> torch.nn.Module | None:
@@ -379,9 +380,7 @@ class FBAgent:
         self.forward_optimizer.zero_grad(set_to_none=True)
         self.backward_optimizer.zero_grad(set_to_none=True)
         fb_loss.backward()
-        self._sync_gradients_if_manual(
-            (*self._model._forward_map.parameters(), *self._model._backward_map.parameters())
-        )
+        self._sync_gradients_if_manual((*self._model._forward_map.parameters(), *self._model._backward_map.parameters()))
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(self._model._forward_map.parameters(), clip_grad_norm)
             torch.nn.utils.clip_grad_norm_(self._model._backward_map.parameters(), clip_grad_norm)
@@ -454,7 +453,7 @@ class FBAgent:
             / num_parallel_scaling
         )
         return preds_mean, preds_unc, preds_mean - pessimism_penalty * preds_unc
-    
+
     def _sample_tracking_context(self, replay_buffer, batch_dim, traj_length):
         batch = replay_buffer["expert_slicer"].sample(batch_dim * traj_length, seq_length=traj_length)  # N*T x obs_dim
         z = self._model.backward_map(batch["next"]["observation"])  # NT x z_dim
@@ -464,13 +463,15 @@ class FBAgent:
             z[:, step] = z[:, step:end_idx].mean(dim=1)
         if "heading_forward_xy" not in batch:
             raise RuntimeError(
-                "Exact tracking heading contexts require expert heading_forward_xy metadata; "
-                "rebuild the expert buffer cache"
+                "Exact tracking heading contexts require expert heading_forward_xy metadata; rebuild the expert buffer cache"
             )
-        heading_reference_xy = normalize_heading_xy(
-            batch["heading_forward_xy"].to(device=self.device, dtype=torch.float32)
-        ).view(batch_dim, traj_length, 2)
-        return self._model.project_z(z), heading_reference_xy  # N x T x (z_dim or 2)
+        heading_reference_xy = normalize_heading_xy(batch["heading_forward_xy"].to(device=self.device, dtype=torch.float32)).view(
+            batch_dim, traj_length, 2
+        )
+        if "motion_id" not in batch:
+            raise RuntimeError("Exact tracking contexts require expert motion_id metadata")
+        motion_id = batch["motion_id"].to(device=self.device, dtype=torch.long).view(batch_dim, traj_length, -1)[..., :1]
+        return self._model.project_z(z), heading_reference_xy, motion_id
 
     def advance_rollout_context(
         self,
@@ -490,38 +491,35 @@ class FBAgent:
         device = self._model.device
         counts = step_count.to(device=device, dtype=torch.long).reshape(-1)
         num_envs = counts.shape[0]
-        heading_enabled = bool(
-            getattr(getattr(self.cfg, "model", None), "heading_context_enabled", False)
-        )
+        heading_enabled = bool(getattr(getattr(self.cfg, "model", None), "heading_context_enabled", False))
         if current_heading_xy is None:
             if heading_enabled:
                 raise ValueError("Heading-enabled rollout context requires current_heading_xy")
             current_heading_xy = torch.zeros((num_envs, 2), device=device, dtype=torch.float32)
             current_heading_xy[:, 0] = 1.0
         else:
-            current_heading_xy = normalize_heading_xy(
-                current_heading_xy.to(device=device, dtype=torch.float32)
-            )
+            current_heading_xy = normalize_heading_xy(current_heading_xy.to(device=device, dtype=torch.float32))
 
         z = None if state.z is None else state.z.to(device)
         expert_env_ids = state.expert_env_ids
         tracking_z = state.tracking_z
         tracking_heading_target_xy = state.tracking_heading_target_xy
+        motion_id = state.motion_id
+        tracking_motion_id = state.tracking_motion_id
 
         if z is None:
             z = self._model.sample_z(num_envs, device=device)
             heading_target_xy = torch.zeros((num_envs, 2), device=device)
             heading_valid = torch.zeros((num_envs, 1), device=device, dtype=torch.bool)
             context_id = torch.ones((num_envs, 1), device=device, dtype=torch.long)
-            source_type = torch.full(
-                (num_envs, 1), HEADING_SOURCE_INVALID, device=device, dtype=torch.long
-            )
+            source_type = torch.full((num_envs, 1), HEADING_SOURCE_INVALID, device=device, dtype=torch.long)
+            motion_id = torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
             if self.cfg.train.rollout_expert_trajectories:
                 if replay_buffer is None:
                     raise ValueError("Expert rollout contexts require an expert replay buffer")
                 n_elem = int(self.cfg.train.rollout_expert_trajectories_percentage * num_envs)
                 expert_env_ids = torch.randperm(num_envs, device=device)[:n_elem]
-                tracking_z, tracking_heading_reference_xy = self._sample_tracking_context(
+                tracking_z, tracking_heading_reference_xy, tracking_motion_id = self._sample_tracking_context(
                     replay_buffer,
                     n_elem,
                     self.cfg.train.rollout_expert_trajectories_length,
@@ -553,6 +551,11 @@ class FBAgent:
                 if state.source_type is not None
                 else torch.full((num_envs, 1), HEADING_SOURCE_INVALID, device=device, dtype=torch.long)
             )
+            motion_id = (
+                state.motion_id.to(device).clone()
+                if state.motion_id is not None
+                else torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
+            )
 
         expert_mask = torch.zeros(num_envs, device=device, dtype=torch.bool)
         if expert_env_ids is not None:
@@ -571,12 +574,13 @@ class FBAgent:
             heading_target_xy[reset_random] = 0.0
             heading_valid[reset_random] = False
             source_type[reset_random] = HEADING_SOURCE_INVALID
+            motion_id[reset_random] = -1
             context_id[reset_random] += 1
 
         if self.cfg.train.rollout_expert_trajectories:
             if replay_buffer is None:
                 raise ValueError("Expert rollout contexts require an expert replay buffer")
-            if expert_env_ids is None or tracking_z is None or tracking_heading_target_xy is None:
+            if expert_env_ids is None or tracking_z is None or tracking_heading_target_xy is None or tracking_motion_id is None:
                 raise RuntimeError("Expert rollout context was not initialized")
             trajectory_length = self.cfg.train.rollout_expert_trajectories_length
             mod_time = counts[expert_env_ids] % trajectory_length
@@ -584,7 +588,7 @@ class FBAgent:
             # Initialization already sampled every row above. On later calls,
             # refresh only expert environments whose own context expired.
             if state.z is not None and refresh_rows.numel() > 0:
-                refreshed_z, refreshed_reference_xy = self._sample_tracking_context(
+                refreshed_z, refreshed_reference_xy, refreshed_motion_id = self._sample_tracking_context(
                     replay_buffer,
                     int(refresh_rows.numel()),
                     trajectory_length,
@@ -599,6 +603,8 @@ class FBAgent:
                 tracking_heading_target_xy = tracking_heading_target_xy.clone()
                 tracking_z[refresh_rows] = refreshed_z
                 tracking_heading_target_xy[refresh_rows] = refreshed_targets
+                tracking_motion_id = tracking_motion_id.clone()
+                tracking_motion_id[refresh_rows] = refreshed_motion_id
                 context_id[refreshed_env_ids] += 1
 
             rows = torch.arange(expert_env_ids.numel(), device=device)
@@ -606,6 +612,7 @@ class FBAgent:
             heading_target_xy[expert_env_ids] = tracking_heading_target_xy[rows, mod_time]
             heading_valid[expert_env_ids] = heading_enabled
             source_type[expert_env_ids] = HEADING_SOURCE_EXACT_TRACKING
+            motion_id[expert_env_ids] = tracking_motion_id[rows, mod_time]
 
         return RolloutContextState(
             z=z,
@@ -616,6 +623,8 @@ class FBAgent:
             expert_env_ids=expert_env_ids,
             tracking_z=tracking_z,
             tracking_heading_target_xy=tracking_heading_target_xy,
+            motion_id=motion_id,
+            tracking_motion_id=tracking_motion_id,
         )
 
     def next_rollout_heading_target(
@@ -629,11 +638,7 @@ class FBAgent:
             raise RuntimeError("Rollout heading context is not initialized")
         target = state.heading_target_xy.clone()
         valid = state.heading_valid.clone()
-        if (
-            state.expert_env_ids is not None
-            and state.tracking_heading_target_xy is not None
-            and state.expert_env_ids.numel() > 0
-        ):
+        if state.expert_env_ids is not None and state.tracking_heading_target_xy is not None and state.expert_env_ids.numel() > 0:
             ids = state.expert_env_ids.to(device=self.device, dtype=torch.long)
             counts = step_count.to(device=self.device, dtype=torch.long).reshape(-1)
             length = self.cfg.train.rollout_expert_trajectories_length
@@ -658,11 +663,7 @@ class FBAgent:
         if state.z is None:
             raise RuntimeError("Rollout behavior context is not initialized")
         next_z = state.z.clone()
-        if (
-            state.expert_env_ids is not None
-            and state.tracking_z is not None
-            and state.expert_env_ids.numel() > 0
-        ):
+        if state.expert_env_ids is not None and state.tracking_z is not None and state.expert_env_ids.numel() > 0:
             ids = state.expert_env_ids.to(device=self.device, dtype=torch.long)
             counts = step_count.to(device=self.device, dtype=torch.long).reshape(-1)
             length = self.cfg.train.rollout_expert_trajectories_length
@@ -706,6 +707,8 @@ class FBAgent:
                 expert_env_ids=self.env_idx_with_expert_rollout,
                 tracking_z=getattr(self, "tracking_z", None),
                 tracking_heading_target_xy=getattr(self, "tracking_heading_target_xy", None),
+                motion_id=getattr(self, "rollout_motion_id", None),
+                tracking_motion_id=getattr(self, "tracking_motion_id", None),
             ),
             step_count,
             replay_buffer,
@@ -717,6 +720,8 @@ class FBAgent:
         self.heading_context_id = state.context_id
         self.heading_source_type = state.source_type
         self.tracking_heading_target_xy = state.tracking_heading_target_xy
+        self.rollout_motion_id = state.motion_id
+        self.tracking_motion_id = state.tracking_motion_id
         assert state.z is not None
         return state.z
 
@@ -753,6 +758,10 @@ class FBAgent:
         model_state = safetensors.torch.load_file(path / "model/model.safetensors", device=device or config.model.device)
         agent._model.load_state_dict(model_state, strict=False)
         del model_state
+        extra_state_path = path / "training_state.pth"
+        if extra_state_path.exists() and hasattr(agent, "load_extra_training_state_dict"):
+            extra_state = torch.load(extra_state_path, weights_only=True, map_location=device)
+            agent.load_extra_training_state_dict(extra_state)
         agent._model.train()
         agent._model.requires_grad_(True)
         return agent
@@ -768,6 +777,8 @@ class FBAgent:
             self.optimizer_dict,
             output_folder / "optimizers.pth",
         )
+        if hasattr(self, "extra_training_state_dict"):
+            torch.save(self.extra_training_state_dict(), output_folder / "training_state.pth")
         # save model
         model_folder = output_folder / "model"
         model_folder.mkdir(exist_ok=True)

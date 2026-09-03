@@ -10,6 +10,7 @@ from mjlab.terrains import (
     TerrainGenerator,
 )
 
+from humanoidverse.agents.utils import AnchoredEveryNStepsChecker
 from humanoidverse.terrains import make_terrain_entity_cfg, terrain_component_names
 from humanoidverse.terrains.rp1_primitives import (
     NeutralHfDiscreteObstaclesTerrainCfg,
@@ -30,7 +31,6 @@ from humanoidverse.terrains.rp1_simple import (
     add_rp1_outer_walls,
     make_rp1_simple_generator_cfg,
 )
-from humanoidverse.agents.utils import AnchoredEveryNStepsChecker
 from humanoidverse.train import build_ufo_mjlab_config
 
 
@@ -113,11 +113,7 @@ def test_rp1_nonflat_guard_has_two_tile_rings_and_is_not_spawnable() -> None:
     assert max(abs(float(geom.pos[1])) for geom in guard_geoms) == 25.0
 
     model = spec.compile()
-    guard_geom_ids = [
-        geom_id
-        for geom_id in range(model.ngeom)
-        if (model.geom(geom_id).name or "").startswith("g1depth_guard_tile_")
-    ]
+    guard_geom_ids = [geom_id for geom_id in range(model.ngeom) if (model.geom(geom_id).name or "").startswith("g1depth_guard_tile_")]
     assert len(guard_geom_ids) == geom_count
     guard_hfield_ids = model.geom_dataid[guard_geom_ids]
     assert np.all(guard_hfield_ids >= 0)
@@ -139,11 +135,7 @@ def test_every_rp1_terrain_family_uses_the_source_geom_group() -> None:
         spec = mujoco.MjSpec()
         spec.worldbody.add_body(name="terrain")
         output = sub_terrain.function(0.8, spec, np.random.default_rng(3))
-        groups = {
-            int(geometry.geom.group)
-            for geometry in output.geometries
-            if geometry.geom is not None
-        }
+        groups = {int(geometry.geom.group) for geometry in output.geometries if geometry.geom is not None}
         assert groups == {0}, f"{name} produced geom groups {groups}"
 
 
@@ -165,7 +157,7 @@ def test_fb_depth_defaults_to_rp1_simple_without_changing_fb_terrain_default() -
     assert "terrain.terrain_type=mixed" in terrain.env.hydra_overrides
 
 
-def test_fb_depth_uses_separate_checkpoint_tracking_and_same_z_cadences() -> None:
+def test_fb_depth_disables_expensive_same_z_eval_by_default() -> None:
     cfg = build_ufo_mjlab_config(
         device="cpu",
         work_dir="/tmp/ufo-rp1-eval-cadence-test",
@@ -183,7 +175,7 @@ def test_fb_depth_uses_separate_checkpoint_tracking_and_same_z_cadences() -> Non
     assert cfg.agent.train.reg_coeff == 0.01
     assert cfg.checkpoint_every_steps == 9_600_000
     assert evaluations["humanoidverse_tracking_eval"].every_steps == 3_200_000
-    assert evaluations["same_z_terrain_eval"].every_steps == 9_600_000
+    assert "same_z_terrain_eval" not in evaluations
 
 
 def test_tracking_third_trigger_aligns_with_same_z_and_checkpoint() -> None:

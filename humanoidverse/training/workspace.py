@@ -219,10 +219,7 @@ def merge_distributed_evaluation_results(
             evaluation_motion_owners = motion_owners.setdefault(evaluation_name, {})
             for metric_name, metric in metrics.items():
                 if metric_name in evaluation_metrics:
-                    raise RuntimeError(
-                        f"Distributed evaluation produced duplicate metric {metric_name!r} "
-                        f"for {evaluation_name!r}"
-                    )
+                    raise RuntimeError(f"Distributed evaluation produced duplicate metric {metric_name!r} for {evaluation_name!r}")
                 motion_id = int(metric["motion_id"])
                 if motion_id in evaluation_motion_owners:
                     raise RuntimeError(
@@ -233,9 +230,7 @@ def merge_distributed_evaluation_results(
                 evaluation_motion_owners[motion_id] = rank
 
     for evaluation_name, metrics in merged.items():
-        merged[evaluation_name] = dict(
-            sorted(metrics.items(), key=lambda item: (int(item[1]["motion_id"]), item[0]))
-        )
+        merged[evaluation_name] = dict(sorted(metrics.items(), key=lambda item: (int(item[1]["motion_id"]), item[0])))
     return merged
 
 
@@ -268,6 +263,17 @@ def _trajectory_output_keys(agent: Agent) -> list[str]:
                 "heading_context_continues",
                 "root_heading_xy",
                 "next_root_heading_xy",
+                "prior_motion_id",
+            ]
+        )
+    if bool(getattr(agent.train, "selective_prior_enabled", False)):
+        keys.extend(
+            [
+                "prior_label",
+                "prior_label_step",
+                "prior_teacher_version",
+                "prior_confidence",
+                "prior_generation",
             ]
         )
     return keys
@@ -417,16 +423,10 @@ class TrainConfig(BaseConfig):
             raise ValueError("ddp_bucket_cap_mb must be positive")
         if self.checkpoint_every_steps <= 0 or self.eval_every_steps <= 0:
             raise ValueError("checkpoint and fallback evaluation cadences must be positive")
-        evaluation_configs = (
-            self.evaluations.values()
-            if isinstance(self.evaluations, dict)
-            else self.evaluations
-        )
+        evaluation_configs = self.evaluations.values() if isinstance(self.evaluations, dict) else self.evaluations
         for evaluation in evaluation_configs:
             if evaluation.every_steps is not None and evaluation.every_steps <= 0:
-                raise ValueError(
-                    f"evaluation {evaluation.name_in_logs!r} cadence must be positive"
-                )
+                raise ValueError(f"evaluation {evaluation.name_in_logs!r} cadence must be positive")
         if self.prior_plane_envs < 0:
             raise ValueError("prior_plane_envs must be non-negative")
         if self.prior_buffer_size < 0:
@@ -440,6 +440,15 @@ class TrainConfig(BaseConfig):
                 raise ValueError("canonical-plane direct-depth collection requires trajectory replay")
             if self.prior_buffer_size < self.prior_plane_envs * 2:
                 raise ValueError("prior_buffer_size must hold at least two steps per plane environment")
+        if bool(getattr(self.agent.train, "selective_prior_enabled", False)):
+            if self.prior_plane_envs != 0:
+                raise ValueError("selective online prior cannot use a canonical-plane collector")
+            if not bool(getattr(self.agent.train, "behavior_prior_enabled", True)):
+                raise ValueError("selective online prior requires behavior_prior_enabled")
+            if not self.use_trajectory_buffer:
+                raise ValueError("selective online prior requires trajectory replay")
+            if not bool(getattr(self.agent.model, "heading_context_enabled", False)):
+                raise ValueError("selective online prior requires BehaviorContext metadata")
         if bool(getattr(self.agent.model, "heading_context_enabled", False)):
             if self.tags.get("agent") != "fb_depth":
                 raise ValueError("BehaviorContext heading is currently defined only for fb_depth")
@@ -456,7 +465,6 @@ class TrainConfig(BaseConfig):
                     break
             if not has_prioritization_eval:
                 raise ValueError("Prioritization requires tracking evaluation to be enabled")
-
 
         if self.motions is None or self.motions_root is None:
             if self.prioritization:
@@ -675,11 +683,20 @@ def _normalize_train_status(train_status: dict[str, tp.Any], cfg: TrainConfig) -
     status["world_size"] = checkpoint_world_size
     status["loss_mode"] = str(train_status.get("loss_mode", _distributed_loss_mode(cfg)))
     status["effective_batch_size"] = int(train_status.get("effective_batch_size", _effective_batch_size(cfg)))
+    if "selective_prior" in train_status:
+        status["selective_prior"] = train_status["selective_prior"]
     return status
 
 
-def _make_train_status(cfg: TrainConfig, *, local_time: int, global_time: int, optimizer_steps: int) -> dict[str, tp.Any]:
-    return {
+def _make_train_status(
+    cfg: TrainConfig,
+    *,
+    local_time: int,
+    global_time: int,
+    optimizer_steps: int,
+    selective_prior: dict[str, tp.Any] | None = None,
+) -> dict[str, tp.Any]:
+    status = {
         "time": int(global_time),
         "local_time": int(local_time),
         "global_time": int(global_time),
@@ -688,10 +705,14 @@ def _make_train_status(cfg: TrainConfig, *, local_time: int, global_time: int, o
         "loss_mode": _distributed_loss_mode(cfg),
         "effective_batch_size": _effective_batch_size(cfg),
     }
+    if selective_prior is not None:
+        status["selective_prior"] = selective_prior
+    return status
 
 
 def init_wandb(cfg: TrainConfig):
     from pathlib import Path
+
     exp_name = cfg.wandb_run_name if cfg.wandb_run_name else Path(cfg.work_dir).name
     wandb_config = cfg.model_dump()
     wandb.init(entity=cfg.wandb_ename, project=cfg.wandb_pname, group=cfg.wandb_gname, name=exp_name, config=wandb_config, dir="./_wandb")
@@ -784,8 +805,7 @@ class Workspace:
                 enable_ddp = getattr(self.agent, "enable_distributed_gradient_sync", None)
                 if not callable(enable_ddp):
                     raise RuntimeError(
-                        f"Agent {type(self.agent).__name__} does not support DDP gradient overlap; "
-                        "use distributed_gradient_sync='manual'."
+                        f"Agent {type(self.agent).__name__} does not support DDP gradient overlap; use distributed_gradient_sync='manual'."
                     )
                 enable_ddp(bucket_cap_mb=self.cfg.ddp_bucket_cap_mb)
                 if self._write_shared_artifacts:
@@ -803,9 +823,11 @@ class Workspace:
             self.evaluations = {eval_cfg: eval_cfg.build() for name, eval_cfg in self.cfg.evaluations.items()}
         self.evaluate = len(self.evaluations) > 0
 
-        self.eval_loggers = {
-            name: CSVLogger(filename=self.work_dir / f"{name}.csv") for name in self.evaluations.keys()
-        } if self._write_shared_artifacts else {}
+        self.eval_loggers = (
+            {name: CSVLogger(filename=self.work_dir / f"{name}.csv") for name in self.evaluations.keys()}
+            if self._write_shared_artifacts
+            else {}
+        )
 
         if self._write_shared_artifacts and self.cfg.use_wandb:
             init_wandb(self.cfg)
@@ -972,12 +994,9 @@ class Workspace:
             "heading_context_continues": continues,
             "root_heading_xy": current_heading_xy,
             "next_root_heading_xy": next_root_heading,
-            "transition_terminated": torch.as_tensor(
-                new_terminated, device=self.agent.device, dtype=torch.bool
-            ).unsqueeze(-1),
-            "transition_truncated": torch.as_tensor(
-                new_truncated, device=self.agent.device, dtype=torch.bool
-            ).unsqueeze(-1),
+            "prior_motion_id": (state.motion_id if state.motion_id is not None else torch.full_like(state.context_id, -1)),
+            "transition_terminated": torch.as_tensor(new_terminated, device=self.agent.device, dtype=torch.bool).unsqueeze(-1),
+            "transition_truncated": torch.as_tensor(new_truncated, device=self.agent.device, dtype=torch.bool).unsqueeze(-1),
         }
 
     def _step_prior_collector(
@@ -1095,9 +1114,7 @@ class Workspace:
             local_motion_count = None
             if self.cfg.distributed_sync and self.distributed_world_size > 1:
                 num_motions = int(motion_lib._num_unique_motions)
-                local_motion_count = len(
-                    distributed_motion_ids(num_motions, self.distributed_rank, self.distributed_world_size)
-                )
+                local_motion_count = len(distributed_motion_ids(num_motions, self.distributed_rank, self.distributed_world_size))
                 # Every rank must derive balanced_motion_chunks() with the same
                 # capacity.  Allocating only the local shard size made the last
                 # ranks use a smaller chunk size whenever the motion count was
@@ -1219,12 +1236,8 @@ class Workspace:
                     torch.distributed.all_reduce(boundary_violation_count, op=torch.distributed.ReduceOp.SUM)
                 metrics["terrain/boundary_margin_min"] = np.round(boundary_min.item(), 6)
                 metrics["terrain/boundary_margin_p05"] = np.round(torch.quantile(boundary_margin, 0.05).item(), 6)
-                metrics["terrain/boundary_margin_historical_min"] = np.round(
-                    boundary_historical_min.item(), 6
-                )
-                metrics["terrain/boundary_required_margin"] = np.round(
-                    raw_env._terrain_boundary_required, 6
-                )
+                metrics["terrain/boundary_margin_historical_min"] = np.round(boundary_historical_min.item(), 6)
+                metrics["terrain/boundary_required_margin"] = np.round(raw_env._terrain_boundary_required, 6)
                 metrics["terrain/boundary_violation_count"] = int(boundary_violation_count.item())
 
             tile_crossings = raw_env._terrain_tile_crossing_count.clone()
@@ -1246,15 +1259,11 @@ class Workspace:
                         metrics[f"terrain/transition/{source_name}_to_{target_name}"] = count
             reset_family_total = int(reset_family_counts.sum().item())
             metrics["reset/family_total"] = reset_family_total
-            is_rp1_simple = tuple(raw_env.terrain_component_names) == tuple(
-                RP1_TERRAIN_COMPONENT_NAMES
-            )
+            is_rp1_simple = tuple(raw_env.terrain_component_names) == tuple(RP1_TERRAIN_COMPONENT_NAMES)
             for family_id, family_name in enumerate(raw_env.terrain_component_names):
                 count = int(reset_family_counts[family_id].item())
                 metrics[f"reset/family/{family_name}"] = count
-                metrics[f"reset/family_fraction/{family_name}"] = (
-                    float(count / reset_family_total) if reset_family_total else 0.0
-                )
+                metrics[f"reset/family_fraction/{family_name}"] = float(count / reset_family_total) if reset_family_total else 0.0
                 if is_rp1_simple:
                     reset_profile, _vertical_direction = rp1_center_reset_profile(family_name)
                     metrics[f"reset/profile/{reset_profile}"] = count
@@ -1357,13 +1366,9 @@ class Workspace:
                     metadata,
                 )
                 if self._write_shared_artifacts:
-                    cache_bytes = sum(
-                        path.stat().st_size
-                        for path in (cache_dir / "expert_buffer.pt", cache_dir / "motion_lib_fk.pt")
-                    )
+                    cache_bytes = sum(path.stat().st_size for path in (cache_dir / "expert_buffer.pt", cache_dir / "motion_lib_fk.pt"))
                     print(
-                        f"[INFO] Expert/full-FK cache atomically published: {cache_dir} "
-                        f"size={cache_bytes / (1024**3):.2f} GiB",
+                        f"[INFO] Expert/full-FK cache atomically published: {cache_dir} size={cache_bytes / (1024**3):.2f} GiB",
                         flush=True,
                     )
 
@@ -1465,9 +1470,45 @@ class Workspace:
             prior_sizes = all_gather_objects(int(replay_buffer["prior"].size()))
             if len(set(prior_sizes)) != 1:
                 raise RuntimeError(
-                    "Canonical-plane replay sizes differ across ranks; refusing to enter mismatched DDP update schedules: "
-                    f"{prior_sizes}"
+                    f"Canonical-plane replay sizes differ across ranks; refusing to enter mismatched DDP update schedules: {prior_sizes}"
                 )
+        if bool(getattr(self.cfg.agent.train, "selective_prior_enabled", False)):
+            if "prior" in replay_buffer:
+                raise RuntimeError(
+                    "Selective online prior uses indexed views of main replay and cannot be combined "
+                    "with the canonical-plane prior collector"
+                )
+            if not isinstance(replay_buffer["train"], TrajectoryDictBufferMultiDim):
+                raise RuntimeError("Selective online prior requires TrajectoryDictBufferMultiDim")
+            status_prior = self._checkpoint_status.get("selective_prior")
+            agent_prior = self.agent._selective_prior_state.state_dict()
+            if self._checkpoint_local_time > 0 and (
+                not isinstance(status_prior, dict)
+                or any(int(status_prior.get(key, -(10**9))) != int(value) for key, value in agent_prior.items())
+            ):
+                self.agent.reset_selective_prior_to_bootstrap(reason="checkpoint_status_agent_state_mismatch")
+            migrated = False
+            for key, dtype in (
+                ("prior_motion_id", torch.int64),
+                ("prior_label", torch.int8),
+                ("prior_label_step", torch.int64),
+                ("prior_teacher_version", torch.int64),
+                ("prior_confidence", torch.float32),
+                ("prior_generation", torch.int64),
+            ):
+                migrated |= replay_buffer["train"].ensure_scalar_field(
+                    key,
+                    dtype=dtype,
+                    fill_value=-1 if key == "prior_motion_id" else 0,
+                )
+            if migrated:
+                print(
+                    "[SELECTIVE PRIOR] Existing replay had no complete admission metadata; "
+                    "all samples were migrated to UNKNOWN and the prior phase will fail closed.",
+                    flush=True,
+                )
+                if hasattr(self.agent, "reset_selective_prior_to_bootstrap"):
+                    self.agent.reset_selective_prior_to_bootstrap(reason="replay_metadata_migration")
         if self.training_with_expert_data:
             replay_buffer["expert_slicer"] = expert_buffer
 
@@ -1529,11 +1570,7 @@ class Workspace:
         done = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
         main_rollout_state = RolloutContextState()
         prior_collector_state = self._reset_prior_collector() if self.prior_env is not None else None
-        completed_main_iterations = (
-            self._checkpoint_local_time // self.cfg.online_parallel_envs
-            if loaded_prior_checkpoint_buffer
-            else 0
-        )
+        completed_main_iterations = self._checkpoint_local_time // self.cfg.online_parallel_envs if loaded_prior_checkpoint_buffer else 0
         prior_env_steps = completed_main_iterations * self.cfg.prior_plane_envs
         prior_collection_seconds = 0.0
         prior_log_start_steps = prior_env_steps
@@ -1570,7 +1607,9 @@ class Workspace:
                 break
             if (local_time != self._checkpoint_local_time) and checkpoint_time_checker.check(global_time):
                 checkpoint_time_checker.update_last_step(global_time)
-                self.save(local_time=local_time, global_time=global_time, optimizer_steps=self._optimizer_steps, replay_buffer=replay_buffer)
+                self.save(
+                    local_time=local_time, global_time=global_time, optimizer_steps=self._optimizer_steps, replay_buffer=replay_buffer
+                )
                 last_saved_global_time = global_time
 
             if global_time >= self.cfg.num_env_steps:
@@ -1578,9 +1617,7 @@ class Workspace:
 
             force_eval_at_resume = self.evaluate and global_time == self._checkpoint_global_time
             due_evaluation_names = [
-                name
-                for name, checker in evaluation_time_checkers.items()
-                if force_eval_at_resume or checker.check(global_time)
+                name for name, checker in evaluation_time_checkers.items() if force_eval_at_resume or checker.check(global_time)
             ]
             if due_evaluation_names:
                 eval_metrics = {}
@@ -1588,10 +1625,7 @@ class Workspace:
                 distributed_tracking_eval = (
                     self.cfg.distributed_sync
                     and self.distributed_world_size > 1
-                    and any(
-                        isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation)
-                        for evaluation in due_evaluations
-                    )
+                    and any(isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation) for evaluation in due_evaluations)
                 )
                 uses_humanoidverse_eval = any(
                     isinstance(
@@ -1600,11 +1634,7 @@ class Workspace:
                     )
                     for evaluation in due_evaluations
                 )
-                run_eval_on_this_rank = (
-                    distributed_tracking_eval
-                    or (not self.cfg.distributed_sync)
-                    or self.distributed_rank == 0
-                )
+                run_eval_on_this_rank = distributed_tracking_eval or (not self.cfg.distributed_sync) or self.distributed_rank == 0
                 if run_eval_on_this_rank:
                     eval_metrics = self.eval(
                         global_time,
@@ -1650,9 +1680,7 @@ class Workspace:
                     # Distributed tracking evaluation runs on every rank, but the
                     # merged metrics only exist on rank 0. Compute priorities once
                     # there, then broadcast the unchanged payload to all ranks.
-                    compute_priority_on_this_rank = (
-                        not self.cfg.distributed_sync or self.distributed_rank == 0
-                    )
+                    compute_priority_on_this_rank = not self.cfg.distributed_sync or self.distributed_rank == 0
                     if compute_priority_on_this_rank:
                         assert len(eval_metrics[self.priorization_eval_name]) == len(replay_buffer["expert_slicer"].motion_ids), (
                             "Mismatch in number of motions returned by the eval"
@@ -1668,9 +1696,7 @@ class Workspace:
                             priorities.append(metr["emd"])
                             idxs.append(index_in_buffer[metr["motion_id"]])
                         non_finite_priorities = [
-                            (motion_id, priority)
-                            for motion_id, priority in zip(motions_id, priorities)
-                            if not np.isfinite(priority)
+                            (motion_id, priority) for motion_id, priority in zip(motions_id, priorities) if not np.isfinite(priority)
                         ]
                         if non_finite_priorities:
                             raise RuntimeError(
@@ -1750,11 +1776,7 @@ class Workspace:
                 obs = tree_map(lambda x: torch.tensor(x, dtype=dtype_numpytotorch_lower_precision(x.dtype), device=self.agent.device), td)
                 # TODO consistency with obs_space: remove time assigned by TimeAwareObservationWrapper
                 step_count = obs.pop("time")
-                current_root_heading = (
-                    self._collector_root_heading_xy(train_env)
-                    if self._heading_context_enabled
-                    else None
-                )
+                current_root_heading = self._collector_root_heading_xy(train_env) if self._heading_context_enabled else None
 
                 history_context = None
                 if "history" in obs:
@@ -1840,15 +1862,11 @@ class Workspace:
             # values above; setdefault keeps a single source of truth.
             heading_metadata.setdefault(
                 "transition_terminated",
-                torch.as_tensor(
-                    new_terminated, device=self.agent.device, dtype=torch.bool
-                ).unsqueeze(-1),
+                torch.as_tensor(new_terminated, device=self.agent.device, dtype=torch.bool).unsqueeze(-1),
             )
             heading_metadata.setdefault(
                 "transition_truncated",
-                torch.as_tensor(
-                    new_truncated, device=self.agent.device, dtype=torch.bool
-                ).unsqueeze(-1),
+                torch.as_tensor(new_truncated, device=self.agent.device, dtype=torch.bool).unsqueeze(-1),
             )
             if check_rollout_nonfinite:
                 _assert_finite(
@@ -1879,10 +1897,7 @@ class Workspace:
                 )
                 for name, checker in evaluation_time_checkers.items()
             )
-            if (
-                isinstance(self.cfg.env, HumanoidVerseMjlabConfig)
-                and next_uses_humanoidverse_eval
-            ):
+            if isinstance(self.cfg.env, HumanoidVerseMjlabConfig) and next_uses_humanoidverse_eval:
                 # Make sure we set truncated since at the next iteration we are
                 # forced to reset the shared training environment after eval.
                 new_truncated = np.ones_like(new_truncated, dtype=bool)
@@ -1952,6 +1967,28 @@ class Workspace:
                     raise RuntimeError("BehaviorContext heading training requires trajectory replay")
                 for key, value in heading_metadata.items():
                     data[key] = value[None, ...]
+            if bool(getattr(self.cfg.agent.train, "selective_prior_enabled", False)):
+                if not self.cfg.use_trajectory_buffer:
+                    raise RuntimeError("Selective online prior requires trajectory replay")
+                num_collected_envs = int(data["action"].shape[1])
+                metadata_shape = (1, num_collected_envs, 1)
+                data.update(
+                    {
+                        # Admission is delayed and D-independent. Newly
+                        # collected samples therefore start as UNKNOWN.
+                        "prior_label": np.zeros(metadata_shape, dtype=np.int8),
+                        "prior_label_step": np.zeros(metadata_shape, dtype=np.int64),
+                        "prior_teacher_version": np.zeros(metadata_shape, dtype=np.int64),
+                        "prior_confidence": np.zeros(metadata_shape, dtype=np.float32),
+                        # Collection time is the ring generation. Delayed gate
+                        # writes are discarded if this slot has been replaced.
+                        "prior_generation": np.full(
+                            metadata_shape,
+                            int(local_time),
+                            dtype=np.int64,
+                        ),
+                    }
+                )
             if check_rollout_nonfinite:
                 _assert_finite(
                     data,
@@ -2034,10 +2071,7 @@ class Workspace:
                 reduced_metrics = (
                     reduce_metric_accumulators(total_metrics, metric_update_counts)
                     if self.cfg.distributed_average_metrics
-                    else {
-                        key: (total_metrics[key] / metric_update_counts[key]).mean()
-                        for key in sorted(total_metrics)
-                    }
+                    else {key: (total_metrics[key] / metric_update_counts[key]).mean() for key in sorted(total_metrics)}
                 )
                 for key, value in reduced_metrics.items():
                     m_dict[key] = np.round(value.item(), 6)
@@ -2066,9 +2100,7 @@ class Workspace:
                     prior_global_steps = prior_env_steps * global_step_scale
                     m_dict["prior/plane_env_steps"] = int(prior_global_steps)
                     m_dict["prior/total_sim_transitions"] = int(global_time + prior_global_steps)
-                    m_dict["prior/collection_fps"] = float(
-                        prior_steps_since_log * global_step_scale / max(prior_seconds_since_log, 1.0e-9)
-                    )
+                    m_dict["prior/collection_fps"] = float(prior_steps_since_log * global_step_scale / max(prior_seconds_since_log, 1.0e-9))
                     m_dict["prior/replay_size_per_rank"] = int(replay_buffer["prior"].size())
                     prior_log_start_steps = prior_env_steps
                     prior_log_start_seconds = prior_collection_seconds
@@ -2135,11 +2167,7 @@ class Workspace:
             logger = self.eval_loggers.get(evaluation_name) if write_outputs else None
             evaluation = self.evaluations[evaluation_name]
 
-            if (
-                distributed_shard
-                and self.distributed_rank != 0
-                and not isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation)
-            ):
+            if distributed_shard and self.distributed_rank != 0 and not isinstance(evaluation, HumanoidVerseMjlabTrackingEvaluation):
                 continue
 
             # NOTE we have this inside the loop so that the agent is not moved to cpu if we don't evaluate
@@ -2166,11 +2194,7 @@ class Workspace:
                         )
                     evaluation_results[evaluation_name] = evaluation_metrics
                     continue
-                eval_env = (
-                    self._get_priority_eval_env()
-                    if self._uses_fixed_flat_priority_eval(evaluation_name)
-                    else self.train_env
-                )
+                eval_env = self._get_priority_eval_env() if self._uses_fixed_flat_priority_eval(evaluation_name) else self.train_env
                 evaluation_metrics, wandb_dict = evaluation.run(
                     timestep=t,
                     agent_or_model=self.agent,
@@ -2249,6 +2273,11 @@ class Workspace:
                         local_time=local_time,
                         global_time=global_time,
                         optimizer_steps=optimizer_steps,
+                        selective_prior=(
+                            self.agent._selective_prior_state.state_dict()
+                            if bool(getattr(self.cfg.agent.train, "selective_prior_enabled", False))
+                            else None
+                        ),
                     ),
                     f,
                     indent=4,
@@ -2258,10 +2287,8 @@ class Workspace:
 
 
 def train_bfm_zero():
-    raise RuntimeError(
-        "Legacy train_bfm_zero entrypoint is disabled in this MJLab build. "
-        "Use humanoidverse.train or ./run_train.sh."
-    )
+    raise RuntimeError("Legacy train_bfm_zero entrypoint is disabled in this MJLab build. Use humanoidverse.train or ./run_train.sh.")
+
 
 if __name__ == "__main__":
     # This is the bare minimum CLI interface to launch experiments, but ideally you should

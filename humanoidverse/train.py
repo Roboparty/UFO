@@ -131,6 +131,7 @@ def build_ufo_mjlab_config(
     heading_context: bool = True,
     heading_reg_coeff: float = 0.0,
     behavior_prior: bool = True,
+    selective_prior: bool = False,
     num_agent_updates: int | None = None,
     robot_config: str | Path | None = None,
     terrain_mode: str | None = None,
@@ -148,6 +149,16 @@ def build_ufo_mjlab_config(
         raise ValueError("BehaviorContext heading is only supported by fb_depth")
     if not behavior_prior and prior_plane_envs not in (None, 0):
         raise ValueError("behavior_prior=False requires prior_plane_envs=0")
+    if selective_prior and not behavior_prior:
+        raise ValueError("selective_prior=True requires behavior_prior=True")
+    if selective_prior and agent != "fb_depth":
+        raise ValueError("selective online prior is currently supported only by fb_depth")
+    if selective_prior and not heading_context:
+        raise ValueError("selective online prior requires BehaviorContext metadata")
+    if selective_prior and prior_plane_envs not in (None, 0):
+        raise ValueError("selective online prior cannot use canonical-plane collectors")
+    if selective_prior:
+        prior_plane_envs = 0
     if not behavior_prior:
         prior_plane_envs = 0
     elif prior_plane_envs is None:
@@ -166,11 +177,7 @@ def build_ufo_mjlab_config(
     if smoke and prior_plane_envs > 0:
         prior_plane_envs = min(prior_plane_envs, max(2, num_envs // 8))
     if gradient_sync == "auto":
-        gradient_sync = (
-            "ddp"
-            if distributed_world_size > 1 and agent in {"fb", "fb_terrain", "fb_depth"}
-            else "manual"
-        )
+        gradient_sync = "ddp" if distributed_world_size > 1 and agent in {"fb", "fb_terrain", "fb_depth"} else "manual"
     if gradient_sync not in {"manual", "ddp"}:
         raise ValueError(f"Unsupported gradient synchronization mode: {gradient_sync!r}")
     if gradient_sync == "ddp" and distributed_world_size <= 1:
@@ -215,9 +222,7 @@ def build_ufo_mjlab_config(
                 )
             )
     agent_device = "cuda" if device.startswith("cuda") else "cpu"
-    resolved_update_z_every_step = (
-        _default_update_z_every_step(agent) if update_z_every_step is None else int(update_z_every_step)
-    )
+    resolved_update_z_every_step = _default_update_z_every_step(agent) if update_z_every_step is None else int(update_z_every_step)
     selected = build_agent_preset(
         agent=agent,
         device=agent_device,
@@ -229,6 +234,7 @@ def build_ufo_mjlab_config(
         heading_context=bool(heading_context and agent == "fb_depth"),
         heading_reg_coeff=float(heading_reg_coeff),
         behavior_prior=bool(behavior_prior),
+        selective_prior=bool(selective_prior),
         wandb_project=wandb_project,
     )
     agent_cfg = selected["agent_cfg"]
@@ -449,6 +455,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         heading_context=bool(args.heading_context),
         heading_reg_coeff=float(args.heading_reg_coeff),
         behavior_prior=bool(args.behavior_prior),
+        selective_prior=bool(args.selective_prior),
         num_agent_updates=args.num_agent_updates,
         robot_config=args.robot_config,
         terrain_mode=args.terrain_mode,
@@ -457,13 +464,15 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         gradient_sync=args.gradient_sync,
         ddp_bucket_cap_mb=args.ddp_bucket_cap_mb,
     )
-    behavior_prior_enabled = bool(
-        getattr(cfg.agent.train, "behavior_prior_enabled", True)
-    )
+    behavior_prior_enabled = bool(getattr(cfg.agent.train, "behavior_prior_enabled", True))
     behavior_prior_source = (
         "disabled"
         if not behavior_prior_enabled
-        else ("plane" if cfg.prior_plane_envs > 0 else "main")
+        else (
+            "selective_main"
+            if bool(getattr(cfg.agent.train, "selective_prior_enabled", False))
+            else ("plane" if cfg.prior_plane_envs > 0 else "main")
+        )
     )
     print(
         "[INFO] UFO train: "
@@ -478,6 +487,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"heading_context={cfg.agent.model.heading_context_enabled}, "
         f"heading_reg_coeff={getattr(cfg.agent.train, 'reg_coeff_heading', 0.0):g}, "
         f"behavior_prior_enabled={behavior_prior_enabled}, "
+        f"selective_prior_enabled={getattr(cfg.agent.train, 'selective_prior_enabled', False)}, "
         f"behavior_prior_source={behavior_prior_source}, "
         f"discriminator_loss={getattr(cfg.agent.train, 'discriminator_loss', 'bce')}, "
         f"discriminator_reward={getattr(cfg.agent.train, 'discriminator_reward', 'log_odds')}, "
@@ -523,11 +533,7 @@ def launch(args: argparse.Namespace) -> None:
             if args.terrain_mode == "rp1_simple"
             else tuple(float(value) for value in terrain_cfg.patch_size)
         )
-        border_width = (
-            RP1_TERRAIN_BORDER_WIDTH
-            if args.terrain_mode == "rp1_simple"
-            else float(terrain_cfg.border_width)
-        )
+        border_width = RP1_TERRAIN_BORDER_WIDTH if args.terrain_mode == "rp1_simple" else float(terrain_cfg.border_width)
         sensor_radius = math.hypot(
             max(abs(float(terrain_cfg.terrain_priv.x_min)), abs(float(terrain_cfg.terrain_priv.x_max))),
             max(abs(float(terrain_cfg.terrain_priv.y_min)), abs(float(terrain_cfg.terrain_priv.y_max))),
@@ -539,9 +545,7 @@ def launch(args: argparse.Namespace) -> None:
             policy_margin=float(terrain_cfg.coverage.policy_margin),
             # Tiles are traversable. The worst assigned origin is at the
             # center of an outer tile, with the global border beyond it.
-            safe_radius=(
-                min(patch_size) / 2.0 + border_width
-            ),
+            safe_radius=(min(patch_size) / 2.0 + border_width),
         )
         print(
             "[INFO] terrain coverage preflight passed: "
@@ -617,7 +621,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Physical terrain (defaults: fb_terrain=mixed, fb_depth=rp1_simple).",
     )
-    parser.add_argument("--gpu-ids", default="single", help="'single', 'all', or a comma-separated GPU id list relative to CUDA_VISIBLE_DEVICES.")
+    parser.add_argument(
+        "--gpu-ids", default="single", help="'single', 'all', or a comma-separated GPU id list relative to CUDA_VISIBLE_DEVICES."
+    )
     parser.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
     parser.add_argument(
         "--robot-config",
@@ -695,6 +701,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--selective-prior",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Use expert-anchored selective online prior expansion. Policy samples are admitted "
+            "by a slow D-independent verifier; UNKNOWN samples are excluded from D/Q_D/Actor-D."
+        ),
+    )
+    parser.add_argument(
         "--expert-buffer-cache",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -749,18 +764,14 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Enable z-companion BehaviorContext heading observations for fb_depth. "
-            "Use --no-heading-context for the legacy architecture."
+            "Enable z-companion BehaviorContext heading observations for fb_depth. Use --no-heading-context for the legacy architecture."
         ),
     )
     parser.add_argument(
         "--heading-reg-coeff",
         type=float,
         default=0.0,
-        help=(
-            "Independent Q_H Actor coefficient. Zero runs the observation-only ablation and "
-            "completely skips Q_H optimization."
-        ),
+        help=("Independent Q_H Actor coefficient. Zero runs the observation-only ablation and completely skips Q_H optimization."),
     )
     parser.add_argument("--seed", type=int, default=4728)
     parser.add_argument("--use-wandb", action="store_true")
@@ -820,6 +831,14 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--no-behavior-prior requires --prior-plane-envs 0")
     if not args.behavior_prior and args.agent != "fb_depth":
         raise ValueError("--no-behavior-prior is currently defined only for --agent fb_depth")
+    if args.selective_prior and not args.behavior_prior:
+        raise ValueError("--selective-prior requires --behavior-prior")
+    if args.selective_prior and args.agent != "fb_depth":
+        raise ValueError("--selective-prior is currently supported only with --agent fb_depth")
+    if args.selective_prior and args.prior_plane_envs not in (None, 0):
+        raise ValueError("--selective-prior cannot be combined with --prior-plane-envs")
+    if args.selective_prior and not args.heading_context:
+        raise ValueError("--selective-prior requires --heading-context")
     if args.num_agent_updates is not None and args.num_agent_updates <= 0:
         raise ValueError("--num-agent-updates must be positive")
     if args.lr_scale <= 0:

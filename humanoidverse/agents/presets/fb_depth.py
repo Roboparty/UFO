@@ -14,12 +14,17 @@ def build_fb_depth_agent(
     heading_context: bool = True,
     heading_reg_coeff: float = 0.0,
     behavior_prior: bool = True,
+    selective_prior: bool = False,
     **kwargs,
 ):
     if heading_reg_coeff < 0.0:
         raise ValueError("heading_reg_coeff must be non-negative")
     if heading_reg_coeff > 0.0 and not heading_context:
         raise ValueError("heading_reg_coeff requires heading_context=True")
+    if selective_prior and not behavior_prior:
+        raise ValueError("selective_prior requires behavior_prior=True")
+    if selective_prior and not heading_context:
+        raise ValueError("selective_prior requires BehaviorContext heading metadata")
     base = build_fb_terrain_agent(**kwargs)
     archi = base.model.archi
     source_actor = archi.actor
@@ -44,17 +49,14 @@ def build_fb_depth_agent(
         depth_width=32,
         depth_latent_dim=256,
     )
+
     def with_context_filter(component):
-        return component.model_copy(
-            update={"input_filter": DictInputFilterConfig(name="DictInputFilterConfig", key=context_keys)}
-        )
+        return component.model_copy(update={"input_filter": DictInputFilterConfig(name="DictInputFilterConfig", key=context_keys)})
 
     # The scalar behavior-prior and auxiliary value functions do not need to
     # duplicate the full 2048x6 successor-feature capacity.  Preserve their
     # twin ensembles and target networks while reducing only critic capacity.
-    discriminator_critic = archi.critic.model_copy(
-        update={"hidden_dim": 1024, "hidden_layers": 4}
-    )
+    discriminator_critic = archi.critic.model_copy(update={"hidden_dim": 1024, "hidden_layers": 4})
     aux_critic = archi.aux_critic.model_copy(update={"hidden_layers": 4})
     archi_update = {
         "actor": depth_actor,
@@ -66,9 +68,7 @@ def build_fb_depth_agent(
         # FB or the heterogeneous auxiliary return.  Keep the twin ensemble
         # and target-network semantics, but do not duplicate a full 2048x6
         # critic solely for Q_H.
-        heading_critic = with_context_filter(archi.aux_critic).model_copy(
-            update={"hidden_dim": 1024, "hidden_layers": 3}
-        )
+        heading_critic = with_context_filter(archi.aux_critic).model_copy(update={"hidden_dim": 1024, "hidden_layers": 3})
         archi_update.update(
             {
                 "f": with_context_filter(archi.f),
@@ -100,6 +100,7 @@ def build_fb_depth_agent(
         update={
             "reg_coeff_heading": float(heading_reg_coeff),
             "behavior_prior_enabled": bool(behavior_prior),
+            "selective_prior_enabled": bool(selective_prior),
             # Direct-depth formal runs use the original main-policy behavior
             # prior topology with an AMP-style bounded LSGAN reward. Other FB
             # presets retain their historical BCE/log-odds defaults.

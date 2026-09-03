@@ -294,7 +294,160 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
         restored["depth_image"] = self.storage["observation"]["depth_image"][source_time, source_env]
         return restored
 
-    def sample(self, batch_size: int = 1, seq_length: int | None = None):
+    def _valid_slot_mask(self) -> torch.Tensor:
+        """Return the logical occupancy of the ring as a [time, env] mask."""
+
+        if self.storage is None:
+            return torch.zeros((self.capacity, 0), dtype=torch.bool, device=self.device)
+        shape = get_key(self.storage, self.end_key).shape[: self.n_dim]
+        valid = torch.zeros(shape, dtype=torch.bool, device=self.device)
+        if self._is_full:
+            valid.fill_(True)
+        elif self._idx > 0:
+            valid[: self._idx] = True
+        return valid
+
+    def successor_available_mask(self) -> torch.Tensor:
+        """Return slots whose chronological successor has already been written.
+
+        The newest ring row must never use the oldest row as its successor.
+        Existing trajectory sampling enforces the same condition indirectly;
+        selective prior masks need it explicitly.
+        """
+
+        valid = self._valid_slot_mask()
+        if valid.numel() == 0:
+            return valid
+        available = valid.clone()
+        newest = (int(self._idx) - 1) % self.capacity
+        available[newest] = False
+        return available
+
+    def _output_from_indices(
+        self,
+        idxs: tuple[torch.Tensor, ...],
+        *,
+        include_next: bool = True,
+        restore_depth: bool = True,
+    ) -> Dict:
+        output: Dict = {}
+        if include_next and len(self.output_key_tp1) > 0:
+            output["next"] = {}
+        for key in self.output_key_t:
+            output[key] = tree_map(lambda value: value[idxs], self.storage[key])
+        if restore_depth and "observation" in output:
+            output["observation"] = self._restore_depth_history(output["observation"], idxs)
+        if include_next and len(self.output_key_tp1) > 0:
+            next_idxs = ((idxs[0] + 1) % self.capacity, *idxs[1:])
+            for key in self.output_key_tp1:
+                output["next"][key] = tree_map(lambda value: value[next_idxs], self.storage[key])
+            if restore_depth and "observation" in output["next"]:
+                output["next"]["observation"] = self._restore_depth_history(output["next"]["observation"], next_idxs)
+        return output
+
+    @torch.no_grad()
+    def sample_from_mask(
+        self,
+        mask: torch.Tensor,
+        batch_size: int,
+        *,
+        include_next: bool = True,
+        return_indices: bool = False,
+        strata: torch.Tensor | None = None,
+        restore_depth: bool = True,
+    ):
+        """Sample ring slots from an aligned boolean view without copying replay.
+
+        Sampling uses replacement intentionally: rare validated/bad strata can
+        provide a fixed DDP batch size without duplicating compact depth frames.
+        """
+
+        if self.storage is None:
+            raise ValueError("Cannot sample an empty trajectory buffer")
+        expected = get_key(self.storage, self.end_key).shape[: self.n_dim]
+        if tuple(mask.shape) != tuple(expected):
+            raise ValueError(f"Mask shape {tuple(mask.shape)} does not match replay shape {tuple(expected)}")
+        eligible = mask.to(device=self.device, dtype=torch.bool) & self._valid_slot_mask()
+        if include_next:
+            eligible &= self.successor_available_mask()
+        candidates = eligible.nonzero(as_tuple=False)
+        if candidates.numel() == 0:
+            raise ValueError("No replay slots satisfy the requested sampling mask")
+        if strata is None:
+            choice = torch.randint(candidates.shape[0], (int(batch_size),), device=candidates.device)
+        else:
+            if tuple(strata.shape) != tuple(expected):
+                raise ValueError(f"Strata shape {tuple(strata.shape)} does not match replay shape {tuple(expected)}")
+            candidate_strata = strata.to(device=self.device)[tuple(candidates[:, dim] for dim in range(self.n_dim))]
+            candidate_strata = candidate_strata.reshape(-1)
+            _, inverse, counts = torch.unique(candidate_strata, sorted=False, return_inverse=True, return_counts=True)
+            # Each stratum receives equal expected sampling mass; samples
+            # inside the same motion are still uniform.
+            weights = counts[inverse].float().reciprocal()
+            choice = torch.multinomial(weights, int(batch_size), replacement=True)
+        selected = candidates[choice]
+        idxs = tuple(selected[:, dim].to(torch.long) for dim in range(self.n_dim))
+        output = self._output_from_indices(idxs, include_next=include_next, restore_depth=restore_depth)
+        return (output, idxs) if return_indices else output
+
+    @torch.no_grad()
+    def set_fields_at_indices(
+        self,
+        idxs: tuple[torch.Tensor, ...],
+        values: dict[str, torch.Tensor],
+        *,
+        expected_generation: torch.Tensor | None = None,
+        generation_key: str = "prior_generation",
+    ) -> int:
+        """Atomically update metadata for still-current ring generations."""
+
+        if len(idxs) != self.n_dim:
+            raise ValueError(f"Expected {self.n_dim} index tensors, got {len(idxs)}")
+        keep = torch.ones_like(idxs[0], dtype=torch.bool, device=idxs[0].device)
+        if expected_generation is not None:
+            if generation_key not in self.storage:
+                raise KeyError(f"Replay is missing generation field {generation_key!r}")
+            actual = self.storage[generation_key][idxs].reshape(-1)
+            expected_generation = expected_generation.to(actual.device).reshape(-1)
+            keep &= actual == expected_generation
+        kept_idxs = tuple(index[keep] for index in idxs)
+        for key, value in values.items():
+            if key not in self.storage:
+                raise KeyError(f"Replay is missing metadata field {key!r}")
+            target = self.storage[key][kept_idxs]
+            source = value.to(device=target.device, dtype=target.dtype)
+            source = source.reshape(value.shape[0], *target.shape[1:])[keep]
+            self.storage[key][kept_idxs] = source
+        return int(keep.sum().item())
+
+    @torch.no_grad()
+    def ensure_scalar_field(
+        self,
+        key: str,
+        *,
+        dtype: torch.dtype,
+        fill_value: float | int = 0,
+    ) -> bool:
+        """Add missing [time, env, 1] metadata when migrating old replay."""
+
+        if self.storage is None:
+            return False
+        if key in self.storage:
+            return False
+        base_shape = get_key(self.storage, self.end_key).shape[: self.n_dim]
+        self.storage[key] = torch.full((*base_shape, 1), fill_value, device=self.device, dtype=dtype)
+        if key not in self.output_key_t:
+            self.output_key_t.append(key)
+        return True
+
+    def sample(
+        self,
+        batch_size: int = 1,
+        seq_length: int | None = None,
+        *,
+        return_indices: bool = False,
+        restore_depth: bool = True,
+    ):
         seq_length = seq_length or self.seq_length
         if batch_size < seq_length:
             raise ValueError(
@@ -314,10 +467,7 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
             )
             self._recompute_start_stop = False
 
-        output, offset = {}, 0
-        if len(self.output_key_tp1) > 0:
-            output["next"] = {}
-            offset = 1
+        offset = int(len(self.output_key_tp1) > 0)
         num_slices = batch_size // seq_length
         traj_idx = self.lengths >= (seq_length + offset)
         if not traj_idx.any():
@@ -331,17 +481,8 @@ class TrajectoryDictBufferMultiDim(DictBuffer):
             priorities=None,
         )
         idxs = idxs.to(torch.long).unbind(-1)
-        for k in self.output_key_t:
-            output[k] = tree_map(lambda x: x[idxs], self.storage[k])
-        if "observation" in output:
-            output["observation"] = self._restore_depth_history(output["observation"], idxs)
-        # increment the time index to get the next states
-        idxs = ((idxs[0] + 1) % self.capacity, *idxs[1:])
-        for k in self.output_key_tp1:
-            output["next"][k] = tree_map(lambda x: x[idxs], self.storage[k])
-        if "observation" in output.get("next", {}):
-            output["next"]["observation"] = self._restore_depth_history(output["next"]["observation"], idxs)
-        return output
+        output = self._output_from_indices(idxs, include_next=True, restore_depth=restore_depth)
+        return (output, idxs) if return_indices else output
 
     def get_full_buffer(self) -> Dict:
         """We assume to return transition based"""

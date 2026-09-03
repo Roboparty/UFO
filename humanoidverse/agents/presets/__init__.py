@@ -26,6 +26,7 @@ def build_agent_preset(
     heading_context: bool = True,
     heading_reg_coeff: float = 0.0,
     behavior_prior: bool = True,
+    selective_prior: bool = False,
 ) -> dict[str, Any]:
     if agent == "fb":
         return {
@@ -67,6 +68,7 @@ def build_agent_preset(
                 heading_context=heading_context,
                 heading_reg_coeff=heading_reg_coeff,
                 behavior_prior=behavior_prior,
+                selective_prior=selective_prior,
             ),
             "wandb_group": "pbfm_direct_depth_v0",
             "wandb_project": wandb_project,
