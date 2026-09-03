@@ -117,6 +117,31 @@ def test_fb_depth_routes_heading_but_keeps_b_and_d_agnostic() -> None:
     assert qh_cfg.model.archi.aux_critic.hidden_layers == 4
 
 
+def test_tracking_context_owns_compiled_sampler_indices() -> None:
+    sampled_indices = torch.tensor([3, 4], dtype=torch.long)
+    class ExpertSlicer:
+        def sample(self, *_args, **_kwargs):
+            batch = {
+                "next": {"observation": torch.zeros(2, 1)},
+                "heading_forward_xy": torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+                "motion_id": torch.tensor([[7], [7]], dtype=torch.long),
+            }
+            return batch, (sampled_indices,)
+    agent = FBAgent.__new__(FBAgent)
+    agent._model = SimpleNamespace(
+        device=torch.device("cpu"),
+        backward_map=lambda _obs: torch.tensor([[1.0], [2.0]]),
+        project_z=lambda z: z,
+    )
+    agent.cfg = SimpleNamespace(model=SimpleNamespace(seq_length=1))
+    *_, reference_index, _ = agent._sample_tracking_context(
+        {"expert_slicer": ExpertSlicer()},
+        batch_dim=1,
+        traj_length=2,
+    )
+    sampled_indices.fill_(99)
+    assert reference_index.reshape(-1).tolist() == [3, 4]
+
 def test_qh_continuation_stops_at_tracking_context_boundary() -> None:
     agent = FBAgent.__new__(FBAgent)
     agent._model = SimpleNamespace(device=torch.device("cpu"))

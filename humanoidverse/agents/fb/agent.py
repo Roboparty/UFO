@@ -483,7 +483,17 @@ class FBAgent:
         selective_state = getattr(self, "_selective_prior_state", None)
         encoder_version = int(getattr(selective_state, "behavior_encoder_version", 0))
         encoder_version = torch.full_like(reference_index, encoder_version)
-        return self._model.project_z(z), heading_reference_xy, motion_id, reference_index, encoder_version
+        # These tensors outlive this call as collector-local rollout state.
+        # In particular, sampled_idxs may be backed by the replay sampler's
+        # compiled CUDA graph and is overwritten on its next invocation.
+        # Give the collector independent storage for every persistent field.
+        return (
+            self._model.project_z(z).clone(),
+            heading_reference_xy.clone(),
+            motion_id.clone(),
+            reference_index.clone(),
+            encoder_version.clone(),
+        )
 
     def advance_rollout_context(
         self,
