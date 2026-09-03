@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
+from humanoidverse.agents.buffers.transition import dtype_numpytotorch
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBuffer, TrajectoryDictBufferMultiDim
 from humanoidverse.agents.fb_cpr.agent import FBcprAgent
 from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgent
@@ -18,6 +20,10 @@ from humanoidverse.agents.selective_prior import (
     qd_interior_mask,
     resolve_prior_proposals,
 )
+
+
+def test_replay_dtype_mapping_supports_numpy_int8_prior_metadata() -> None:
+    assert dtype_numpytotorch(np.dtype("int8")) == torch.int8
 
 
 def test_unknown_is_not_a_qd_terminal_or_training_sample() -> None:
