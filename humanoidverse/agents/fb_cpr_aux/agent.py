@@ -43,6 +43,7 @@ from ..selective_prior import (
     module_state_fingerprint,
     qd_interior_mask,
     resolve_prior_proposals,
+    shadow_refresh_due,
 )
 from .model import FBcprAuxModelConfig
 
@@ -89,14 +90,18 @@ class FBcprAuxAgentTrainConfig(FBcprAgentTrainConfig):
     selective_prior_gate_future: int = 8
     selective_prior_gate_windows_per_refresh: int = 64
     selective_prior_gate_bootstrap_updates: int = 1024
+    # Optimizer-update interval between an ACTIVE bank swap and starting the
+    # next frozen SHADOW verifier. This shares units with policy_version and
+    # selective_prior_max_policy_version_age.
     selective_prior_gate_teacher_refresh_updates: int = 4096
-    selective_prior_expansion_refresh_updates: int = 1024
+    # Collector-step cadence while SHADOW is building. Gate update_count is a
+    # collector clock, so 1 means one admission batch after every env step.
+    selective_prior_expansion_refresh_updates: int = 1
     # ``step`` is rank-local environment time, not globally aggregated time.
-    # Keep the default deliberately short enough that old B coordinates cannot
-    # survive for most of an 8-GPU run.
+    # Policy samples have a bounded lifetime even though their provenance is
+    # re-encoded on demand in the active frozen coordinate contract.
     selective_prior_label_ttl_local_steps: int = 1_000_000
     selective_prior_candidate_min_age_local_steps: int = 100_000
-    selective_prior_max_z_version_age: int = 8192
     selective_prior_max_policy_version_age: int = 8192
     selective_prior_good_cosine_mean: float = 0.75
     selective_prior_good_cosine_min: float = 0.35
@@ -105,12 +110,8 @@ class FBcprAuxAgentTrainConfig(FBcprAgentTrainConfig):
     selective_prior_good_heading_cost_mean_max: float = 0.30
     selective_prior_bad_heading_cost_mean_min: float = 1.0
     selective_prior_actor_interior_horizon: int = 4
-    selective_prior_min_validated_per_rank: int = 4096
-    selective_prior_min_bad_per_rank: int = 2048
     selective_prior_min_balanced_motion_strata_per_rank: int = 8
     selective_prior_holdout_modulus: int = 5
-    selective_prior_min_calibration_validated_per_rank: int = 256
-    selective_prior_min_calibration_bad_per_rank: int = 128
     selective_prior_min_validated_windows_per_rank: int = 128
     selective_prior_min_bad_windows_per_rank: int = 64
     selective_prior_min_validated_contexts_per_rank: int = 32
@@ -119,8 +120,6 @@ class FBcprAuxAgentTrainConfig(FBcprAgentTrainConfig):
     selective_prior_min_bad_motions_per_rank: int = 4
     selective_prior_min_calibration_validated_windows_per_rank: int = 16
     selective_prior_min_calibration_bad_windows_per_rank: int = 8
-    selective_prior_balance_ratio_min: float = 0.5
-    selective_prior_balance_ratio_max: float = 2.0
     selective_prior_d_min_updates: int = 512
     selective_prior_d_ready_streak: int = 64
     selective_prior_d_positive_min: float = 0.5
@@ -214,6 +213,7 @@ class FBcprAuxAgent(FBcprAgent):
 
         self._selective_prior_state = SelectivePriorState()
         self._last_selective_gate_step: int | None = None
+        self._last_selective_candidate_promotion_step: int | None = None
         self._last_selective_mask_step: int | None = None
         self._cached_selective_masks: dict[str, torch.Tensor] | None = None
         self._last_selective_teacher_refresh_update = 0
@@ -243,6 +243,24 @@ class FBcprAuxAgent(FBcprAgent):
                 raise ValueError("Actor-D requires an interior horizon of at least two states")
             if self.cfg.train.selective_prior_holdout_modulus < 2:
                 raise ValueError("Selective-prior held-out modulus must be at least two")
+            if self.cfg.train.selective_prior_expansion_refresh_updates <= 0:
+                raise ValueError("Selective-prior SHADOW collector cadence must be positive")
+            if not (
+                0
+                < self.cfg.train.selective_prior_gate_teacher_refresh_updates
+                < self.cfg.train.selective_prior_max_policy_version_age
+            ):
+                raise ValueError(
+                    "SHADOW refresh must start before ACTIVE policy support expires: "
+                    f"refresh={self.cfg.train.selective_prior_gate_teacher_refresh_updates}, "
+                    f"max_age={self.cfg.train.selective_prior_max_policy_version_age}"
+                )
+            if not (
+                0
+                <= self.cfg.train.selective_prior_candidate_min_age_local_steps
+                < self.cfg.train.selective_prior_label_ttl_local_steps
+            ):
+                raise ValueError("Candidate admission delay must be shorter than the label TTL")
             # B is small relative to F/Actor.  A frozen snapshot gives the gate
             # a genuinely stationary, D-independent admission rule without a
             # second policy or an additional optimizer.
@@ -400,6 +418,7 @@ class FBcprAuxAgent(FBcprAgent):
             policy_version=int(previous.policy_version),
         )
         self._last_selective_gate_step = None
+        self._last_selective_candidate_promotion_step = None
         self._last_selective_mask_step = None
         self._cached_selective_masks = None
         self._prior_coordinate_contract = None
@@ -443,6 +462,7 @@ class FBcprAuxAgent(FBcprAgent):
         state.gate_teacher_version += 1
         state.shadow_building = 1
         state.shadow_started_update = state.update_count
+        state.shadow_started_policy_version = state.policy_version
         self._last_selective_teacher_refresh_update = state.update_count
         self._last_selective_mask_step = None
         self._cached_selective_masks = None
@@ -492,6 +512,7 @@ class FBcprAuxAgent(FBcprAgent):
         state.active_teacher_version = int(state.gate_teacher_version)
         state.shadow_building = 0
         state.last_bank_swap_update = state.update_count
+        state.last_bank_swap_policy_version = state.policy_version
         state.set_phase(PriorPhase.FIT_D)
         state.discriminator_bank_version = -1
         state.qd_bank_version = -1
@@ -1290,6 +1311,77 @@ class FBcprAuxAgent(FBcprAgent):
         return upright[:, -tail:].all(dim=1)
 
     @torch.no_grad()
+    def _promote_mature_shadow_candidates(self, replay, *, step: int, expert_buffer) -> int:
+        """Promote delayed non-getup GOOD evidence without random re-hits.
+
+        A gate proposal already evaluates the configured future window.  The
+        CANDIDATE state adds a slow data-lag before that immutable evidence can
+        enter the prior.  Requiring the same ring slot to be selected randomly
+        a second time made promotion effectively impossible once replay was
+        full (millions of slots versus tens of gate windows per refresh).
+
+        Get-up candidates are deliberately excluded: they are promoted only
+        by the explicit future-upright retroactive path in the gate.
+        """
+
+        state = self._selective_prior_state
+        if not bool(state.shadow_building) or replay.storage is None:
+            return 0
+        storage = replay.storage
+        candidate = storage["prior_label"].squeeze(-1).eq(int(PriorLabel.CANDIDATE))
+        candidate &= storage["prior_candidate_teacher_version"].squeeze(-1).to(torch.long).eq(
+            int(state.gate_teacher_version)
+        )
+        candidate_step = storage["prior_candidate_step"].squeeze(-1).to(torch.long)
+        age = int(step) - candidate_step
+        candidate &= (candidate_step > 0) & (age >= self.cfg.train.selective_prior_candidate_min_age_local_steps)
+        candidate &= replay._valid_slot_mask()
+
+        policy_version = storage["prior_policy_version"].squeeze(-1).to(torch.long)
+        policy_age = int(state.policy_version) - policy_version
+        candidate &= (policy_version >= 0) & (policy_age >= 0)
+        candidate &= policy_age <= self.cfg.train.selective_prior_max_policy_version_age
+
+        motion_ids = storage["prior_motion_id"].squeeze(-1).to(torch.long)
+        for getup_id in self._getup_motion_ids(expert_buffer):
+            candidate &= motion_ids.ne(int(getup_id))
+        selected = candidate.nonzero(as_tuple=False)
+        if selected.numel() == 0:
+            return 0
+        idxs = tuple(selected[:, dim].to(torch.long) for dim in range(replay.n_dim))
+        generation = storage["prior_generation"][idxs]
+        count = selected.shape[0]
+        return replay.set_fields_at_indices(
+            idxs,
+            {
+                "prior_label": torch.full(
+                    (count, 1),
+                    int(PriorLabel.VALIDATED),
+                    device=storage["prior_label"].device,
+                    dtype=torch.int8,
+                ),
+                "prior_label_step": torch.full(
+                    (count, 1), int(step), device=storage["prior_label_step"].device, dtype=torch.long
+                ),
+                "prior_teacher_version": torch.full(
+                    (count, 1),
+                    int(state.gate_teacher_version),
+                    device=storage["prior_teacher_version"].device,
+                    dtype=torch.long,
+                ),
+                "prior_candidate_step": torch.zeros(
+                    (count, 1), device=storage["prior_candidate_step"].device, dtype=torch.long
+                ),
+                "prior_candidate_teacher_version": torch.zeros(
+                    (count, 1),
+                    device=storage["prior_candidate_teacher_version"].device,
+                    dtype=torch.long,
+                ),
+            },
+            expected_generation=generation,
+        )
+
+    @torch.no_grad()
     @torch.compiler.disable
     def _refresh_selective_prior_labels(self, replay, step: int, *, expert_buffer=None) -> dict[str, torch.Tensor]:
         if self._last_selective_gate_step == int(step):
@@ -1310,11 +1402,12 @@ class FBcprAuxAgent(FBcprAgent):
         )
         if refresh_due:
             self._start_shadow_prior_bank()
-        elif (
-            state.phase_enum == PriorPhase.ACTOR_PRIOR
-            and not bool(state.shadow_building)
-            and state.update_count - state.last_bank_swap_update
-            >= self.cfg.train.selective_prior_gate_teacher_refresh_updates
+        elif shadow_refresh_due(
+            phase=state.phase_enum,
+            shadow_building=bool(state.shadow_building),
+            policy_version=state.policy_version,
+            last_bank_swap_policy_version=state.last_bank_swap_policy_version,
+            refresh_policy_updates=self.cfg.train.selective_prior_gate_teacher_refresh_updates,
         ):
             # ACTIVE remains immutable and continues serving Actor-D while a
             # new verifier snapshot accumulates a completely separate SHADOW.
@@ -1335,7 +1428,10 @@ class FBcprAuxAgent(FBcprAgent):
             return {"prior/gate_paused_for_calibration": torch.zeros((), device=self.device)}
         if (
             state.phase_enum == PriorPhase.ACTOR_PRIOR
-            and state.update_count % self.cfg.train.selective_prior_expansion_refresh_updates != 0
+            and (
+                state.update_count - state.shadow_started_update
+            ) % self.cfg.train.selective_prior_expansion_refresh_updates
+            != 0
         ):
             return {"prior/gate_paused_for_calibration": torch.zeros((), device=self.device)}
 
@@ -1664,6 +1760,10 @@ class FBcprAuxAgent(FBcprAgent):
         min_v_mass = self._global_min_float(local_v_mass)
         min_b_mass = self._global_min_float(local_b_mass)
         ratio = min_v_mass / max(min_b_mass, 1.0)
+        # Available-bank mass is diagnostic only. E/V/B optimizer mass is
+        # explicitly controlled by separate balanced samplers and loss
+        # weights; requiring the raw replay occupancy ratio to match would
+        # make phase reachability depend on the policy's natural failure rate.
         ready = (
             min_v_windows >= self.cfg.train.selective_prior_min_validated_windows_per_rank
             and min_b_windows >= self.cfg.train.selective_prior_min_bad_windows_per_rank
@@ -1677,7 +1777,6 @@ class FBcprAuxAgent(FBcprAgent):
             and min_calibration_strata > 0
             and min_qd > 0
             and min_actor > 0
-            and self.cfg.train.selective_prior_balance_ratio_min <= ratio <= self.cfg.train.selective_prior_balance_ratio_max
         )
         values = {
             f"prior/{prefix}_local_validated_frames": local_v_frames,
@@ -1804,6 +1903,21 @@ class FBcprAuxAgent(FBcprAgent):
             validated_loss = (
                 self.cfg.train.selective_prior_validated_fraction * self.cfg.train.selective_prior_validated_weight * validated_loss_raw
             )
+            effective_validated_mass = (
+                self.cfg.train.selective_prior_validated_fraction
+                * self.cfg.train.selective_prior_validated_weight
+                * confidence.mean()
+            )
+            effective_expert_mass = torch.as_tensor(
+                self.cfg.train.selective_prior_expert_fraction,
+                device=self.device,
+                dtype=validated_loss.dtype,
+            )
+            effective_bad_mass = torch.as_tensor(
+                self.cfg.train.selective_prior_bad_fraction,
+                device=self.device,
+                dtype=validated_loss.dtype,
+            )
             bad_loss_raw = 0.5 * (bad_logits + 1.0).square().mean()
             bad_loss = self.cfg.train.selective_prior_bad_fraction * bad_loss_raw
             data_loss = expert_loss + validated_loss + bad_loss
@@ -1843,6 +1957,12 @@ class FBcprAuxAgent(FBcprAgent):
                 "disc/validated_lsgan_raw": validated_loss_raw.detach(),
                 "disc/bad_lsgan": bad_loss.detach(),
                 "disc/bad_lsgan_raw": bad_loss_raw.detach(),
+                "disc/effective_expert_mass": effective_expert_mass.detach(),
+                "disc/effective_validated_mass": effective_validated_mass.detach(),
+                "disc/effective_bad_mass": effective_bad_mass.detach(),
+                "disc/effective_validated_bad_ratio": (
+                    effective_validated_mass / effective_bad_mass.clamp_min(1.0e-8)
+                ).detach(),
                 "disc/gp_raw": gp.detach() if grad_penalty is not None else torch.zeros_like(loss.detach()),
                 "disc/gp_weighted": weighted_gp.detach(),
                 "disc/total_loss": loss.detach(),
@@ -2353,6 +2473,16 @@ class FBcprAuxAgent(FBcprAgent):
             step,
             expert_buffer=replay_buffer["expert_slicer"],
         )
+        if self._last_selective_candidate_promotion_step != int(step):
+            matured = self._promote_mature_shadow_candidates(
+                replay,
+                step=step,
+                expert_buffer=replay_buffer["expert_slicer"],
+            )
+            self._last_selective_candidate_promotion_step = int(step)
+            metrics["prior/gate_matured_candidate_frames"] = torch.tensor(
+                float(matured), device=self.device
+            )
         masks, coverage_metrics = self._selective_masks_and_coverage(
             replay,
             step,

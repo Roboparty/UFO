@@ -7,14 +7,13 @@ ambiguous samples remain UNKNOWN and are invisible to D, Q_D, and Actor-D.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from enum import IntEnum
 import hashlib
 import json
+from dataclasses import asdict, dataclass
+from enum import IntEnum
 from typing import Any
 
 import torch
-
 
 PROVENANCE_SCHEMA_VERSION = 2
 TEMPORAL_ENCODING_CONTRACT_VERSION = 1
@@ -259,7 +258,9 @@ class SelectivePriorState:
     gate_teacher_version: int = 0
     shadow_building: int = 0
     shadow_started_update: int = 0
+    shadow_started_policy_version: int = 0
     last_bank_swap_update: int = 0
+    last_bank_swap_policy_version: int = 0
     prior_coordinate_version: int = 0
     discriminator_version: int = 0
     qd_reward_version: int = -1
@@ -289,6 +290,32 @@ class SelectivePriorState:
 
     def set_phase(self, phase: PriorPhase) -> None:
         self.phase = int(phase)
+
+
+def shadow_refresh_due(
+    *,
+    phase: PriorPhase | int,
+    shadow_building: bool,
+    policy_version: int,
+    last_bank_swap_policy_version: int,
+    refresh_policy_updates: int,
+) -> bool:
+    """Return whether ACTIVE should start building its next SHADOW bank.
+
+    ``policy_version`` advances once per optimizer update, whereas selective
+    gate ``update_count`` advances once per collector step. Mixing these two
+    clocks made the old refresh interval outlive the policy-age validity of
+    every ACTIVE sample. Keep this decision entirely in optimizer-update
+    units so it can be compared directly with ``max_policy_version_age``.
+    """
+
+    if refresh_policy_updates <= 0:
+        raise ValueError("refresh_policy_updates must be positive")
+    return (
+        PriorPhase(int(phase)) is PriorPhase.ACTOR_PRIOR
+        and not bool(shadow_building)
+        and int(policy_version) - int(last_bank_swap_policy_version) >= int(refresh_policy_updates)
+    )
 
 
 def finalized_mask(labels: torch.Tensor) -> torch.Tensor:
@@ -441,4 +468,5 @@ __all__ = [
     "module_state_fingerprint",
     "qd_interior_mask",
     "resolve_prior_proposals",
+    "shadow_refresh_due",
 ]

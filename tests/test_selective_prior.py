@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 import torch
 
-from humanoidverse.agents.buffers.transition import dtype_numpytotorch
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBuffer, TrajectoryDictBufferMultiDim
+from humanoidverse.agents.buffers.transition import dtype_numpytotorch
 from humanoidverse.agents.fb_cpr.agent import FBcprAgent
 from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgent
 from humanoidverse.agents.presets.fb_depth import build_fb_depth_agent
@@ -24,6 +24,12 @@ from humanoidverse.agents.selective_prior import (
     masked_temporal_mean,
     qd_interior_mask,
     resolve_prior_proposals,
+    shadow_refresh_due,
+)
+from humanoidverse.selective_prior_audit import (
+    GateThresholds,
+    classify_gate_windows,
+    validate_exact_tracking_windows,
 )
 
 
@@ -472,6 +478,86 @@ def test_selective_prior_state_checkpoint_roundtrip() -> None:
     assert restored.phase_enum is PriorPhase.ACTOR_PRIOR
 
 
+def test_shadow_refresh_uses_policy_update_clock_before_active_support_expires() -> None:
+    state = SelectivePriorState(
+        phase=PriorPhase.ACTOR_PRIOR,
+        policy_version=14_095,
+        last_bank_swap_policy_version=10_000,
+    )
+    assert not shadow_refresh_due(
+        phase=state.phase_enum,
+        shadow_building=False,
+        policy_version=state.policy_version,
+        last_bank_swap_policy_version=state.last_bank_swap_policy_version,
+        refresh_policy_updates=4096,
+    )
+    state.policy_version += 1
+    assert shadow_refresh_due(
+        phase=state.phase_enum,
+        shadow_building=False,
+        policy_version=state.policy_version,
+        last_bank_swap_policy_version=state.last_bank_swap_policy_version,
+        refresh_policy_updates=4096,
+    )
+    # The next SHADOW starts halfway through the 8192-update ACTIVE validity
+    # horizon, rather than after 4096 collector steps (=65536 updates).
+    assert state.policy_version - state.last_bank_swap_policy_version < 8192
+
+
+def test_mature_candidate_promotion_does_not_require_random_slot_rehit_or_promote_getup() -> None:
+    class _Replay:
+        n_dim = 2
+
+        def __init__(self) -> None:
+            shape = (2, 1, 1)
+            self.storage = {
+                "prior_label": torch.full(shape, PriorLabel.CANDIDATE, dtype=torch.int8),
+                "prior_label_step": torch.zeros(shape, dtype=torch.long),
+                "prior_teacher_version": torch.zeros(shape, dtype=torch.long),
+                "prior_candidate_step": torch.full(shape, 50, dtype=torch.long),
+                "prior_candidate_teacher_version": torch.full(shape, 3, dtype=torch.long),
+                "prior_policy_version": torch.full(shape, 100, dtype=torch.long),
+                "prior_motion_id": torch.tensor([0, 1], dtype=torch.long).reshape(shape),
+                "prior_generation": torch.tensor([1000, 1001], dtype=torch.long).reshape(shape),
+            }
+
+        def _valid_slot_mask(self):
+            return torch.ones(2, 1, dtype=torch.bool)
+
+        def set_fields_at_indices(self, idxs, values, *, expected_generation):
+            actual = self.storage["prior_generation"][idxs]
+            keep = actual.reshape(-1).eq(expected_generation.reshape(-1))
+            for key, value in values.items():
+                target = self.storage[key][idxs]
+                self.storage[key][tuple(index[keep] for index in idxs)] = value.reshape_as(target)[keep]
+            return int(keep.sum().item())
+
+    class _Expert:
+        motion_ids = [0, 1]
+        file_names = ["walk1_subject1", "fallAndGetUp2_subject2"]
+
+    replay = _Replay()
+    agent = FBcprAuxAgent.__new__(FBcprAuxAgent)
+    agent.cfg = SimpleNamespace(
+        train=SimpleNamespace(
+            selective_prior_candidate_min_age_local_steps=100,
+            selective_prior_max_policy_version_age=8192,
+        )
+    )
+    agent._selective_prior_state = SelectivePriorState(
+        gate_teacher_version=3,
+        shadow_building=1,
+        policy_version=200,
+    )
+
+    promoted = agent._promote_mature_shadow_candidates(replay, step=200, expert_buffer=_Expert())
+
+    assert promoted == 1
+    assert replay.storage["prior_label"][:, 0, 0].tolist() == [PriorLabel.VALIDATED, PriorLabel.CANDIDATE]
+    assert replay.storage["prior_label_step"][0, 0, 0].item() == 200
+    assert replay.storage["prior_candidate_step"][0, 0, 0].item() == 0
+
+
 def test_selective_discriminator_uses_raw_logits_and_effective_class_mass() -> None:
     class _Discriminator(torch.nn.Module):
         def __init__(self) -> None:
@@ -529,6 +615,8 @@ def test_selective_discriminator_uses_raw_logits_and_effective_class_mass() -> N
 
     expected = 0.50 * 0.125 + 0.33 * 0.5 * 0.125 + 0.17 * 0.125
     assert metrics["disc/data_loss"].item() == pytest.approx(expected)
+    assert metrics["disc/effective_validated_mass"].item() == pytest.approx(0.33 * 0.5)
+    assert metrics["disc/effective_bad_mass"].item() == pytest.approx(0.17)
 
 
 def test_only_heldout_calibration_updates_d_readiness() -> None:
@@ -673,6 +761,7 @@ def test_delayed_gate_promotes_only_same_context_exact_tracking_windows() -> Non
     agent._gate_backward_teacher = _IdentityTeacher()
     agent._gate_obs_normalizer = _IdentityNormalizer()
     agent._selective_prior_state = SelectivePriorState()
+    agent._last_selective_candidate_promotion_step = 0
     agent._last_selective_mask_step = None
     agent._cached_selective_masks = None
     agent._last_selective_gate_step = None
@@ -752,6 +841,7 @@ def test_bootstrap_phase_trains_main_objectives_but_not_prior_branch() -> None:
         aux_rewards_scaling={"safe": 1.0},
     )
     agent._selective_prior_state = SelectivePriorState()
+    agent._last_selective_candidate_promotion_step = 0
     agent._last_selective_mask_step = None
     agent._cached_selective_masks = None
     agent._refresh_selective_prior_labels = lambda *_args, **_kwargs: {}
@@ -799,3 +889,54 @@ def test_fb_depth_selective_prior_preset_keeps_main_stream_lsgan_contract() -> N
     assert config.train.discriminator_loss == "lsgan"
     assert config.train.discriminator_reward == "amp"
     assert config.model.heading_context_enabled
+
+
+def test_frozen_audit_rejects_context_or_reference_discontinuity() -> None:
+    source = np.full((3, 4), 2, dtype=np.int64)
+    context = np.full((3, 4), 7, dtype=np.int64)
+    motion = np.full((3, 4), 11, dtype=np.int64)
+    reference = np.tile(np.arange(20, 24, dtype=np.int64), (3, 1))
+    done = np.zeros((3, 4), dtype=np.bool_)
+    context[1, -1] = 8
+    reference[2, 2] = 99
+
+    valid = validate_exact_tracking_windows(
+        source=source,
+        context_id=context,
+        motion_id=motion,
+        reference_index=reference,
+        transition_done=done,
+    )
+
+    assert valid.tolist() == [True, False, False]
+
+
+def test_frozen_gate_good_bad_conflict_is_not_positive() -> None:
+    cosine = torch.tensor(
+        [
+            [0.9, 0.9],
+            [0.9, 0.9],
+            [-0.4, -0.4],
+        ]
+    )
+    heading = torch.zeros(3, 4)
+    pathology = torch.zeros(3, 4, dtype=torch.bool)
+    pathology[1, 0] = True
+    thresholds = GateThresholds(
+        good_cosine_mean=0.75,
+        good_cosine_min=0.35,
+        bad_cosine_mean=0.0,
+        bad_sustain_fraction=0.5,
+    )
+
+    good, bad_local, semantic_mean, semantic_min = classify_gate_windows(
+        cosine=cosine,
+        heading_cost=heading,
+        pathology=pathology,
+        thresholds=thresholds,
+    )
+
+    assert good.tolist() == [True, False, False]
+    assert bad_local.any(dim=1).tolist() == [False, True, True]
+    torch.testing.assert_close(semantic_mean, torch.tensor([0.9, 0.9, -0.4]))
+    torch.testing.assert_close(semantic_min, torch.tensor([0.9, 0.9, -0.4]))
