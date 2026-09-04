@@ -18,6 +18,7 @@ from humanoidverse.agents.selective_prior import (
     ReferenceProvenanceBatch,
     SelectivePriorState,
     TemporalEncodingContract,
+    active_coverage_failure_update,
     active_finalized_mask,
     actor_prior_interior_mask,
     future_window_means,
@@ -502,6 +503,94 @@ def test_shadow_refresh_uses_policy_update_clock_before_active_support_expires()
     # The next SHADOW starts halfway through the 8192-update ACTIVE validity
     # horizon, rather than after 4096 collector steps (=65536 updates).
     assert state.policy_version - state.last_bank_swap_policy_version < 8192
+
+
+def test_active_coverage_hysteresis_tolerates_transient_ring_overwrite_only_when_operational() -> None:
+    streak, reset = active_coverage_failure_update(
+        ready=False,
+        operational=True,
+        failure_streak=0,
+        grace_updates=3,
+    )
+    assert (streak, reset) == (1, False)
+    streak, reset = active_coverage_failure_update(
+        ready=False,
+        operational=True,
+        failure_streak=streak,
+        grace_updates=3,
+    )
+    assert (streak, reset) == (2, False)
+    streak, reset = active_coverage_failure_update(
+        ready=False,
+        operational=True,
+        failure_streak=streak,
+        grace_updates=3,
+    )
+    assert (streak, reset) == (3, True)
+    assert active_coverage_failure_update(
+        ready=True,
+        operational=True,
+        failure_streak=2,
+        grace_updates=3,
+    ) == (0, False)
+    assert active_coverage_failure_update(
+        ready=False,
+        operational=False,
+        failure_streak=0,
+        grace_updates=3,
+    ) == (1, True)
+
+
+def test_shadow_high_watermark_is_stricter_than_active_retention_threshold() -> None:
+    agent = FBcprAuxAgent.__new__(FBcprAuxAgent)
+    agent._model = SimpleNamespace(device="cpu")
+    agent.cfg = SimpleNamespace(
+        train=SimpleNamespace(
+            selective_prior_validated_weight=0.5,
+            selective_prior_min_validated_windows_per_rank=128,
+            selective_prior_min_bad_windows_per_rank=64,
+            selective_prior_min_validated_contexts_per_rank=32,
+            selective_prior_min_bad_contexts_per_rank=16,
+            selective_prior_min_validated_motions_per_rank=4,
+            selective_prior_min_bad_motions_per_rank=4,
+            selective_prior_min_balanced_motion_strata_per_rank=8,
+            selective_prior_min_calibration_validated_windows_per_rank=16,
+            selective_prior_min_calibration_bad_windows_per_rank=8,
+        )
+    )
+    agent._global_min_int = int
+    agent._global_min_float = float
+    balanced_validated = torch.zeros(200, dtype=torch.bool)
+    balanced_validated[:130] = True
+    balanced_bad = torch.zeros(200, dtype=torch.bool)
+    balanced_bad[130:] = True
+    masks = {
+        "balanced_validated": balanced_validated,
+        "balanced_bad": balanced_bad,
+        "balanced_strata_count": torch.tensor(9),
+        "calibration_strata_count": torch.tensor(1),
+        "qd": torch.ones(1, dtype=torch.bool),
+        "actor": torch.ones(1, dtype=torch.bool),
+        "validated_independent": torch.tensor([130, 35, 5]),
+        "bad_independent": torch.tensor([70, 18, 5]),
+        "calibration_validated_independent": torch.tensor([18, 5, 5]),
+        "calibration_bad_independent": torch.tensor([9, 5, 5]),
+        "prior_confidence": torch.ones(200),
+    }
+
+    active_ready, _ = agent._selective_prior_coverage_summary(
+        masks,
+        prefix="active",
+        threshold_scale=1.0,
+    )
+    shadow_ready, _ = agent._selective_prior_coverage_summary(
+        masks,
+        prefix="shadow",
+        threshold_scale=1.25,
+    )
+
+    assert active_ready
+    assert not shadow_ready
 
 
 def test_mature_candidate_promotion_does_not_require_random_slot_rehit_or_promote_getup() -> None:

@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import math
 import typing as tp
 from dataclasses import dataclass
 from typing import Dict
@@ -33,6 +34,7 @@ from ..selective_prior import (
     ReferenceProvenanceBatch,
     SelectivePriorState,
     TemporalEncodingContract,
+    active_coverage_failure_update,
     active_finalized_mask,
     actor_prior_interior_mask,
     approximate_pairwise_auc,
@@ -120,6 +122,12 @@ class FBcprAuxAgentTrainConfig(FBcprAgentTrainConfig):
     selective_prior_min_bad_motions_per_rank: int = 4
     selective_prior_min_calibration_validated_windows_per_rank: int = 16
     selective_prior_min_calibration_bad_windows_per_rank: int = 8
+    # SHADOW must accumulate headroom before becoming ACTIVE because both
+    # banks are views into an overwriting ring replay. ACTIVE retains the
+    # original semantic thresholds and tolerates a short transient dip, but
+    # loses authority immediately if a required optimizer pool is empty.
+    selective_prior_shadow_commit_margin: float = 1.25
+    selective_prior_active_coverage_grace_updates: int = 16
     selective_prior_d_min_updates: int = 512
     selective_prior_d_ready_streak: int = 64
     selective_prior_d_positive_min: float = 0.5
@@ -245,6 +253,10 @@ class FBcprAuxAgent(FBcprAgent):
                 raise ValueError("Selective-prior held-out modulus must be at least two")
             if self.cfg.train.selective_prior_expansion_refresh_updates <= 0:
                 raise ValueError("Selective-prior SHADOW collector cadence must be positive")
+            if self.cfg.train.selective_prior_shadow_commit_margin <= 1.0:
+                raise ValueError("Selective-prior SHADOW commit margin must be greater than one")
+            if self.cfg.train.selective_prior_active_coverage_grace_updates <= 0:
+                raise ValueError("Selective-prior ACTIVE coverage grace must be positive")
             if not (
                 0
                 < self.cfg.train.selective_prior_gate_teacher_refresh_updates
@@ -523,6 +535,7 @@ class FBcprAuxAgent(FBcprAgent):
         state.qd_ready_streak = 0
         state.d_health_failure_streak = 0
         state.qd_health_failure_streak = 0
+        state.active_coverage_failure_streak = 0
         self._activate_prior_coordinate_contract(expert_buffer)
         self._last_selective_mask_step = None
         self._cached_selective_masks = None
@@ -1723,8 +1736,15 @@ class FBcprAuxAgent(FBcprAgent):
         masks: dict[str, torch.Tensor],
         *,
         prefix: str,
+        threshold_scale: float = 1.0,
     ) -> tuple[bool, dict[str, torch.Tensor]]:
         """DDP-global readiness from independent semantic support units."""
+
+        if threshold_scale <= 0.0:
+            raise ValueError("Selective-prior coverage threshold scale must be positive")
+
+        def required(value: int) -> int:
+            return max(1, int(math.ceil(float(value) * float(threshold_scale))))
 
         local_v_frames = int(masks["balanced_validated"].sum().item())
         local_b_frames = int(masks["balanced_bad"].sum().item())
@@ -1765,15 +1785,15 @@ class FBcprAuxAgent(FBcprAgent):
         # weights; requiring the raw replay occupancy ratio to match would
         # make phase reachability depend on the policy's natural failure rate.
         ready = (
-            min_v_windows >= self.cfg.train.selective_prior_min_validated_windows_per_rank
-            and min_b_windows >= self.cfg.train.selective_prior_min_bad_windows_per_rank
-            and min_v_contexts >= self.cfg.train.selective_prior_min_validated_contexts_per_rank
-            and min_b_contexts >= self.cfg.train.selective_prior_min_bad_contexts_per_rank
-            and min_v_motions >= self.cfg.train.selective_prior_min_validated_motions_per_rank
-            and min_b_motions >= self.cfg.train.selective_prior_min_bad_motions_per_rank
-            and min_strata >= self.cfg.train.selective_prior_min_balanced_motion_strata_per_rank
-            and min_cv_windows >= self.cfg.train.selective_prior_min_calibration_validated_windows_per_rank
-            and min_cb_windows >= self.cfg.train.selective_prior_min_calibration_bad_windows_per_rank
+            min_v_windows >= required(self.cfg.train.selective_prior_min_validated_windows_per_rank)
+            and min_b_windows >= required(self.cfg.train.selective_prior_min_bad_windows_per_rank)
+            and min_v_contexts >= required(self.cfg.train.selective_prior_min_validated_contexts_per_rank)
+            and min_b_contexts >= required(self.cfg.train.selective_prior_min_bad_contexts_per_rank)
+            and min_v_motions >= required(self.cfg.train.selective_prior_min_validated_motions_per_rank)
+            and min_b_motions >= required(self.cfg.train.selective_prior_min_bad_motions_per_rank)
+            and min_strata >= required(self.cfg.train.selective_prior_min_balanced_motion_strata_per_rank)
+            and min_cv_windows >= required(self.cfg.train.selective_prior_min_calibration_validated_windows_per_rank)
+            and min_cb_windows >= required(self.cfg.train.selective_prior_min_calibration_bad_windows_per_rank)
             and min_calibration_strata > 0
             and min_qd > 0
             and min_actor > 0
@@ -1802,6 +1822,7 @@ class FBcprAuxAgent(FBcprAgent):
             f"prior/{prefix}_global_min_effective_validated_mass": min_v_mass,
             f"prior/{prefix}_global_min_effective_bad_mass": min_b_mass,
             f"prior/{prefix}_effective_validated_bad_ratio": ratio,
+            f"prior/{prefix}_coverage_threshold_scale": threshold_scale,
             f"prior/{prefix}_coverage_ready": float(ready),
         }
         return ready, {
@@ -1822,13 +1843,20 @@ class FBcprAuxAgent(FBcprAgent):
         if expert_buffer is None:
             raise RuntimeError("Selective-prior masks require expert provenance storage")
         shadow_masks = self._selective_prior_shadow_masks(replay, step, expert_buffer=expert_buffer)
-        shadow_ready, metrics = self._selective_prior_coverage_summary(shadow_masks, prefix="shadow")
+        shadow_ready, metrics = self._selective_prior_coverage_summary(
+            shadow_masks,
+            prefix="shadow",
+            threshold_scale=self.cfg.train.selective_prior_shadow_commit_margin,
+        )
         state = self._selective_prior_state
         active_masks = None
         active_ready = False
         if state.phase_enum != PriorPhase.BOOTSTRAP and state.bank_version > 0:
             active_masks = self._selective_prior_active_masks(replay, step, expert_buffer=expert_buffer)
-            active_ready, active_metrics = self._selective_prior_coverage_summary(active_masks, prefix="active")
+            active_ready, active_metrics = self._selective_prior_coverage_summary(
+                active_masks,
+                prefix="active",
+            )
             metrics.update(active_metrics)
 
         should_swap = (
@@ -1843,27 +1871,67 @@ class FBcprAuxAgent(FBcprAgent):
             self._commit_shadow_prior_bank(replay, step=step, expert_buffer=expert_buffer)
             state = self._selective_prior_state
             active_masks = self._selective_prior_active_masks(replay, step, expert_buffer=expert_buffer)
-            active_ready, active_metrics = self._selective_prior_coverage_summary(active_masks, prefix="active")
+            active_ready, active_metrics = self._selective_prior_coverage_summary(
+                active_masks,
+                prefix="active",
+            )
             metrics.update(active_metrics)
             metrics["prior/bank_swapped"] = torch.ones((), device=self.device)
         elif state.phase_enum != PriorPhase.BOOTSTRAP and not active_ready:
-            # UNKNOWN is no opinion, therefore stale/disappearing ACTIVE
-            # support cannot be replaced by terminal targets or stale Q_D.
-            self.reset_selective_prior_to_bootstrap(reason="active_bank_coverage_degraded")
-            state = self._selective_prior_state
-            active_masks = None
+            operational = self._selective_prior_operational(active_masks, state.phase_enum)
+            streak, should_reset = active_coverage_failure_update(
+                ready=False,
+                operational=operational,
+                failure_streak=state.active_coverage_failure_streak,
+                grace_updates=self.cfg.train.selective_prior_active_coverage_grace_updates,
+            )
+            state.active_coverage_failure_streak = streak
+            if should_reset:
+                # UNKNOWN is no opinion, therefore genuinely unusable or
+                # persistently degraded ACTIVE support cannot be replaced by
+                # terminal targets or stale Q_D.
+                reason = "active_bank_not_operational" if not operational else "active_bank_coverage_degraded"
+                self.reset_selective_prior_to_bootstrap(reason=reason)
+                state = self._selective_prior_state
+                active_masks = None
+        elif state.phase_enum != PriorPhase.BOOTSTRAP:
+            state.active_coverage_failure_streak = 0
 
         metrics["prior/phase"] = torch.tensor(float(state.phase), device=self.device)
         metrics["prior/active_bank_version"] = torch.tensor(float(state.bank_version), device=self.device)
         metrics["prior/active_teacher_version"] = torch.tensor(float(state.active_teacher_version), device=self.device)
         metrics["prior/shadow_teacher_version"] = torch.tensor(float(state.gate_teacher_version), device=self.device)
         metrics["prior/shadow_building"] = torch.tensor(float(state.shadow_building), device=self.device)
+        metrics["prior/active_coverage_failure_streak"] = torch.tensor(
+            float(state.active_coverage_failure_streak), device=self.device
+        )
         self._last_selective_mask_step = int(step)
         # BOOTSTRAP never consumes SHADOW directly. Return it only as a shape-
         # compatible diagnostic view; downstream phase checks keep D/Q_D off.
         masks = active_masks if active_masks is not None else shadow_masks
         self._cached_selective_masks = masks
         return masks, metrics
+
+    def _selective_prior_operational(
+        self,
+        masks: dict[str, torch.Tensor] | None,
+        phase: PriorPhase,
+    ) -> bool:
+        """Whether every rank can safely sample the currently enabled branch."""
+
+        if masks is None:
+            return False
+        locally_operational = (
+            bool(masks["balanced_validated"].any())
+            and bool(masks["balanced_bad"].any())
+            and bool(masks["calibration_validated"].any())
+            and bool(masks["calibration_bad"].any())
+        )
+        if phase >= PriorPhase.FIT_QD:
+            locally_operational = locally_operational and bool(masks["qd"].any())
+        if phase >= PriorPhase.ACTOR_PRIOR:
+            locally_operational = locally_operational and bool(masks["actor"].any())
+        return self._global_all(locally_operational)
 
     def _selective_expert_split_masks(self, expert_buffer) -> tuple[torch.Tensor, torch.Tensor]:
         motion_ids = expert_buffer.storage["motion_id"].reshape(-1).to(torch.long)

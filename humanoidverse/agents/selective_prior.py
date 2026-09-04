@@ -275,6 +275,7 @@ class SelectivePriorState:
     qd_ready_streak: int = 0
     d_health_failure_streak: int = 0
     qd_health_failure_streak: int = 0
+    active_coverage_failure_streak: int = 0
 
     def state_dict(self) -> dict[str, int]:
         return {key: int(value) for key, value in asdict(self).items()}
@@ -316,6 +317,32 @@ def shadow_refresh_due(
         and not bool(shadow_building)
         and int(policy_version) - int(last_bank_swap_policy_version) >= int(refresh_policy_updates)
     )
+
+
+def active_coverage_failure_update(
+    *,
+    ready: bool,
+    operational: bool,
+    failure_streak: int,
+    grace_updates: int,
+) -> tuple[int, bool]:
+    """Apply hysteresis to ACTIVE-bank coverage health.
+
+    Shadow admission deliberately uses a higher watermark than ACTIVE
+    retention. Ring overwrite can otherwise remove one just-admitted window
+    on the next collector step and immediately destroy a healthy bank.
+    Operational loss is still fail-closed with no grace because a required
+    D/Q_D minibatch could no longer be sampled safely.
+    """
+
+    if grace_updates <= 0:
+        raise ValueError("grace_updates must be positive")
+    if ready:
+        return 0, False
+    next_streak = int(failure_streak) + 1
+    if not operational:
+        return next_streak, True
+    return next_streak, next_streak >= int(grace_updates)
 
 
 def finalized_mask(labels: torch.Tensor) -> torch.Tensor:
@@ -457,6 +484,7 @@ __all__ = [
     "SelectivePriorState",
     "TemporalEncodingContract",
     "active_finalized_mask",
+    "active_coverage_failure_update",
     "actor_prior_interior_mask",
     "approximate_pairwise_auc",
     "behavior_family_from_name",
