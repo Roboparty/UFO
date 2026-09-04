@@ -134,13 +134,14 @@ def test_tracking_context_owns_compiled_sampler_indices() -> None:
         project_z=lambda z: z,
     )
     agent.cfg = SimpleNamespace(model=SimpleNamespace(seq_length=1))
-    *_, reference_index, _ = agent._sample_tracking_context(
+    _, _, _, reference_index, reference_horizon, _ = agent._sample_tracking_context(
         {"expert_slicer": ExpertSlicer()},
         batch_dim=1,
         traj_length=2,
     )
     sampled_indices.fill_(99)
     assert reference_index.reshape(-1).tolist() == [3, 4]
+    assert reference_horizon.reshape(-1).tolist() == [1, 1]
 
 def test_qh_continuation_stops_at_tracking_context_boundary() -> None:
     agent = FBAgent.__new__(FBAgent)

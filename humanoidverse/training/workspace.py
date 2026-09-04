@@ -265,6 +265,12 @@ def _trajectory_output_keys(agent: Agent) -> list[str]:
                 "next_root_heading_xy",
                 "prior_motion_id",
                 "prior_reference_index",
+                "prior_reference_horizon",
+                "prior_next_motion_id",
+                "prior_next_reference_index",
+                "prior_next_reference_horizon",
+                "prior_terrain_family",
+                "prior_terrain_difficulty",
                 "prior_z_encoder_version",
             ]
         )
@@ -279,6 +285,11 @@ def _trajectory_output_keys(agent: Agent) -> list[str]:
                 "prior_candidate_step",
                 "prior_candidate_teacher_version",
                 "prior_policy_version",
+                "prior_active_label",
+                "prior_active_label_step",
+                "prior_active_teacher_version",
+                "prior_active_confidence",
+                "prior_active_bank_version",
             ]
         )
     return keys
@@ -925,6 +936,22 @@ class Workspace:
         core = getattr(vector_env, "_env", vector_env)
         return root_heading_xy(core.base_quat.to(device=self.agent.device, dtype=torch.float32))
 
+    def _collector_terrain_provenance(self, vector_env) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the current physical tile family/row, never reset assignment."""
+
+        core = getattr(vector_env, "_env", vector_env)
+        num_envs = int(getattr(core, "num_envs", self.cfg.online_parallel_envs))
+        unavailable = torch.full((num_envs, 1), -1, device=self.agent.device, dtype=torch.long)
+        if not getattr(core, "terrain_enabled", False):
+            return unavailable, unavailable.clone()
+        rows, _cols, inside = core._current_terrain_tiles()
+        family = core._current_terrain_type_ids().to(device=self.agent.device, dtype=torch.long)
+        rows = rows.to(device=self.agent.device, dtype=torch.long)
+        inside = inside.to(device=self.agent.device, dtype=torch.bool)
+        family = torch.where(inside, family, torch.full_like(family, -1))
+        difficulty = torch.where(inside, rows, torch.full_like(rows, -1))
+        return family.unsqueeze(-1), difficulty.unsqueeze(-1)
+
     def _attach_rollout_heading(
         self,
         obs: dict[str, torch.Tensor],
@@ -948,6 +975,8 @@ class Workspace:
         state: RolloutContextState,
         step_count: torch.Tensor,
         current_heading_xy: torch.Tensor | None,
+        current_terrain_family: torch.Tensor | None,
+        current_terrain_difficulty: torch.Tensor | None,
         new_td: dict[str, tp.Any],
         new_terminated: np.ndarray,
         new_truncated: np.ndarray,
@@ -963,6 +992,10 @@ class Workspace:
         next_root_heading = self._collector_root_heading_xy(vector_env)
         next_target, next_valid = self.agent.next_rollout_heading_target(state, step_count)
         next_z = self.agent.next_rollout_z(state, step_count)
+        next_motion_id, next_reference_index, next_reference_horizon = self.agent.next_rollout_provenance(
+            state,
+            step_count,
+        )
         next_heading = heading_observation(next_root_heading, next_target, next_valid)
         done = torch.as_tensor(
             np.logical_or(new_terminated, new_truncated),
@@ -1003,6 +1036,18 @@ class Workspace:
             "prior_reference_index": (
                 state.reference_index if state.reference_index is not None else torch.full_like(state.context_id, -1)
             ),
+            "prior_reference_horizon": (
+                state.reference_horizon if state.reference_horizon is not None else torch.zeros_like(state.context_id)
+            ),
+            "prior_next_motion_id": next_motion_id,
+            "prior_next_reference_index": next_reference_index,
+            "prior_next_reference_horizon": next_reference_horizon,
+            "prior_terrain_family": (
+                current_terrain_family if current_terrain_family is not None else torch.full_like(state.context_id, -1)
+            ),
+            "prior_terrain_difficulty": (
+                current_terrain_difficulty if current_terrain_difficulty is not None else torch.full_like(state.context_id, -1)
+            ),
             "prior_z_encoder_version": (
                 state.z_encoder_version if state.z_encoder_version is not None else torch.full_like(state.context_id, -1)
             ),
@@ -1033,6 +1078,7 @@ class Workspace:
             )
             step_count = obs.pop("time")
             current_root_heading = self._collector_root_heading_xy(self.prior_env)
+            current_terrain_family, current_terrain_difficulty = self._collector_terrain_provenance(self.prior_env)
             state.rollout = self._advance_rollout_state(
                 state.rollout,
                 step_count,
@@ -1066,6 +1112,8 @@ class Workspace:
             state=state.rollout,
             step_count=step_count,
             current_heading_xy=current_root_heading,
+            current_terrain_family=current_terrain_family,
+            current_terrain_difficulty=current_terrain_difficulty,
             new_td=new_td,
             new_terminated=new_terminated,
             new_truncated=new_truncated,
@@ -1304,6 +1352,15 @@ class Workspace:
                 self.cfg.agent,
                 device=self.cfg.buffer_device,
             )
+        # Provenance contracts must identify the exact expert coordinate
+        # source even when persistent expert-buffer caching is disabled.
+        if not hasattr(expert_buffer, "dataset_fingerprint"):
+            _cache_dir, dataset_fingerprint, _metadata = expert_buffer_cache_spec(
+                self.train_env._env,
+                self.cfg.agent,
+                cache_root=self.cfg.expert_buffer_cache_root,
+            )
+            expert_buffer.dataset_fingerprint = str(dataset_fingerprint)
         expert_priorities = source_mixed_expert_priorities(
             self.train_env._env._motion_lib,
             expert_buffer.motion_ids,
@@ -1400,6 +1457,7 @@ class Workspace:
             )
         if expert_buffer is None:
             raise RuntimeError("Expert buffer cache initialization did not produce a buffer")
+        expert_buffer.dataset_fingerprint = str(fingerprint)
         return expert_buffer
 
     def train_online(self) -> None:
@@ -1517,10 +1575,21 @@ class Workspace:
                 ("prior_confidence", torch.float32),
                 ("prior_generation", torch.int64),
                 ("prior_reference_index", torch.int64),
+                ("prior_reference_horizon", torch.int64),
+                ("prior_next_motion_id", torch.int64),
+                ("prior_next_reference_index", torch.int64),
+                ("prior_next_reference_horizon", torch.int64),
+                ("prior_terrain_family", torch.int64),
+                ("prior_terrain_difficulty", torch.int64),
                 ("prior_z_encoder_version", torch.int64),
                 ("prior_candidate_step", torch.int64),
                 ("prior_candidate_teacher_version", torch.int64),
                 ("prior_policy_version", torch.int64),
+                ("prior_active_label", torch.int8),
+                ("prior_active_label_step", torch.int64),
+                ("prior_active_teacher_version", torch.int64),
+                ("prior_active_confidence", torch.float32),
+                ("prior_active_bank_version", torch.int64),
             ):
                 migrated |= replay_buffer["train"].ensure_scalar_field(
                     key,
@@ -1531,6 +1600,10 @@ class Workspace:
                         in {
                             "prior_motion_id",
                             "prior_reference_index",
+                            "prior_next_motion_id",
+                            "prior_next_reference_index",
+                            "prior_terrain_family",
+                            "prior_terrain_difficulty",
                             "prior_z_encoder_version",
                             "prior_policy_version",
                         }
@@ -1831,6 +1904,10 @@ class Workspace:
                 # TODO consistency with obs_space: remove time assigned by TimeAwareObservationWrapper
                 step_count = obs.pop("time")
                 current_root_heading = self._collector_root_heading_xy(train_env) if self._heading_context_enabled else None
+                if bool(getattr(self.cfg.agent.train, "selective_prior_enabled", False)):
+                    current_terrain_family, current_terrain_difficulty = self._collector_terrain_provenance(train_env)
+                else:
+                    current_terrain_family = current_terrain_difficulty = None
 
                 history_context = None
                 if "history" in obs:
@@ -1907,6 +1984,8 @@ class Workspace:
                 state=main_rollout_state,
                 step_count=step_count,
                 current_heading_xy=current_root_heading,
+                current_terrain_family=current_terrain_family,
+                current_terrain_difficulty=current_terrain_difficulty,
                 new_td=new_td,
                 new_terminated=new_terminated,
                 new_truncated=new_truncated,
@@ -2041,6 +2120,14 @@ class Workspace:
                             int(self.agent._selective_prior_state.policy_version),
                             dtype=np.int64,
                         ),
+                        # ACTIVE and SHADOW are separate banks. New ring slots
+                        # are unknown to the immutable active prior until the
+                        # next globally synchronized atomic bank swap.
+                        "prior_active_label": np.zeros(metadata_shape, dtype=np.int8),
+                        "prior_active_label_step": np.zeros(metadata_shape, dtype=np.int64),
+                        "prior_active_teacher_version": np.zeros(metadata_shape, dtype=np.int64),
+                        "prior_active_confidence": np.zeros(metadata_shape, dtype=np.float32),
+                        "prior_active_bank_version": np.zeros(metadata_shape, dtype=np.int64),
                         # Collection time is the ring generation. Delayed gate
                         # writes are discarded if this slot has been replaced.
                         "prior_generation": np.full(

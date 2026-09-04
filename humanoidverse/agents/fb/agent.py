@@ -51,6 +51,8 @@ class RolloutContextState:
     tracking_motion_id: torch.Tensor | None = None
     reference_index: torch.Tensor | None = None
     tracking_reference_index: torch.Tensor | None = None
+    reference_horizon: torch.Tensor | None = None
+    tracking_reference_horizon: torch.Tensor | None = None
     z_encoder_version: torch.Tensor | None = None
     tracking_z_encoder_version: torch.Tensor | None = None
 
@@ -171,8 +173,6 @@ class FBAgent:
             average_gradients(parameters)
 
     def _run_actor_update(self, *args, **kwargs):
-        if not getattr(self, "_distributed_training_stages", None):
-            return self.update_actor(*args, **kwargs)
         dependencies = [self._model._forward_map]
         if hasattr(self._model, "_critic"):
             dependencies.append(self._model._critic)
@@ -180,6 +180,8 @@ class FBAgent:
             dependencies.append(self._model._aux_critic)
         if hasattr(self._model, "_heading_critic"):
             dependencies.append(self._model._heading_critic)
+        # Actor losses need dQ/da, never critic/B parameter gradients. Apply
+        # the same isolation in single-process and DDP modes.
         with _without_parameter_gradients(*dependencies):
             return self.update_actor(*args, **kwargs)
 
@@ -480,6 +482,11 @@ class FBAgent:
             raise RuntimeError("Exact tracking contexts require expert motion_id metadata")
         motion_id = batch["motion_id"].to(device=self.device, dtype=torch.long).view(batch_dim, traj_length, -1)[..., :1]
         reference_index = sampled_idxs[0].to(device=self.device, dtype=torch.long).view(batch_dim, traj_length, 1)
+        positions = torch.arange(traj_length, device=self.device, dtype=torch.long)
+        reference_horizon = torch.clamp(
+            traj_length - positions,
+            max=int(self.cfg.model.seq_length),
+        ).view(1, traj_length, 1).expand(batch_dim, -1, -1)
         selective_state = getattr(self, "_selective_prior_state", None)
         encoder_version = int(getattr(selective_state, "behavior_encoder_version", 0))
         encoder_version = torch.full_like(reference_index, encoder_version)
@@ -492,6 +499,7 @@ class FBAgent:
             heading_reference_xy.clone(),
             motion_id.clone(),
             reference_index.clone(),
+            reference_horizon.clone(),
             encoder_version.clone(),
         )
 
@@ -530,6 +538,8 @@ class FBAgent:
         tracking_motion_id = state.tracking_motion_id
         reference_index = state.reference_index
         tracking_reference_index = state.tracking_reference_index
+        reference_horizon = state.reference_horizon
+        tracking_reference_horizon = state.tracking_reference_horizon
         z_encoder_version = state.z_encoder_version
         tracking_z_encoder_version = state.tracking_z_encoder_version
 
@@ -550,6 +560,7 @@ class FBAgent:
             source_type = torch.full((num_envs, 1), HEADING_SOURCE_INVALID, device=device, dtype=torch.long)
             motion_id = torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
             reference_index = torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
+            reference_horizon = torch.zeros((num_envs, 1), device=device, dtype=torch.long)
             z_encoder_version = torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
             if self.cfg.train.rollout_expert_trajectories:
                 if replay_buffer is None:
@@ -561,6 +572,7 @@ class FBAgent:
                     tracking_heading_reference_xy,
                     tracking_motion_id,
                     tracking_reference_index,
+                    tracking_reference_horizon,
                     tracking_z_encoder_version,
                 ) = self._sample_tracking_context(
                     replay_buffer,
@@ -604,6 +616,11 @@ class FBAgent:
                 if state.reference_index is not None
                 else torch.full((num_envs, 1), -1, device=device, dtype=torch.long)
             )
+            reference_horizon = (
+                state.reference_horizon.to(device).clone()
+                if state.reference_horizon is not None
+                else torch.zeros((num_envs, 1), device=device, dtype=torch.long)
+            )
             z_encoder_version = (
                 state.z_encoder_version.to(device).clone()
                 if state.z_encoder_version is not None
@@ -629,6 +646,7 @@ class FBAgent:
             source_type[reset_random] = HEADING_SOURCE_INVALID
             motion_id[reset_random] = -1
             reference_index[reset_random] = -1
+            reference_horizon[reset_random] = 0
             z_encoder_version[reset_random] = -1
             context_id[reset_random] += 1
 
@@ -641,6 +659,7 @@ class FBAgent:
                 or tracking_heading_target_xy is None
                 or tracking_motion_id is None
                 or tracking_reference_index is None
+                or tracking_reference_horizon is None
                 or tracking_z_encoder_version is None
             ):
                 raise RuntimeError("Expert rollout context was not initialized")
@@ -655,6 +674,7 @@ class FBAgent:
                     refreshed_reference_xy,
                     refreshed_motion_id,
                     refreshed_reference_index,
+                    refreshed_reference_horizon,
                     refreshed_encoder_version,
                 ) = self._sample_tracking_context(
                     replay_buffer,
@@ -675,6 +695,8 @@ class FBAgent:
                 tracking_motion_id[refresh_rows] = refreshed_motion_id
                 tracking_reference_index = tracking_reference_index.clone()
                 tracking_reference_index[refresh_rows] = refreshed_reference_index
+                tracking_reference_horizon = tracking_reference_horizon.clone()
+                tracking_reference_horizon[refresh_rows] = refreshed_reference_horizon
                 tracking_z_encoder_version = tracking_z_encoder_version.clone()
                 tracking_z_encoder_version[refresh_rows] = refreshed_encoder_version
                 context_id[refreshed_env_ids] += 1
@@ -686,6 +708,7 @@ class FBAgent:
             source_type[expert_env_ids] = HEADING_SOURCE_EXACT_TRACKING
             motion_id[expert_env_ids] = tracking_motion_id[rows, mod_time]
             reference_index[expert_env_ids] = tracking_reference_index[rows, mod_time]
+            reference_horizon[expert_env_ids] = tracking_reference_horizon[rows, mod_time]
             z_encoder_version[expert_env_ids] = tracking_z_encoder_version[rows, mod_time]
 
         return RolloutContextState(
@@ -701,6 +724,8 @@ class FBAgent:
             tracking_motion_id=tracking_motion_id,
             reference_index=reference_index,
             tracking_reference_index=tracking_reference_index,
+            reference_horizon=reference_horizon,
+            tracking_reference_horizon=tracking_reference_horizon,
             z_encoder_version=z_encoder_version,
             tracking_z_encoder_version=tracking_z_encoder_version,
         )
@@ -751,6 +776,37 @@ class FBAgent:
             next_z[ids] = state.tracking_z[rows, next_index]
         return next_z
 
+    def next_rollout_provenance(
+        self,
+        state: RolloutContextState,
+        step_count: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return explicit p_{t+1}; never infer it as reference_index + 1."""
+
+        if state.context_id is None:
+            raise RuntimeError("Rollout behavior context is not initialized")
+        num_envs = state.context_id.shape[0]
+        next_motion = torch.full((num_envs, 1), -1, device=self.device, dtype=torch.long)
+        next_reference = torch.full_like(next_motion, -1)
+        next_horizon = torch.zeros_like(next_motion)
+        if (
+            state.expert_env_ids is not None
+            and state.tracking_motion_id is not None
+            and state.tracking_reference_index is not None
+            and state.tracking_reference_horizon is not None
+            and state.expert_env_ids.numel() > 0
+        ):
+            ids = state.expert_env_ids.to(device=self.device, dtype=torch.long)
+            counts = step_count.to(device=self.device, dtype=torch.long).reshape(-1)
+            length = self.cfg.train.rollout_expert_trajectories_length
+            current_index = counts[ids] % length
+            next_index = torch.clamp(current_index + 1, max=length - 1)
+            rows = torch.arange(ids.numel(), device=self.device)
+            next_motion[ids] = state.tracking_motion_id[rows, next_index]
+            next_reference[ids] = state.tracking_reference_index[rows, next_index]
+            next_horizon[ids] = state.tracking_reference_horizon[rows, next_index]
+        return next_motion, next_reference, next_horizon
+
     def rollout_heading_context_continues(
         self,
         state: RolloutContextState,
@@ -789,6 +845,8 @@ class FBAgent:
                 tracking_motion_id=getattr(self, "tracking_motion_id", None),
                 reference_index=getattr(self, "rollout_reference_index", None),
                 tracking_reference_index=getattr(self, "tracking_reference_index", None),
+                reference_horizon=getattr(self, "rollout_reference_horizon", None),
+                tracking_reference_horizon=getattr(self, "tracking_reference_horizon", None),
                 z_encoder_version=getattr(self, "rollout_z_encoder_version", None),
                 tracking_z_encoder_version=getattr(self, "tracking_z_encoder_version", None),
             ),
@@ -806,6 +864,8 @@ class FBAgent:
         self.tracking_motion_id = state.tracking_motion_id
         self.rollout_reference_index = state.reference_index
         self.tracking_reference_index = state.tracking_reference_index
+        self.rollout_reference_horizon = state.reference_horizon
+        self.tracking_reference_horizon = state.tracking_reference_horizon
         self.rollout_z_encoder_version = state.z_encoder_version
         self.tracking_z_encoder_version = state.tracking_z_encoder_version
         assert state.z is not None

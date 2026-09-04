@@ -26,12 +26,21 @@ from ..behavior_context import (
 from ..fb_cpr.agent import FBcprAgent, FBcprAgentTrainConfig
 from ..nn_models import _soft_update_params, eval_mode, weight_init
 from ..selective_prior import (
+    BehaviorFamily,
+    PriorCoordinateContract,
     PriorLabel,
     PriorPhase,
+    ReferenceProvenanceBatch,
     SelectivePriorState,
+    TemporalEncodingContract,
     active_finalized_mask,
     actor_prior_interior_mask,
     approximate_pairwise_auc,
+    behavior_family_from_name,
+    future_window_means,
+    independent_support_counts,
+    masked_temporal_mean,
+    module_state_fingerprint,
     qd_interior_mask,
     resolve_prior_proposals,
 )
@@ -102,6 +111,14 @@ class FBcprAuxAgentTrainConfig(FBcprAgentTrainConfig):
     selective_prior_holdout_modulus: int = 5
     selective_prior_min_calibration_validated_per_rank: int = 256
     selective_prior_min_calibration_bad_per_rank: int = 128
+    selective_prior_min_validated_windows_per_rank: int = 128
+    selective_prior_min_bad_windows_per_rank: int = 64
+    selective_prior_min_validated_contexts_per_rank: int = 32
+    selective_prior_min_bad_contexts_per_rank: int = 16
+    selective_prior_min_validated_motions_per_rank: int = 4
+    selective_prior_min_bad_motions_per_rank: int = 4
+    selective_prior_min_calibration_validated_windows_per_rank: int = 16
+    selective_prior_min_calibration_bad_windows_per_rank: int = 8
     selective_prior_balance_ratio_min: float = 0.5
     selective_prior_balance_ratio_max: float = 2.0
     selective_prior_d_min_updates: int = 512
@@ -203,6 +220,9 @@ class FBcprAuxAgent(FBcprAgent):
         self._gate_backward_teacher = None
         self._gate_obs_normalizer = None
         self._prior_reward_discriminator = None
+        self._prior_backward_map = None
+        self._prior_obs_normalizer = None
+        self._prior_coordinate_contract: PriorCoordinateContract | None = None
         if self._selective_prior_enabled:
             if not self._behavior_prior_enabled:
                 raise ValueError("selective_prior_enabled requires behavior_prior_enabled")
@@ -235,6 +255,10 @@ class FBcprAuxAgent(FBcprAgent):
             self._gate_obs_normalizer.eval().requires_grad_(False)
             self._prior_reward_discriminator = copy.deepcopy(self._model._discriminator)
             self._prior_reward_discriminator.eval().requires_grad_(False)
+            self._prior_backward_map = copy.deepcopy(self._model._target_backward_map)
+            self._prior_backward_map.eval().requires_grad_(False)
+            self._prior_obs_normalizer = copy.deepcopy(self._model._obs_normalizer)
+            self._prior_obs_normalizer.eval().requires_grad_(False)
 
         # prepare parameter list
         self._aux_critic_map_paramlist = tuple(x for x in self._model._aux_critic.parameters())
@@ -290,6 +314,12 @@ class FBcprAuxAgent(FBcprAgent):
             state["gate_obs_normalizer"] = self._gate_obs_normalizer.state_dict()
         if self._prior_reward_discriminator is not None:
             state["prior_reward_discriminator"] = self._prior_reward_discriminator.state_dict()
+        if self._prior_backward_map is not None:
+            state["prior_backward_map"] = self._prior_backward_map.state_dict()
+        if self._prior_obs_normalizer is not None:
+            state["prior_obs_normalizer"] = self._prior_obs_normalizer.state_dict()
+        if self._prior_coordinate_contract is not None:
+            state["prior_coordinate_contract"] = self._prior_coordinate_contract.state_dict()
         return state
 
     def load_extra_training_state_dict(self, state: dict[str, tp.Any]) -> None:
@@ -319,6 +349,43 @@ class FBcprAuxAgent(FBcprAgent):
             return
         self._prior_reward_discriminator.load_state_dict(reward_discriminator_state)
         self._prior_reward_discriminator.eval().requires_grad_(False)
+        prior_backward_state = state.get("prior_backward_map")
+        prior_normalizer_state = state.get("prior_obs_normalizer")
+        prior_contract_state = state.get("prior_coordinate_contract")
+        if self._selective_prior_state.phase_enum == PriorPhase.BOOTSTRAP and prior_contract_state is None:
+            self._prior_coordinate_contract = None
+            return
+        if (
+            prior_backward_state is None
+            or prior_normalizer_state is None
+            or prior_contract_state is None
+            or self._prior_backward_map is None
+            or self._prior_obs_normalizer is None
+        ):
+            self.reset_selective_prior_to_bootstrap(reason="missing_prior_coordinate_contract")
+            return
+        try:
+            prior_contract = PriorCoordinateContract.from_state_dict(prior_contract_state)
+        except (TypeError, ValueError) as exc:
+            self.reset_selective_prior_to_bootstrap(reason=f"invalid_prior_coordinate_contract:{exc}")
+            return
+        if prior_contract.version != self._selective_prior_state.prior_coordinate_version:
+            self.reset_selective_prior_to_bootstrap(reason="prior_coordinate_version_mismatch")
+            return
+        if prior_contract.bank_version != self._selective_prior_state.bank_version:
+            self.reset_selective_prior_to_bootstrap(reason="prior_coordinate_bank_version_mismatch")
+            return
+        self._prior_backward_map.load_state_dict(prior_backward_state)
+        self._prior_backward_map.eval().requires_grad_(False)
+        self._prior_obs_normalizer.load_state_dict(prior_normalizer_state)
+        self._prior_obs_normalizer.eval().requires_grad_(False)
+        if module_state_fingerprint(self._prior_backward_map) != prior_contract.encoder_fingerprint:
+            self.reset_selective_prior_to_bootstrap(reason="prior_encoder_fingerprint_mismatch")
+            return
+        if module_state_fingerprint(self._prior_obs_normalizer) != prior_contract.normalizer_fingerprint:
+            self.reset_selective_prior_to_bootstrap(reason="prior_normalizer_fingerprint_mismatch")
+            return
+        self._prior_coordinate_contract = prior_contract
 
     def reset_selective_prior_to_bootstrap(self, *, reason: str) -> None:
         if not self._selective_prior_enabled:
@@ -327,6 +394,7 @@ class FBcprAuxAgent(FBcprAgent):
         self._selective_prior_state = SelectivePriorState(
             bank_version=int(previous.bank_version) + 1,
             gate_teacher_version=int(previous.gate_teacher_version),
+            prior_coordinate_version=int(previous.prior_coordinate_version),
             discriminator_version=int(previous.discriminator_version) + 1,
             behavior_encoder_version=int(previous.behavior_encoder_version),
             policy_version=int(previous.policy_version),
@@ -334,6 +402,7 @@ class FBcprAuxAgent(FBcprAgent):
         self._last_selective_gate_step = None
         self._last_selective_mask_step = None
         self._cached_selective_masks = None
+        self._prior_coordinate_contract = None
         print(
             f"[SELECTIVE PRIOR] fail-closed reset to BOOTSTRAP: {reason}",
             flush=True,
@@ -357,6 +426,227 @@ class FBcprAuxAgent(FBcprAgent):
         self._selective_prior_state.discriminator_bank_version = self._selective_prior_state.bank_version
         self._selective_prior_state.qd_bank_version = self._selective_prior_state.bank_version
         self._reset_selective_qd()
+
+    @torch.no_grad()
+    def _start_shadow_prior_bank(self) -> None:
+        """Freeze one verifier coordinate system without disturbing ACTIVE."""
+
+        if self._gate_backward_teacher is None or self._gate_obs_normalizer is None:
+            raise RuntimeError("Selective-prior gate snapshot modules are unavailable")
+        self._gate_backward_teacher.load_state_dict(self._model._target_backward_map.state_dict())
+        self._gate_obs_normalizer.load_state_dict(self._model._obs_normalizer.state_dict())
+        broadcast_module_state(self._gate_backward_teacher, src=0)
+        broadcast_module_state(self._gate_obs_normalizer, src=0)
+        self._gate_backward_teacher.eval().requires_grad_(False)
+        self._gate_obs_normalizer.eval().requires_grad_(False)
+        state = self._selective_prior_state
+        state.gate_teacher_version += 1
+        state.shadow_building = 1
+        state.shadow_started_update = state.update_count
+        self._last_selective_teacher_refresh_update = state.update_count
+        self._last_selective_mask_step = None
+        self._cached_selective_masks = None
+
+    @torch.no_grad()
+    def _commit_shadow_prior_bank(self, replay, *, step: int, expert_buffer) -> None:
+        """Atomically promote finalized SHADOW support to immutable ACTIVE."""
+
+        storage = replay.storage
+        required = {
+            "prior_label",
+            "prior_label_step",
+            "prior_teacher_version",
+            "prior_confidence",
+            "prior_active_label",
+            "prior_active_label_step",
+            "prior_active_teacher_version",
+            "prior_active_confidence",
+            "prior_active_bank_version",
+        }
+        missing = sorted(required.difference(storage))
+        if missing:
+            raise RuntimeError(f"Cannot commit incomplete selective-prior bank: {missing}")
+        shadow = active_finalized_mask(
+            storage["prior_label"].squeeze(-1),
+            storage["prior_label_step"].squeeze(-1),
+            step=step,
+            ttl_steps=self.cfg.train.selective_prior_label_ttl_local_steps,
+        )
+        shadow &= storage["prior_teacher_version"].squeeze(-1).to(torch.long).eq(
+            int(self._selective_prior_state.gate_teacher_version)
+        )
+        shadow &= replay._valid_slot_mask()
+        state = self._selective_prior_state
+        new_bank_version = int(state.bank_version) + 1
+        storage["prior_active_label"].zero_()
+        storage["prior_active_label_step"].zero_()
+        storage["prior_active_teacher_version"].zero_()
+        storage["prior_active_confidence"].zero_()
+        storage["prior_active_bank_version"].zero_()
+        storage["prior_active_label"][..., 0][shadow] = storage["prior_label"][..., 0][shadow]
+        storage["prior_active_label_step"][..., 0][shadow] = storage["prior_label_step"][..., 0][shadow]
+        storage["prior_active_teacher_version"][..., 0][shadow] = int(state.gate_teacher_version)
+        storage["prior_active_confidence"][..., 0][shadow] = storage["prior_confidence"][..., 0][shadow]
+        storage["prior_active_bank_version"][..., 0][shadow] = new_bank_version
+        state.bank_version = new_bank_version
+        state.active_teacher_version = int(state.gate_teacher_version)
+        state.shadow_building = 0
+        state.last_bank_swap_update = state.update_count
+        state.set_phase(PriorPhase.FIT_D)
+        state.discriminator_bank_version = -1
+        state.qd_bank_version = -1
+        state.qd_reward_version = -1
+        state.discriminator_update_count = 0
+        state.qd_update_count = 0
+        state.d_ready_streak = 0
+        state.qd_ready_streak = 0
+        state.d_health_failure_streak = 0
+        state.qd_health_failure_streak = 0
+        self._activate_prior_coordinate_contract(expert_buffer)
+        self._last_selective_mask_step = None
+        self._cached_selective_masks = None
+
+    @torch.no_grad()
+    def _activate_prior_coordinate_contract(self, expert_buffer) -> None:
+        """Atomically bind frozen B/N/temporal semantics to the active bank."""
+
+        if self._gate_backward_teacher is None or self._gate_obs_normalizer is None:
+            raise RuntimeError("Cannot activate a prior without a frozen gate coordinate snapshot")
+        if self._prior_backward_map is None or self._prior_obs_normalizer is None:
+            raise RuntimeError("Prior coordinate modules are not initialized")
+        dataset_fingerprint = getattr(expert_buffer, "dataset_fingerprint", None)
+        if not isinstance(dataset_fingerprint, str) or not dataset_fingerprint:
+            raise RuntimeError("Expert replay is missing its dataset fingerprint")
+        self._prior_backward_map.load_state_dict(self._gate_backward_teacher.state_dict())
+        self._prior_obs_normalizer.load_state_dict(self._gate_obs_normalizer.state_dict())
+        # Every DDP rank must use one identical reward coordinate system even
+        # though online normalizer statistics are collected rank-locally.
+        broadcast_module_state(self._prior_backward_map, src=0)
+        broadcast_module_state(self._prior_obs_normalizer, src=0)
+        self._prior_backward_map.eval().requires_grad_(False)
+        self._prior_obs_normalizer.eval().requires_grad_(False)
+        state = self._selective_prior_state
+        state.prior_coordinate_version += 1
+        temporal = TemporalEncodingContract(sequence_length=int(self.cfg.model.seq_length))
+        self._prior_coordinate_contract = PriorCoordinateContract(
+            version=state.prior_coordinate_version,
+            bank_version=state.bank_version,
+            encoder_fingerprint=module_state_fingerprint(self._prior_backward_map),
+            normalizer_fingerprint=module_state_fingerprint(self._prior_obs_normalizer),
+            expert_dataset_fingerprint=dataset_fingerprint,
+            temporal_contract=temporal.state_dict(),
+        )
+
+    @staticmethod
+    def _reference_provenance_from_batch(
+        batch: dict[str, tp.Any],
+        *,
+        device: str | torch.device,
+        require_next: bool,
+    ) -> ReferenceProvenanceBatch:
+        def field(name: str) -> torch.Tensor | None:
+            value = batch.get(name)
+            return None if value is None else value.to(device=device, dtype=torch.long).reshape(-1, 1)
+
+        provenance = ReferenceProvenanceBatch(
+            motion_id=field("prior_motion_id"),
+            reference_index=field("prior_reference_index"),
+            reference_horizon=field("prior_reference_horizon"),
+            next_motion_id=field("prior_next_motion_id"),
+            next_reference_index=field("prior_next_reference_index"),
+            next_reference_horizon=field("prior_next_reference_horizon"),
+            context_id=field("heading_context_id"),
+            source_type=field("heading_source_type"),
+        )
+        if provenance.motion_id is None or provenance.reference_index is None or provenance.reference_horizon is None:
+            raise RuntimeError("Selective-prior batch is missing exact reference provenance")
+        provenance.validate(require_next=require_next)
+        return provenance
+
+    @torch.no_grad()
+    def encode_provenance(
+        self,
+        provenance: ReferenceProvenanceBatch,
+        *,
+        expert_buffer,
+        encoder: torch.nn.Module,
+        normalizer: torch.nn.Module,
+    ) -> torch.Tensor:
+        """Derive latent coordinates from immutable reference provenance."""
+
+        provenance.validate()
+        contract = TemporalEncodingContract(sequence_length=int(self.cfg.model.seq_length))
+        reference = provenance.reference_index.reshape(-1).to(torch.long)
+        motion = provenance.motion_id.reshape(-1).to(torch.long)
+        horizon = provenance.reference_horizon.reshape(-1).to(torch.long)
+        if bool((horizon > contract.sequence_length).any()):
+            raise ValueError("Reference horizon exceeds the active temporal encoding contract")
+        storage = expert_buffer.storage
+        storage_motion = storage["motion_id"]
+        storage_device = storage_motion.device
+        offsets = torch.arange(contract.sequence_length, device=storage_device, dtype=torch.long)
+        indices = reference.to(storage_device)[:, None] + 1 + offsets[None, :]
+        if bool((indices < 0).any()) or bool((indices >= len(expert_buffer)).any()):
+            raise ValueError("Reference provenance points outside the expert replay")
+        valid = offsets[None, :] < horizon.to(storage_device)[:, None]
+        observed_motion = storage_motion[indices].reshape(indices.shape[0], indices.shape[1], -1)[..., 0]
+        expected_motion = motion.to(storage_device)[:, None].expand_as(observed_motion)
+        if not bool((observed_motion[valid] == expected_motion[valid]).all()):
+            raise ValueError("Reference provenance crosses an expert motion boundary")
+        raw = tree_map(lambda value: value[indices].to(self.device), storage["observation"])
+        flat = tree_map(lambda value: value.flatten(0, 1), raw)
+        with eval_mode(normalizer):
+            normalized = normalizer(flat)
+        with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
+            embeddings = encoder(normalized)
+            embeddings = embeddings.reshape(indices.shape[0], indices.shape[1], -1)
+            encoded = masked_temporal_mean(embeddings, horizon.to(self.device))
+            return self._model.project_z(encoded).detach()
+
+    @torch.no_grad()
+    def encode_prior_provenance(self, provenance: ReferenceProvenanceBatch, *, expert_buffer) -> torch.Tensor:
+        if self._prior_coordinate_contract is None or self._prior_backward_map is None or self._prior_obs_normalizer is None:
+            raise RuntimeError("Active prior coordinate contract is unavailable")
+        if getattr(expert_buffer, "dataset_fingerprint", None) != self._prior_coordinate_contract.expert_dataset_fingerprint:
+            raise RuntimeError("Expert dataset fingerprint does not match the active prior contract")
+        return self.encode_provenance(
+            provenance,
+            expert_buffer=expert_buffer,
+            encoder=self._prior_backward_map,
+            normalizer=self._prior_obs_normalizer,
+        )
+
+    @torch.no_grad()
+    def encode_actor_provenance(self, provenance: ReferenceProvenanceBatch, *, expert_buffer) -> torch.Tensor:
+        """Represent the same p in the current Actor/B coordinate system."""
+
+        return self.encode_provenance(
+            provenance,
+            expert_buffer=expert_buffer,
+            encoder=self._model._backward_map,
+            normalizer=self._model._obs_normalizer,
+        ).detach()
+
+    @torch.no_grad()
+    def encode_expert_with_snapshot(
+        self,
+        next_obs: dict[str, torch.Tensor] | torch.Tensor,
+        *,
+        encoder: torch.nn.Module,
+        normalizer: torch.nn.Module,
+    ) -> torch.Tensor:
+        """Encode sampled expert sequences under an explicit frozen snapshot."""
+
+        with eval_mode(normalizer):
+            normalized = normalizer(next_obs)
+        with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
+            embedded = encoder(normalized)
+            sequence = int(self.cfg.model.seq_length)
+            if embedded.shape[0] % sequence:
+                raise ValueError("Expert snapshot batch must be sequence aligned")
+            embedded = embedded.reshape(-1, sequence, embedded.shape[-1])
+            z = self._model.project_z(embedded.mean(dim=1))
+            return torch.repeat_interleave(z, sequence, dim=0).detach()
 
     @torch.no_grad()
     def _discriminator_conditioning_diagnostics(
@@ -664,7 +954,84 @@ class FBcprAuxAgent(FBcprAgent):
             dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
         return bool(tensor.item())
 
-    def _selective_prior_active_masks(self, replay, step: int) -> dict[str, torch.Tensor]:
+    @staticmethod
+    def _behavior_family_ids(motion_ids: torch.Tensor, expert_buffer=None) -> torch.Tensor:
+        family = torch.full_like(motion_ids, int(BehaviorFamily.OTHER), dtype=torch.long)
+        if expert_buffer is None:
+            return family
+        names = getattr(expert_buffer, "file_names", ())
+        ids = getattr(expert_buffer, "motion_ids", range(len(names)))
+        for motion_id, name in zip(ids, names):
+            family[motion_ids == int(motion_id)] = int(behavior_family_from_name(str(name)))
+        return family
+
+    @staticmethod
+    def _hierarchical_balanced_pair(
+        validated_mask: torch.Tensor,
+        bad_mask: torch.Tensor,
+        *,
+        motion_ids: torch.Tensor,
+        behavior_family: torch.Tensor,
+        terrain_family: torch.Tensor,
+        terrain_difficulty: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Match V/B by motion, then behavior×terrain cell, then behavior."""
+
+        strata = torch.full_like(motion_ids, -1, dtype=torch.long)
+        paired_v = torch.zeros_like(validated_mask, dtype=torch.bool)
+        paired_b = torch.zeros_like(bad_mask, dtype=torch.bool)
+
+        def common_values(key, vmask, bmask):
+            v = torch.unique(key[vmask])
+            b = torch.unique(key[bmask])
+            return v[torch.isin(v, b)]
+
+        valid_motion = motion_ids >= 0
+        common_motion = common_values(motion_ids, validated_mask & valid_motion, bad_mask & valid_motion)
+        exact = torch.isin(motion_ids, common_motion)
+        exact_v = validated_mask & exact
+        exact_b = bad_mask & exact
+        paired_v |= exact_v
+        paired_b |= exact_b
+        strata[exact_v | exact_b] = 1_000_000_000 + motion_ids[exact_v | exact_b]
+
+        remaining_v = validated_mask & ~paired_v
+        remaining_b = bad_mask & ~paired_b
+        terrain = terrain_family.clamp_min(0)
+        difficulty = terrain_difficulty.clamp_min(0)
+        cell = behavior_family * 1_000_000 + terrain * 1_000 + difficulty
+        common_cell = common_values(cell, remaining_v, remaining_b)
+        cell_match = torch.isin(cell, common_cell)
+        cell_v = remaining_v & cell_match
+        cell_b = remaining_b & cell_match
+        paired_v |= cell_v
+        paired_b |= cell_b
+        strata[cell_v | cell_b] = 100_000_000 + cell[cell_v | cell_b]
+
+        remaining_v = validated_mask & ~paired_v
+        remaining_b = bad_mask & ~paired_b
+        common_family = common_values(behavior_family, remaining_v, remaining_b)
+        family_match = torch.isin(behavior_family, common_family)
+        family_v = remaining_v & family_match
+        family_b = remaining_b & family_match
+        paired_v |= family_v
+        paired_b |= family_b
+        strata[family_v | family_b] = behavior_family[family_v | family_b]
+        active_strata = torch.unique(strata[(paired_v | paired_b) & (strata >= 0)])
+        return paired_v, paired_b, active_strata, strata
+
+    def _selective_prior_bank_masks(
+        self,
+        replay,
+        step: int,
+        *,
+        bank: str,
+        expert_buffer=None,
+    ) -> dict[str, torch.Tensor]:
+        """Build sampling/readiness views for immutable ACTIVE or mutable SHADOW."""
+
+        if bank not in {"active", "shadow"}:
+            raise ValueError(f"Unknown selective-prior bank {bank!r}")
         storage = replay.storage
         required = {
             "prior_label",
@@ -672,63 +1039,93 @@ class FBcprAuxAgent(FBcprAgent):
             "heading_context_id",
             "prior_motion_id",
             "prior_reference_index",
+            "prior_reference_horizon",
+            "prior_next_motion_id",
+            "prior_next_reference_index",
+            "prior_next_reference_horizon",
+            "prior_terrain_family",
+            "prior_terrain_difficulty",
             "prior_z_encoder_version",
             "prior_policy_version",
             "prior_confidence",
             "transition_terminated",
             "transition_truncated",
         }
+        if bank == "active":
+            required.update(
+                {
+                    "prior_active_label",
+                    "prior_active_label_step",
+                    "prior_active_teacher_version",
+                    "prior_active_confidence",
+                    "prior_active_bank_version",
+                }
+            )
         missing = sorted(required.difference(storage))
         if missing:
             raise RuntimeError(f"Selective-prior replay metadata is incomplete: {missing}")
+        if bank == "active":
+            label_key = "prior_active_label"
+            step_key = "prior_active_label_step"
+            teacher_key = "prior_active_teacher_version"
+            confidence_key = "prior_active_confidence"
+            expected_teacher = int(self._selective_prior_state.active_teacher_version)
+        else:
+            label_key = "prior_label"
+            step_key = "prior_label_step"
+            teacher_key = "prior_teacher_version"
+            confidence_key = "prior_confidence"
+            expected_teacher = int(self._selective_prior_state.gate_teacher_version)
         active = active_finalized_mask(
-            storage["prior_label"].squeeze(-1),
-            storage["prior_label_step"].squeeze(-1),
+            storage[label_key].squeeze(-1),
+            storage[step_key].squeeze(-1),
             step=step,
             ttl_steps=self.cfg.train.selective_prior_label_ttl_local_steps,
         )
-        teacher_version = storage["prior_teacher_version"].squeeze(-1).to(torch.long)
-        active &= teacher_version.eq(int(self._selective_prior_state.gate_teacher_version))
-        z_version = storage["prior_z_encoder_version"].squeeze(-1).to(torch.long)
+        teacher_version = storage[teacher_key].squeeze(-1).to(torch.long)
+        active &= teacher_version.eq(expected_teacher)
+        if bank == "active":
+            active &= storage["prior_active_bank_version"].squeeze(-1).to(torch.long).eq(
+                int(self._selective_prior_state.bank_version)
+            )
         policy_version = storage["prior_policy_version"].squeeze(-1).to(torch.long)
-        z_age = int(self._selective_prior_state.behavior_encoder_version) - z_version
         policy_age = int(self._selective_prior_state.policy_version) - policy_version
-        active &= (z_version >= 0) & (z_age >= 0)
-        active &= z_age <= self.cfg.train.selective_prior_max_z_version_age
         active &= (policy_version >= 0) & (policy_age >= 0)
         active &= policy_age <= self.cfg.train.selective_prior_max_policy_version_age
         valid_slots = replay._valid_slot_mask()
         active &= valid_slots
-        labels = storage["prior_label"].squeeze(-1).to(torch.long)
+        labels = storage[label_key].squeeze(-1).to(torch.long)
         reference_indices = storage["prior_reference_index"].squeeze(-1).to(torch.long)
+        reference_horizons = storage["prior_reference_horizon"].squeeze(-1).to(torch.long)
         motion_ids = storage["prior_motion_id"].squeeze(-1).to(torch.long)
-        active &= (reference_indices >= 0) & (motion_ids >= 0)
+        active &= (reference_indices >= 0) & (reference_horizons > 0) & (motion_ids >= 0)
         validated = active & (labels == int(PriorLabel.VALIDATED))
         bad = active & (labels == int(PriorLabel.BAD))
         contexts = storage["heading_context_id"].squeeze(-1).to(torch.long)
+        behavior_family = self._behavior_family_ids(motion_ids, expert_buffer)
+        terrain_family = storage["prior_terrain_family"].squeeze(-1).to(torch.long)
+        terrain_difficulty = storage["prior_terrain_difficulty"].squeeze(-1).to(torch.long)
         env_ids = torch.arange(motion_ids.shape[1], device=motion_ids.device, dtype=torch.long)[None, :]
-        split_key = motion_ids * 73_856_093 + contexts * 19_349_663 + z_version * 83_492_791 + env_ids * 2_654_435_761
+        split_key = motion_ids * 73_856_093 + contexts * 19_349_663 + env_ids * 2_654_435_761
         heldout = torch.remainder(split_key, self.cfg.train.selective_prior_holdout_modulus).eq(0)
         heldout &= motion_ids >= 0
         train_active = active & ~heldout
 
-        def balanced_pair(validated_mask, bad_mask):
-            validated_ids = torch.unique(motion_ids[validated_mask & (motion_ids >= 0)])
-            bad_ids = torch.unique(motion_ids[bad_mask & (motion_ids >= 0)])
-            common = validated_ids[torch.isin(validated_ids, bad_ids)]
-            return (
-                validated_mask & torch.isin(motion_ids, common),
-                bad_mask & torch.isin(motion_ids, common),
-                common,
-            )
-
-        balanced_validated, balanced_bad, common_ids = balanced_pair(
+        balanced_validated, balanced_bad, common_ids, balance_strata = self._hierarchical_balanced_pair(
             validated & ~heldout,
             bad & ~heldout,
+            motion_ids=motion_ids,
+            behavior_family=behavior_family,
+            terrain_family=terrain_family,
+            terrain_difficulty=terrain_difficulty,
         )
-        calibration_validated, calibration_bad, calibration_common_ids = balanced_pair(
+        calibration_validated, calibration_bad, calibration_common_ids, calibration_strata = self._hierarchical_balanced_pair(
             validated & heldout,
             bad & heldout,
+            motion_ids=motion_ids,
+            behavior_family=behavior_family,
+            terrain_family=terrain_family,
+            terrain_difficulty=terrain_difficulty,
         )
         done = storage["transition_terminated"].squeeze(-1).to(torch.bool)
         done |= storage["transition_truncated"].squeeze(-1).to(torch.bool)
@@ -746,9 +1143,39 @@ class FBcprAuxAgent(FBcprAgent):
             successor_available=successor_available,
             horizon=self.cfg.train.selective_prior_actor_interior_horizon,
         )
+        support_window = int(self.cfg.train.selective_prior_gate_window)
+        v_windows, v_contexts, v_motions = independent_support_counts(
+            balanced_validated,
+            motion_id=motion_ids,
+            context_id=contexts,
+            reference_index=reference_indices,
+            window=support_window,
+        )
+        b_windows, b_contexts, b_motions = independent_support_counts(
+            balanced_bad,
+            motion_id=motion_ids,
+            context_id=contexts,
+            reference_index=reference_indices,
+            window=support_window,
+        )
+        cv_windows, cv_contexts, cv_motions = independent_support_counts(
+            calibration_validated,
+            motion_id=motion_ids,
+            context_id=contexts,
+            reference_index=reference_indices,
+            window=support_window,
+        )
+        cb_windows, cb_contexts, cb_motions = independent_support_counts(
+            calibration_bad,
+            motion_id=motion_ids,
+            context_id=contexts,
+            reference_index=reference_indices,
+            window=support_window,
+        )
         return {
+            "bank": bank,
             "active": active,
-            "prior_confidence": storage["prior_confidence"].squeeze(-1).float(),
+            "prior_confidence": storage[confidence_key].squeeze(-1).float(),
             "validated": validated,
             "bad": bad,
             "balanced_validated": balanced_validated,
@@ -762,9 +1189,42 @@ class FBcprAuxAgent(FBcprAgent):
                 dtype=torch.long,
             ),
             "heldout": heldout,
+            "balance_strata": balance_strata,
+            "calibration_balance_strata": calibration_strata,
+            "motion_id": motion_ids,
+            "context_id": contexts,
+            "reference_index": reference_indices,
+            "validated_independent": torch.tensor(
+                (v_windows, v_contexts, v_motions), device=motion_ids.device, dtype=torch.long
+            ),
+            "bad_independent": torch.tensor(
+                (b_windows, b_contexts, b_motions), device=motion_ids.device, dtype=torch.long
+            ),
+            "calibration_validated_independent": torch.tensor(
+                (cv_windows, cv_contexts, cv_motions), device=motion_ids.device, dtype=torch.long
+            ),
+            "calibration_bad_independent": torch.tensor(
+                (cb_windows, cb_contexts, cb_motions), device=motion_ids.device, dtype=torch.long
+            ),
             "qd": qd,
             "actor": actor,
         }
+
+    def _selective_prior_active_masks(self, replay, step: int, *, expert_buffer=None) -> dict[str, torch.Tensor]:
+        return self._selective_prior_bank_masks(
+            replay,
+            step,
+            bank="active",
+            expert_buffer=expert_buffer,
+        )
+
+    def _selective_prior_shadow_masks(self, replay, step: int, *, expert_buffer=None) -> dict[str, torch.Tensor]:
+        return self._selective_prior_bank_masks(
+            replay,
+            step,
+            bank="shadow",
+            expert_buffer=expert_buffer,
+        )
 
     @staticmethod
     def _window_all_same(values: torch.Tensor) -> torch.Tensor:
@@ -838,20 +1298,27 @@ class FBcprAuxAgent(FBcprAgent):
         state = self._selective_prior_state
         state.update_count += 1
 
-        refresh_every = self.cfg.train.selective_prior_gate_teacher_refresh_updates
         teacher_bootstrap = self.cfg.train.selective_prior_gate_bootstrap_updates
-        refresh_due = state.update_count == teacher_bootstrap or (
-            state.update_count > teacher_bootstrap and state.update_count - self._last_selective_teacher_refresh_update >= refresh_every
+        # Bootstrap uses one frozen verifier until the first usable bank is
+        # established. Refreshing it while candidates age made support
+        # accumulation mathematically unreachable. Later refreshes are owned
+        # by the explicit shadow-bank lifecycle, never by this active gate.
+        refresh_due = (
+            state.phase_enum == PriorPhase.BOOTSTRAP
+            and not bool(state.shadow_building)
+            and state.update_count >= teacher_bootstrap
         )
-        if self._gate_backward_teacher is not None and refresh_due:
-            self._gate_backward_teacher.load_state_dict(self._model._target_backward_map.state_dict())
-            self._gate_backward_teacher.eval().requires_grad_(False)
-            if self._gate_obs_normalizer is None:
-                raise RuntimeError("Selective gate normalizer snapshot is not initialized")
-            self._gate_obs_normalizer.load_state_dict(self._model._obs_normalizer.state_dict())
-            self._gate_obs_normalizer.eval().requires_grad_(False)
-            state.gate_teacher_version += 1
-            self._last_selective_teacher_refresh_update = state.update_count
+        if refresh_due:
+            self._start_shadow_prior_bank()
+        elif (
+            state.phase_enum == PriorPhase.ACTOR_PRIOR
+            and not bool(state.shadow_building)
+            and state.update_count - state.last_bank_swap_update
+            >= self.cfg.train.selective_prior_gate_teacher_refresh_updates
+        ):
+            # ACTIVE remains immutable and continues serving Actor-D while a
+            # new verifier snapshot accumulates a completely separate SHADOW.
+            self._start_shadow_prior_bank()
 
         if state.update_count < teacher_bootstrap:
             return {
@@ -864,6 +1331,8 @@ class FBcprAuxAgent(FBcprAgent):
 
         if state.phase_enum in (PriorPhase.FIT_D, PriorPhase.FIT_QD):
             return {"prior/gate_paused_for_calibration": torch.ones((), device=self.device)}
+        if state.phase_enum == PriorPhase.ACTOR_PRIOR and not bool(state.shadow_building):
+            return {"prior/gate_paused_for_calibration": torch.zeros((), device=self.device)}
         if (
             state.phase_enum == PriorPhase.ACTOR_PRIOR
             and state.update_count % self.cfg.train.selective_prior_expansion_refresh_updates != 0
@@ -889,27 +1358,57 @@ class FBcprAuxAgent(FBcprAgent):
         if batch is None or idxs is None:  # narrowed by the synchronized gate
             raise RuntimeError("Selective gate availability synchronization failed")
 
-        observation = tree_map(lambda value: value.to(self.device), batch["observation"])
+        source = batch["heading_source_type"].to(self.device).reshape(windows, total, -1)[..., 0]
+        contexts = batch["heading_context_id"].to(self.device).reshape(windows, total, -1)[..., 0]
+        motion_ids = batch["prior_motion_id"].to(self.device).reshape(windows, total, -1)[..., 0]
+        reference_indices = batch["prior_reference_index"].to(self.device).reshape(windows, total, -1)[..., 0]
+        reference_horizons = batch["prior_reference_horizon"].to(self.device).reshape(windows, total, -1)[..., 0]
+        exact_tracking = source.eq(HEADING_SOURCE_EXACT_TRACKING).all(dim=1)
+        same_context = self._window_all_same(contexts)
+        provenance_valid = (
+            (motion_ids[:, :window] >= 0)
+            & (reference_indices[:, :window] >= 0)
+            & (reference_horizons[:, :window] > 0)
+        ).all(dim=1)
+        gate_eligible = exact_tracking & same_context & provenance_valid
+
+        policy_next_observation = tree_map(lambda value: value.to(self.device), batch["next"]["observation"])
         if self._gate_obs_normalizer is None:
             raise RuntimeError("Selective gate normalizer snapshot is not initialized")
         with eval_mode(self._gate_obs_normalizer):
-            observation = self._gate_obs_normalizer(observation)
+            policy_next_observation = self._gate_obs_normalizer(policy_next_observation)
         with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
-            encoded = self._gate_backward_teacher(observation)
-            encoded = self._model.project_z(encoded)
-        rollout_z = batch["z"].to(self.device)
-        cosine = F.cosine_similarity(encoded.float(), rollout_z.float(), dim=-1).reshape(windows, total)
-        source = batch["heading_source_type"].to(self.device).reshape(windows, total, -1)[..., 0]
-        contexts = batch["heading_context_id"].to(self.device).reshape(windows, total, -1)[..., 0]
-        exact_tracking = source.eq(HEADING_SOURCE_EXACT_TRACKING).all(dim=1)
-        same_context = self._window_all_same(contexts)
+            policy_embeddings = self._gate_backward_teacher(policy_next_observation).reshape(windows, total, -1)
+            safe_horizons = torch.where(
+                gate_eligible[:, None],
+                reference_horizons[:, :window],
+                torch.ones_like(reference_horizons[:, :window]),
+            )
+            policy_z = self._model.project_z(future_window_means(policy_embeddings, safe_horizons))
+        if expert_buffer is None:
+            raise RuntimeError("Matched selective gate requires expert reference provenance")
+        cosine = torch.full((windows, window), float("nan"), device=self.device, dtype=torch.float32)
+        if bool(gate_eligible.any()):
+            selected = gate_eligible[:, None].expand(-1, window)
+            gate_provenance = ReferenceProvenanceBatch(
+                motion_id=motion_ids[:, :window][selected].reshape(-1, 1),
+                reference_index=reference_indices[:, :window][selected].reshape(-1, 1),
+                reference_horizon=reference_horizons[:, :window][selected].reshape(-1, 1),
+            )
+            expert_z = self.encode_provenance(
+                gate_provenance,
+                expert_buffer=expert_buffer,
+                encoder=self._gate_backward_teacher,
+                normalizer=self._gate_obs_normalizer,
+            )
+            cosine[selected] = F.cosine_similarity(policy_z[selected].float(), expert_z.float(), dim=-1)
         finite = torch.isfinite(cosine).all(dim=1)
         pathology = self._selective_pathology_mask(batch).reshape(windows, total)
         heading_cost = batch["observation"]["heading"].to(self.device)[..., 0].reshape(windows, total)
 
-        semantic_mean = cosine.mean(dim=1)
-        semantic_min = cosine.amin(dim=1)
-        motion_ids = batch["prior_motion_id"].to(self.device).reshape(windows, total, -1)[..., 0]
+        semantic_mean = torch.nanmean(cosine, dim=1)
+        semantic_min = torch.nan_to_num(cosine, nan=float("inf")).amin(dim=1)
+        semantic_min = torch.where(finite, semantic_min, torch.full_like(semantic_min, -1.0))
         getup_ids = self._getup_motion_ids(expert_buffer) if expert_buffer is not None else set()
         is_getup = torch.zeros(windows, device=self.device, dtype=torch.bool)
         for motion_id in getup_ids:
@@ -933,17 +1432,17 @@ class FBcprAuxAgent(FBcprAgent):
             & ~pathology.any(dim=1)
         )
         semantic_bad_frame = cosine <= self.cfg.train.selective_prior_bad_cosine_mean
-        heading_bad_frame = heading_cost >= self.cfg.train.selective_prior_bad_heading_cost_mean_min
+        heading_bad_frame = heading_cost[:, :window] >= self.cfg.train.selective_prior_bad_heading_cost_mean_min
         sustained_bad = (semantic_bad_frame | heading_bad_frame).float().mean(dim=1) >= self.cfg.train.selective_prior_bad_sustain_fraction
         valid_window = exact_tracking & same_context & finite
         # BAD is local: a later collapse can prevent GOOD promotion, but it
         # cannot retroactively turn a reasonable recovery prefix into BAD.
-        bad_local = pathology[:, :window] | (sustained_bad[:, None] & (semantic_bad_frame[:, :window] | heading_bad_frame[:, :window]))
+        bad_local = pathology[:, :window] | (sustained_bad[:, None] & (semantic_bad_frame | heading_bad_frame[:, :window]))
         bad_local &= valid_window[:, None]
         good_local = good_window[:, None].expand(-1, window)
 
         current_count = windows * window
-        confidence = semantic_mean.abs().clamp(0.0, 1.0)[:, None, None].expand(-1, window, -1)
+        confidence = torch.nan_to_num(semantic_mean.abs(), nan=0.0).clamp(0.0, 1.0)[:, None, None].expand(-1, window, -1)
 
         time_idx = idxs[0].reshape(windows, total)[:, :window].reshape(-1)
         env_idx = idxs[1].reshape(windows, total)[:, :window].reshape(-1)
@@ -1047,18 +1546,15 @@ class FBcprAuxAgent(FBcprAgent):
         sampled_envs = idxs[1].reshape(windows, total)[:, 0]
         sampled_contexts = batch["heading_context_id"].reshape(windows, total, -1)[:, 0, 0]
         sampled_motion_ids = batch["prior_motion_id"].reshape(windows, total, -1)[:, 0, 0]
-        sampled_z_versions = batch["prior_z_encoder_version"].reshape(windows, total, -1)[:, 0, 0]
         storage_device = replay.storage["prior_label"].device
         for row in torch.nonzero(getup_success, as_tuple=False).reshape(-1).tolist():
             env_id = int(sampled_envs[row].item())
             context_id = int(sampled_contexts[row].item())
             motion_id = int(sampled_motion_ids[row].item())
-            z_version = int(sampled_z_versions[row].item())
             candidate_column = replay.storage["prior_label"][:, env_id, 0].eq(int(PriorLabel.CANDIDATE))
             candidate_column &= replay.storage["prior_candidate_teacher_version"][:, env_id, 0].eq(int(state.gate_teacher_version))
             candidate_column &= replay.storage["heading_context_id"][:, env_id, 0].eq(context_id)
             candidate_column &= replay.storage["prior_motion_id"][:, env_id, 0].eq(motion_id)
-            candidate_column &= replay.storage["prior_z_encoder_version"][:, env_id, 0].eq(z_version)
             candidate_column &= replay._valid_slot_mask()[:, env_id]
             candidate_times = torch.nonzero(candidate_column, as_tuple=False).reshape(-1)
             if candidate_times.numel() == 0:
@@ -1104,24 +1600,9 @@ class FBcprAuxAgent(FBcprAgent):
         revoked = (old_finalized & ~finalized).sum()
         promoted = (~old_finalized & finalized).sum() + getup_retro_promoted
         candidate_count = candidate.sum()
-        finalized_changed = old_label.ne(aggregated_label) & (old_finalized | finalized)
-        local_bank_changed = (written and bool(finalized_changed.any())) or getup_retro_promoted > 0
-        bank_changed = self._global_any(local_bank_changed)
-        if bank_changed:
-            state.bank_version += 1
-            if state.phase_enum == PriorPhase.ACTOR_PRIOR:
-                # Slow support expansion is reversible, but the old Q_D reward
-                # snapshot is no longer certified on this bank. Reopen D then
-                # Q_D calibration before Actor-D sees the expanded support.
-                state.set_phase(PriorPhase.FIT_D)
-                state.qd_reward_version = -1
-                state.qd_bank_version = -1
-                state.discriminator_update_count = 0
-                state.qd_update_count = 0
-                state.d_ready_streak = 0
-                state.qd_ready_streak = 0
-                state.d_health_failure_streak = 0
-                state.qd_health_failure_streak = 0
+        # Gate writes mutate SHADOW only. They must never invalidate the
+        # calibrated ACTIVE reward/value pair until a global readiness check
+        # explicitly commits the whole bank and coordinate contract.
 
         return {
             "prior/gate_ready": torch.ones((), device=self.device),
@@ -1131,7 +1612,7 @@ class FBcprAuxAgent(FBcprAgent):
             "prior/gate_unknown_window_fraction": (~good_window & ~sustained_bad).float().mean(),
             "prior/gate_getup_success_fraction": getup_success.float().mean(),
             "prior/gate_getup_retro_promoted_frames": torch.tensor(float(getup_retro_promoted), device=self.device),
-            "prior/gate_semantic_cosine_mean": semantic_mean.mean(),
+            "prior/gate_semantic_cosine_mean": torch.nanmean(semantic_mean),
             "prior/gate_heading_cost_mean": heading_cost.mean(),
             "prior/gate_written_frames": torch.tensor(float(written), device=self.device),
             "prior/gate_promoted_frames": promoted.float(),
@@ -1141,29 +1622,42 @@ class FBcprAuxAgent(FBcprAgent):
         }
 
     @torch.compiler.disable
-    def _selective_prior_phase_from_coverage(
+    def _selective_prior_coverage_summary(
         self,
         masks: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        state = self._selective_prior_state
-        local_v = int(masks["balanced_validated"].sum().item())
-        local_b = int(masks["balanced_bad"].sum().item())
+        *,
+        prefix: str,
+    ) -> tuple[bool, dict[str, torch.Tensor]]:
+        """DDP-global readiness from independent semantic support units."""
+
+        local_v_frames = int(masks["balanced_validated"].sum().item())
+        local_b_frames = int(masks["balanced_bad"].sum().item())
         local_strata = int(masks["balanced_strata_count"].item())
-        local_calibration_v = int(masks["calibration_validated"].sum().item())
-        local_calibration_b = int(masks["calibration_bad"].sum().item())
         local_calibration_strata = int(masks["calibration_strata_count"].item())
         local_qd = int(masks["qd"].sum().item())
         local_actor = int(masks["actor"].sum().item())
+        local_v_windows, local_v_contexts, local_v_motions = (
+            int(value) for value in masks["validated_independent"].tolist()
+        )
+        local_b_windows, local_b_contexts, local_b_motions = (
+            int(value) for value in masks["bad_independent"].tolist()
+        )
+        local_cv_windows = int(masks["calibration_validated_independent"][0].item())
+        local_cb_windows = int(masks["calibration_bad_independent"][0].item())
         confidence = masks["prior_confidence"] if "prior_confidence" in masks else None
         if confidence is None:
             raise RuntimeError("Selective masks are missing confidence mass")
         local_v_mass = float(confidence[masks["balanced_validated"]].sum().item() * self.cfg.train.selective_prior_validated_weight)
         local_b_mass = float(masks["balanced_bad"].sum().item())
-        min_v = self._global_min_int(local_v)
-        min_b = self._global_min_int(local_b)
+        min_v_windows = self._global_min_int(local_v_windows)
+        min_b_windows = self._global_min_int(local_b_windows)
+        min_v_contexts = self._global_min_int(local_v_contexts)
+        min_b_contexts = self._global_min_int(local_b_contexts)
+        min_v_motions = self._global_min_int(local_v_motions)
+        min_b_motions = self._global_min_int(local_b_motions)
+        min_cv_windows = self._global_min_int(local_cv_windows)
+        min_cb_windows = self._global_min_int(local_cb_windows)
         min_strata = self._global_min_int(local_strata)
-        min_calibration_v = self._global_min_int(local_calibration_v)
-        min_calibration_b = self._global_min_int(local_calibration_b)
         min_calibration_strata = self._global_min_int(local_calibration_strata)
         min_qd = self._global_min_int(local_qd)
         min_actor = self._global_min_int(local_actor)
@@ -1171,62 +1665,104 @@ class FBcprAuxAgent(FBcprAgent):
         min_b_mass = self._global_min_float(local_b_mass)
         ratio = min_v_mass / max(min_b_mass, 1.0)
         ready = (
-            min_v >= self.cfg.train.selective_prior_min_validated_per_rank
-            and min_b >= self.cfg.train.selective_prior_min_bad_per_rank
+            min_v_windows >= self.cfg.train.selective_prior_min_validated_windows_per_rank
+            and min_b_windows >= self.cfg.train.selective_prior_min_bad_windows_per_rank
+            and min_v_contexts >= self.cfg.train.selective_prior_min_validated_contexts_per_rank
+            and min_b_contexts >= self.cfg.train.selective_prior_min_bad_contexts_per_rank
+            and min_v_motions >= self.cfg.train.selective_prior_min_validated_motions_per_rank
+            and min_b_motions >= self.cfg.train.selective_prior_min_bad_motions_per_rank
             and min_strata >= self.cfg.train.selective_prior_min_balanced_motion_strata_per_rank
-            and min_calibration_v >= self.cfg.train.selective_prior_min_calibration_validated_per_rank
-            and min_calibration_b >= self.cfg.train.selective_prior_min_calibration_bad_per_rank
+            and min_cv_windows >= self.cfg.train.selective_prior_min_calibration_validated_windows_per_rank
+            and min_cb_windows >= self.cfg.train.selective_prior_min_calibration_bad_windows_per_rank
             and min_calibration_strata > 0
             and min_qd > 0
             and min_actor > 0
             and self.cfg.train.selective_prior_balance_ratio_min <= ratio <= self.cfg.train.selective_prior_balance_ratio_max
         )
-        if state.phase_enum > PriorPhase.BOOTSTRAP and not ready:
-            # Expiry/revocation can invalidate the bank after Actor-D was
-            # enabled.  Reopen the loop only after D then Q_D are recalibrated.
-            self.reset_selective_prior_to_bootstrap(reason="coverage_or_balance_health_degraded")
-            state = self._selective_prior_state
-        if state.phase_enum == PriorPhase.BOOTSTRAP and ready:
-            state.set_phase(PriorPhase.FIT_D)
-            state.d_ready_streak = 0
-        return {
-            "prior/local_validated_count": torch.tensor(float(local_v), device=self.device),
-            "prior/local_bad_count": torch.tensor(float(local_b), device=self.device),
-            "prior/local_balanced_motion_strata": torch.tensor(float(local_strata), device=self.device),
-            "prior/local_calibration_validated_count": torch.tensor(float(local_calibration_v), device=self.device),
-            "prior/local_calibration_bad_count": torch.tensor(float(local_calibration_b), device=self.device),
-            "prior/local_calibration_motion_strata": torch.tensor(float(local_calibration_strata), device=self.device),
-            "prior/local_effective_validated_mass": torch.tensor(local_v_mass, device=self.device),
-            "prior/local_effective_bad_mass": torch.tensor(local_b_mass, device=self.device),
-            "prior/local_qd_interior_count": torch.tensor(float(local_qd), device=self.device),
-            "prior/local_actor_interior_count": torch.tensor(float(local_actor), device=self.device),
-            "prior/global_min_validated_count": torch.tensor(float(min_v), device=self.device),
-            "prior/global_min_bad_count": torch.tensor(float(min_b), device=self.device),
-            "prior/global_min_balanced_motion_strata": torch.tensor(float(min_strata), device=self.device),
-            "prior/global_min_calibration_validated_count": torch.tensor(float(min_calibration_v), device=self.device),
-            "prior/global_min_calibration_bad_count": torch.tensor(float(min_calibration_b), device=self.device),
-            "prior/global_min_calibration_motion_strata": torch.tensor(float(min_calibration_strata), device=self.device),
-            "prior/global_min_effective_validated_mass": torch.tensor(min_v_mass, device=self.device),
-            "prior/global_min_effective_bad_mass": torch.tensor(min_b_mass, device=self.device),
-            "prior/global_min_qd_interior_count": torch.tensor(float(min_qd), device=self.device),
-            "prior/global_min_actor_interior_count": torch.tensor(float(min_actor), device=self.device),
-            "prior/effective_validated_bad_ratio": torch.tensor(float(ratio), device=self.device),
-            "prior/coverage_ready": torch.tensor(float(ready), device=self.device),
-            "prior/phase": torch.tensor(float(state.phase), device=self.device),
+        values = {
+            f"prior/{prefix}_local_validated_frames": local_v_frames,
+            f"prior/{prefix}_local_bad_frames": local_b_frames,
+            f"prior/{prefix}_local_validated_windows": local_v_windows,
+            f"prior/{prefix}_local_bad_windows": local_b_windows,
+            f"prior/{prefix}_local_validated_contexts": local_v_contexts,
+            f"prior/{prefix}_local_bad_contexts": local_b_contexts,
+            f"prior/{prefix}_local_validated_motions": local_v_motions,
+            f"prior/{prefix}_local_bad_motions": local_b_motions,
+            f"prior/{prefix}_global_min_validated_windows": min_v_windows,
+            f"prior/{prefix}_global_min_bad_windows": min_b_windows,
+            f"prior/{prefix}_global_min_validated_contexts": min_v_contexts,
+            f"prior/{prefix}_global_min_bad_contexts": min_b_contexts,
+            f"prior/{prefix}_global_min_validated_motions": min_v_motions,
+            f"prior/{prefix}_global_min_bad_motions": min_b_motions,
+            f"prior/{prefix}_global_min_calibration_validated_windows": min_cv_windows,
+            f"prior/{prefix}_global_min_calibration_bad_windows": min_cb_windows,
+            f"prior/{prefix}_global_min_balanced_strata": min_strata,
+            f"prior/{prefix}_global_min_calibration_strata": min_calibration_strata,
+            f"prior/{prefix}_global_min_qd_interior_frames": min_qd,
+            f"prior/{prefix}_global_min_actor_interior_frames": min_actor,
+            f"prior/{prefix}_global_min_effective_validated_mass": min_v_mass,
+            f"prior/{prefix}_global_min_effective_bad_mass": min_b_mass,
+            f"prior/{prefix}_effective_validated_bad_ratio": ratio,
+            f"prior/{prefix}_coverage_ready": float(ready),
+        }
+        return ready, {
+            key: torch.tensor(float(value), device=self.device) for key, value in values.items()
         }
 
     def _selective_masks_and_coverage(
         self,
         replay,
         step: int,
+        *,
+        expert_buffer=None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         """Compute large replay masks and DDP coverage once per collector step."""
 
         if self._last_selective_mask_step == int(step) and self._cached_selective_masks is not None:
             return self._cached_selective_masks, {}
-        masks = self._selective_prior_active_masks(replay, step)
-        metrics = self._selective_prior_phase_from_coverage(masks)
+        if expert_buffer is None:
+            raise RuntimeError("Selective-prior masks require expert provenance storage")
+        shadow_masks = self._selective_prior_shadow_masks(replay, step, expert_buffer=expert_buffer)
+        shadow_ready, metrics = self._selective_prior_coverage_summary(shadow_masks, prefix="shadow")
+        state = self._selective_prior_state
+        active_masks = None
+        active_ready = False
+        if state.phase_enum != PriorPhase.BOOTSTRAP and state.bank_version > 0:
+            active_masks = self._selective_prior_active_masks(replay, step, expert_buffer=expert_buffer)
+            active_ready, active_metrics = self._selective_prior_coverage_summary(active_masks, prefix="active")
+            metrics.update(active_metrics)
+
+        should_swap = (
+            shadow_ready
+            and bool(state.shadow_building)
+            and (
+                state.phase_enum == PriorPhase.BOOTSTRAP
+                or state.phase_enum == PriorPhase.ACTOR_PRIOR
+            )
+        )
+        if should_swap:
+            self._commit_shadow_prior_bank(replay, step=step, expert_buffer=expert_buffer)
+            state = self._selective_prior_state
+            active_masks = self._selective_prior_active_masks(replay, step, expert_buffer=expert_buffer)
+            active_ready, active_metrics = self._selective_prior_coverage_summary(active_masks, prefix="active")
+            metrics.update(active_metrics)
+            metrics["prior/bank_swapped"] = torch.ones((), device=self.device)
+        elif state.phase_enum != PriorPhase.BOOTSTRAP and not active_ready:
+            # UNKNOWN is no opinion, therefore stale/disappearing ACTIVE
+            # support cannot be replaced by terminal targets or stale Q_D.
+            self.reset_selective_prior_to_bootstrap(reason="active_bank_coverage_degraded")
+            state = self._selective_prior_state
+            active_masks = None
+
+        metrics["prior/phase"] = torch.tensor(float(state.phase), device=self.device)
+        metrics["prior/active_bank_version"] = torch.tensor(float(state.bank_version), device=self.device)
+        metrics["prior/active_teacher_version"] = torch.tensor(float(state.active_teacher_version), device=self.device)
+        metrics["prior/shadow_teacher_version"] = torch.tensor(float(state.gate_teacher_version), device=self.device)
+        metrics["prior/shadow_building"] = torch.tensor(float(state.shadow_building), device=self.device)
         self._last_selective_mask_step = int(step)
+        # BOOTSTRAP never consumes SHADOW directly. Return it only as a shape-
+        # compatible diagnostic view; downstream phase checks keep D/Q_D off.
+        masks = active_masks if active_masks is not None else shadow_masks
         self._cached_selective_masks = masks
         return masks, metrics
 
@@ -1347,7 +1883,6 @@ class FBcprAuxAgent(FBcprAgent):
             and bad_logits.mean().item() <= self.cfg.train.selective_prior_d_bad_max
             and abs(expert_logits.mean().item() - validated_logits.mean().item())
             <= self.cfg.train.selective_prior_d_expert_validated_gap_max
-            and ev_auc.item() <= self.cfg.train.selective_prior_d_expert_validated_auc_max
             and vb_auc.item() >= self.cfg.train.selective_prior_d_validated_bad_auc_min
         )
         globally_ready = self._global_all(locally_ready)
@@ -1388,6 +1923,8 @@ class FBcprAuxAgent(FBcprAgent):
         next_obs: dict[str, torch.Tensor] | torch.Tensor,
         z: torch.Tensor,
         next_z: torch.Tensor,
+        actor_next_obs: dict[str, torch.Tensor] | torch.Tensor | None = None,
+        actor_next_z: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Fit Q_D only on verified-support interior transitions."""
 
@@ -1398,7 +1935,9 @@ class FBcprAuxAgent(FBcprAgent):
                     raise RuntimeError("Q_D cannot train without a calibrated reward snapshot")
                 reward_logits = self._prior_reward_discriminator.compute_logits(obs=obs, z=z)
                 reward = self.discriminator_reward_from_logits(reward_logits)
-                dist_next = self._model._actor(next_obs, next_z, self._model.cfg.actor_std)
+                actor_next_obs = next_obs if actor_next_obs is None else actor_next_obs
+                actor_next_z = next_z if actor_next_z is None else actor_next_z
+                dist_next = self._model._actor(actor_next_obs, actor_next_z.detach(), self._model.cfg.actor_std)
                 next_action = dist_next.sample(clip=self.cfg.train.stddev_clip)
                 next_qs = self._model._target_critic(next_obs, next_z, next_action)
                 q_mean, q_unc, next_v = self.get_targets_uncertainty(next_qs, self.cfg.train.critic_pessimism_penalty)
@@ -1814,7 +2353,11 @@ class FBcprAuxAgent(FBcprAgent):
             step,
             expert_buffer=replay_buffer["expert_slicer"],
         )
-        masks, coverage_metrics = self._selective_masks_and_coverage(replay, step)
+        masks, coverage_metrics = self._selective_masks_and_coverage(
+            replay,
+            step,
+            expert_buffer=replay_buffer["expert_slicer"],
+        )
         metrics.update(coverage_metrics)
         phase_at_start = self._selective_prior_state.phase_enum
 
@@ -1842,7 +2385,8 @@ class FBcprAuxAgent(FBcprAgent):
                 1,
                 round(self.cfg.train.batch_size * self.cfg.train.selective_prior_bad_fraction),
             )
-            strata = replay.storage["prior_motion_id"].squeeze(-1)
+            strata = masks["balance_strata"]
+            calibration_strata = masks["calibration_balance_strata"]
             d_expert_batch = expert_buffer.sample_from_mask(
                 expert_train_mask,
                 expert_count,
@@ -1860,13 +2404,13 @@ class FBcprAuxAgent(FBcprAgent):
                 masks["calibration_validated"],
                 calibration_count,
                 include_next=False,
-                strata=strata,
+                strata=calibration_strata,
             )
             calibration_bad_batch = replay.sample_from_mask(
                 masks["calibration_bad"],
                 calibration_count,
                 include_next=False,
-                strata=strata,
+                strata=calibration_strata,
             )
         if phase_at_start >= PriorPhase.FIT_QD:
             qd_batch = replay.sample_from_mask(masks["qd"], self.cfg.train.batch_size, include_next=True)
@@ -1891,8 +2435,8 @@ class FBcprAuxAgent(FBcprAgent):
                 tree_map(lambda value: value.to(self.device), batch["next"]["observation"]),
             )
 
-        d_expert_obs, d_expert_next_obs = expert_obs_pair(d_expert_batch)
-        calibration_expert_obs, calibration_expert_next_obs = expert_obs_pair(calibration_expert_batch)
+        d_expert_obs_raw, d_expert_next_obs_raw = expert_obs_pair(d_expert_batch)
+        calibration_expert_obs_raw, calibration_expert_next_obs_raw = expert_obs_pair(calibration_expert_batch)
 
         def policy_obs(batch, *, with_next: bool):
             obs = tree_map(lambda value: value.to(self.device), batch["observation"])
@@ -1904,17 +2448,17 @@ class FBcprAuxAgent(FBcprAgent):
                     next_obs["heading"] = batch["heading_next"].to(self.device)
             return obs, next_obs
 
-        validated_obs = bad_obs = qd_obs = qd_next_obs = actor_prior_obs = None
-        calibration_validated_obs = calibration_bad_obs = None
+        validated_obs_raw = bad_obs_raw = qd_obs_raw = qd_next_obs_raw = actor_prior_obs_raw = None
+        calibration_validated_obs_raw = calibration_bad_obs_raw = None
         if validated_batch is not None:
-            validated_obs, _ = policy_obs(validated_batch, with_next=False)
-            bad_obs, _ = policy_obs(bad_batch, with_next=False)
-            calibration_validated_obs, _ = policy_obs(calibration_validated_batch, with_next=False)
-            calibration_bad_obs, _ = policy_obs(calibration_bad_batch, with_next=False)
+            validated_obs_raw, _ = policy_obs(validated_batch, with_next=False)
+            bad_obs_raw, _ = policy_obs(bad_batch, with_next=False)
+            calibration_validated_obs_raw, _ = policy_obs(calibration_validated_batch, with_next=False)
+            calibration_bad_obs_raw, _ = policy_obs(calibration_bad_batch, with_next=False)
         if qd_batch is not None:
-            qd_obs, qd_next_obs = policy_obs(qd_batch, with_next=True)
+            qd_obs_raw, qd_next_obs_raw = policy_obs(qd_batch, with_next=True)
         if actor_prior_batch is not None:
-            actor_prior_obs, _ = policy_obs(actor_prior_batch, with_next=False)
+            actor_prior_obs_raw, _ = policy_obs(actor_prior_batch, with_next=False)
 
         # Only the all-terrain main stream owns normalizer statistics. Every
         # selective view and expert batch is a read-only transform.
@@ -1925,21 +2469,31 @@ class FBcprAuxAgent(FBcprAgent):
             main_next_obs = self._model._obs_normalizer(main_next_obs)
             expert_obs = self._model._obs_normalizer(expert_obs)
             expert_next_obs = self._model._obs_normalizer(expert_next_obs)
-            if d_expert_obs is not None:
-                d_expert_obs = self._model._obs_normalizer(d_expert_obs)
-                d_expert_next_obs = self._model._obs_normalizer(d_expert_next_obs)
-                calibration_expert_obs = self._model._obs_normalizer(calibration_expert_obs)
-                calibration_expert_next_obs = self._model._obs_normalizer(calibration_expert_next_obs)
-            if validated_obs is not None:
-                validated_obs = self._model._obs_normalizer(validated_obs)
-                bad_obs = self._model._obs_normalizer(bad_obs)
-                calibration_validated_obs = self._model._obs_normalizer(calibration_validated_obs)
-                calibration_bad_obs = self._model._obs_normalizer(calibration_bad_obs)
-            if qd_obs is not None:
-                qd_obs = self._model._obs_normalizer(qd_obs)
-                qd_next_obs = self._model._obs_normalizer(qd_next_obs)
-            if actor_prior_obs is not None:
-                actor_prior_obs = self._model._obs_normalizer(actor_prior_obs)
+            qd_actor_next_obs = (
+                self._model._obs_normalizer(qd_next_obs_raw) if qd_next_obs_raw is not None else None
+            )
+            actor_prior_actor_obs = (
+                self._model._obs_normalizer(actor_prior_obs_raw) if actor_prior_obs_raw is not None else None
+            )
+
+        d_expert_obs = calibration_expert_obs = None
+        validated_obs = bad_obs = calibration_validated_obs = calibration_bad_obs = None
+        qd_obs = qd_next_obs = actor_prior_obs = None
+        if phase_at_start >= PriorPhase.FIT_D:
+            if self._prior_obs_normalizer is None:
+                raise RuntimeError("FIT_D requires a frozen prior normalizer")
+            with torch.no_grad(), eval_mode(self._prior_obs_normalizer):
+                d_expert_obs = self._prior_obs_normalizer(d_expert_obs_raw)
+                calibration_expert_obs = self._prior_obs_normalizer(calibration_expert_obs_raw)
+                validated_obs = self._prior_obs_normalizer(validated_obs_raw)
+                bad_obs = self._prior_obs_normalizer(bad_obs_raw)
+                calibration_validated_obs = self._prior_obs_normalizer(calibration_validated_obs_raw)
+                calibration_bad_obs = self._prior_obs_normalizer(calibration_bad_obs_raw)
+                if qd_obs_raw is not None:
+                    qd_obs = self._prior_obs_normalizer(qd_obs_raw)
+                    qd_next_obs = self._prior_obs_normalizer(qd_next_obs_raw)
+                if actor_prior_obs_raw is not None:
+                    actor_prior_obs = self._prior_obs_normalizer(actor_prior_obs_raw)
 
         main_collection_obs = main_obs
         main_collection_next_obs = main_next_obs
@@ -1949,29 +2503,56 @@ class FBcprAuxAgent(FBcprAgent):
         main_rollout_z = main_batch["z"].to(self.device)
 
         if phase_at_start >= PriorPhase.FIT_D:
-            d_expert_z = self.encode_expert(next_obs=d_expert_next_obs)
-            calibration_expert_z = self.encode_expert(next_obs=calibration_expert_next_obs)
-            grad_penalty = self.cfg.train.grad_penalty_discriminator if self.cfg.train.grad_penalty_discriminator > 0 else None
-            metrics.update(
-                self.update_selective_discriminator(
-                    expert_obs=d_expert_obs,
-                    expert_z=d_expert_z,
-                    validated_obs=validated_obs,
-                    validated_z=validated_batch["z"].to(self.device),
-                    validated_confidence=validated_batch["prior_confidence"].to(self.device),
-                    bad_obs=bad_obs,
-                    bad_z=bad_batch["z"].to(self.device),
-                    grad_penalty=grad_penalty,
-                )
+            if self._prior_backward_map is None or self._prior_obs_normalizer is None:
+                raise RuntimeError("Selective D requires an active frozen prior coordinate contract")
+            d_expert_z = self.encode_expert_with_snapshot(
+                d_expert_next_obs_raw,
+                encoder=self._prior_backward_map,
+                normalizer=self._prior_obs_normalizer,
             )
+            calibration_expert_z = self.encode_expert_with_snapshot(
+                calibration_expert_next_obs_raw,
+                encoder=self._prior_backward_map,
+                normalizer=self._prior_obs_normalizer,
+            )
+            validated_z = self.encode_prior_provenance(
+                self._reference_provenance_from_batch(validated_batch, device=self.device, require_next=False),
+                expert_buffer=expert_buffer,
+            )
+            bad_z = self.encode_prior_provenance(
+                self._reference_provenance_from_batch(bad_batch, device=self.device, require_next=False),
+                expert_buffer=expert_buffer,
+            )
+            calibration_validated_z = self.encode_prior_provenance(
+                self._reference_provenance_from_batch(calibration_validated_batch, device=self.device, require_next=False),
+                expert_buffer=expert_buffer,
+            )
+            calibration_bad_z = self.encode_prior_provenance(
+                self._reference_provenance_from_batch(calibration_bad_batch, device=self.device, require_next=False),
+                expert_buffer=expert_buffer,
+            )
+            grad_penalty = self.cfg.train.grad_penalty_discriminator if self.cfg.train.grad_penalty_discriminator > 0 else None
+            if phase_at_start == PriorPhase.FIT_D:
+                metrics.update(
+                    self.update_selective_discriminator(
+                        expert_obs=d_expert_obs,
+                        expert_z=d_expert_z,
+                        validated_obs=validated_obs,
+                        validated_z=validated_z,
+                        validated_confidence=validated_batch["prior_active_confidence"].to(self.device),
+                        bad_obs=bad_obs,
+                        bad_z=bad_z,
+                        grad_penalty=grad_penalty,
+                    )
+                )
             metrics.update(
                 self.evaluate_selective_discriminator_calibration(
                     expert_obs=calibration_expert_obs,
                     expert_z=calibration_expert_z,
                     validated_obs=calibration_validated_obs,
-                    validated_z=calibration_validated_batch["z"].to(self.device),
+                    validated_z=calibration_validated_z,
                     bad_obs=calibration_bad_obs,
-                    bad_z=calibration_bad_batch["z"].to(self.device),
+                    bad_z=calibration_bad_z,
                 )
             )
             # A failed D health check can regress ACTOR_PRIOR/FIT_QD during
@@ -1984,6 +2565,7 @@ class FBcprAuxAgent(FBcprAgent):
             if self._selective_prior_state.phase_enum < PriorPhase.ACTOR_PRIOR:
                 actor_prior_batch = None
                 actor_prior_obs = None
+                actor_prior_actor_obs = None
 
         if self._heading_context_enabled:
             expert_heading_xy = expert_batch["heading_forward_xy"].to(self.device)
@@ -2021,22 +2603,29 @@ class FBcprAuxAgent(FBcprAgent):
         )
         self._selective_prior_state.behavior_encoder_version += 1
 
+        actor_prior_z = None
         if qd_batch is not None:
             qd_done = qd_batch["transition_terminated"].to(self.device) | qd_batch["transition_truncated"].to(self.device)
-            qd_next_z = qd_batch["heading_z_next"].to(self.device) if self._heading_context_enabled else qd_batch["z"].to(self.device)
+            qd_provenance = self._reference_provenance_from_batch(qd_batch, device=self.device, require_next=True)
+            qd_prior_z = self.encode_prior_provenance(qd_provenance, expert_buffer=expert_buffer)
+            qd_prior_next_z = self.encode_prior_provenance(qd_provenance.successor(), expert_buffer=expert_buffer)
+            qd_actor_next_z = self.encode_actor_provenance(qd_provenance.successor(), expert_buffer=expert_buffer)
             metrics.update(
                 self.update_selective_prior_critic(
                     obs=qd_obs,
                     action=qd_batch["action"].to(self.device),
                     discount=self.cfg.train.discount * ~qd_done,
                     next_obs=qd_next_obs,
-                    z=qd_batch["z"].to(self.device),
-                    next_z=qd_next_z,
+                    z=qd_prior_z,
+                    next_z=qd_prior_next_z,
+                    actor_next_obs=qd_actor_next_obs,
+                    actor_next_z=qd_actor_next_z,
                 )
             )
             if self._selective_prior_state.phase_enum < PriorPhase.ACTOR_PRIOR:
                 actor_prior_batch = None
                 actor_prior_obs = None
+                actor_prior_actor_obs = None
 
         aux_reward = torch.zeros((self.cfg.train.batch_size, 1), device=self.device, dtype=torch.float32)
         for name in self.cfg.aux_rewards:
@@ -2075,13 +2664,23 @@ class FBcprAuxAgent(FBcprAgent):
                 )
             )
 
-        actor_prior_z = actor_prior_batch["z"].to(self.device) if actor_prior_batch is not None else None
+        actor_prior_actor_z = None
+        if actor_prior_batch is not None:
+            actor_prior_provenance = self._reference_provenance_from_batch(
+                actor_prior_batch,
+                device=self.device,
+                require_next=False,
+            )
+            actor_prior_z = self.encode_prior_provenance(actor_prior_provenance, expert_buffer=expert_buffer)
+            actor_prior_actor_z = self.encode_actor_provenance(actor_prior_provenance, expert_buffer=expert_buffer)
         metrics.update(
             self._run_actor_update(
                 main_obs=main_obs,
                 main_z=main_z,
                 prior_obs=actor_prior_obs,
                 prior_z=actor_prior_z,
+                prior_actor_obs=actor_prior_actor_obs,
+                prior_actor_z=actor_prior_actor_z,
                 heading_obs=main_collection_obs if heading_branch_active else None,
                 heading_z=main_rollout_z if heading_branch_active else None,
                 heading_valid=(main_batch["heading_valid"].to(self.device) if heading_branch_active else None),
@@ -2223,6 +2822,8 @@ class FBcprAuxAgent(FBcprAgent):
         main_z: torch.Tensor,
         prior_obs: torch.Tensor | dict[str, torch.Tensor] | None,
         prior_z: torch.Tensor | None,
+        prior_actor_obs: torch.Tensor | dict[str, torch.Tensor] | None = None,
+        prior_actor_z: torch.Tensor | None = None,
         heading_obs: torch.Tensor | dict[str, torch.Tensor] | None = None,
         heading_z: torch.Tensor | None = None,
         heading_valid: torch.Tensor | None = None,
@@ -2241,10 +2842,14 @@ class FBcprAuxAgent(FBcprAgent):
                 if prior_z is None:
                     raise ValueError("prior_obs requires prior_z")
                 if not prior_is_main:
-                    obs_parts.append(prior_obs)
-                    z_parts.append(prior_z)
+                    actor_prior_obs = prior_obs if prior_actor_obs is None else prior_actor_obs
+                    actor_prior_z = prior_z if prior_actor_z is None else prior_actor_z
+                    obs_parts.append(actor_prior_obs)
+                    z_parts.append(actor_prior_z.detach())
             elif prior_z is not None:
                 raise ValueError("prior_z requires prior_obs")
+            elif prior_actor_obs is not None or prior_actor_z is not None:
+                raise ValueError("Actor prior view requires a critic prior view")
             if heading_obs is not None:
                 if heading_z is None or heading_valid is None:
                     raise ValueError("Heading Actor branch requires heading_z and heading_valid")
@@ -2264,7 +2869,7 @@ class FBcprAuxAgent(FBcprAgent):
                 if prior_is_main:
                     prior_action = main_action
                 else:
-                    prior_batch_size = prior_z.shape[0]
+                    prior_batch_size = (prior_z if prior_actor_z is None else prior_actor_z).shape[0]
                     prior_action = combined_action[offset : offset + prior_batch_size]
                     offset += prior_batch_size
             heading_action = combined_action[offset:] if heading_obs is not None else None
