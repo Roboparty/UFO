@@ -296,7 +296,10 @@ class SkeletonTree(Serializable):
         :return: The skeleton tree constructed from the mjcf file
         :rtype: SkeletonTree
         """
-        tree = ET.parse(path)
+        # Comment-tolerant parse: MuJoCo accepts '--' inside XML comments, xml.etree does not.
+        from humanoidverse.utils.mjcf_xml import parse_mjcf_etree
+
+        tree = parse_mjcf_etree(path)
         xml_doc_root = tree.getroot()
         xml_world_body = xml_doc_root.find("worldbody")
         if xml_world_body is None:

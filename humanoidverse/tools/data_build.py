@@ -62,6 +62,22 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--keep-short", dest="keep_short", action="store_true", default=True)
     parser.add_argument("--drop-short", dest="keep_short", action="store_false")
     parser.add_argument("--min-clip-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--ground-align",
+        action="store_true",
+        help=(
+            "Add a ground_alignment block to the dataset: run MuJoCo FK on the robot XML, lift the root so collision "
+            "geometry does not sink below the floor, and drop training clips whose residual penetration stays too deep."
+        ),
+    )
+    parser.add_argument("--ground-tolerance-m", type=float, default=0.02, help="Penetration depth left untouched by --ground-align.")
+    parser.add_argument("--ground-smooth-seconds", type=float, default=0.5, help="Moving-average window for the --ground-align lift.")
+    parser.add_argument(
+        "--max-ground-penetration-m",
+        type=float,
+        default=0.10,
+        help="Drop training clips whose residual penetration exceeds this value with --ground-align; <= 0 keeps all clips.",
+    )
     parser.add_argument("--out", required=True, help="Output data manifest path")
     parser.add_argument("--rebuild-cache", action="store_true", help="Force cache rebuild when building")
     parser.add_argument("--no-build", action="store_true", help="Only write the manifest")
@@ -82,6 +98,15 @@ def main(argv: list[str] | None = None) -> None:
         min_clip_seconds=args.min_clip_seconds,
     )
     dataset = config["datasets"][0]
+    if args.ground_align:
+        dataset["ground_alignment"] = {
+            "mode": "per_frame_lift",
+            "tolerance_m": float(args.ground_tolerance_m),
+            "smooth_seconds": float(args.ground_smooth_seconds),
+            "max_residual_penetration_m": (
+                float(args.max_ground_penetration_m) if args.max_ground_penetration_m > 0.0 else None
+            ),
+        }
     print(f"Detected RobotState schema via {dataset['format']} reader")
     manifest_path = write_manifest(config, args.out, force=args.force)
     print(f"Wrote data manifest: {manifest_path}")

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from humanoidverse.utils.motion_data.robot_state import RobotStateMotion, validate_robot_state_dict, validate_robot_state_motion
+
+if TYPE_CHECKING:
+    from humanoidverse.utils.motion_data.ground_align import GroundAlignmentConfig
 from humanoidverse.utils.motion_data.schema import validate_ufo_motion_dict
 from humanoidverse.utils.robot_spec import RobotSpec
 
@@ -103,10 +106,52 @@ def robot_state_dict_to_ufo_motion_dict(
     data: dict[str, RobotStateMotion],
     robot_spec: RobotSpec,
     source_name: str,
+    *,
+    ground_alignment: "GroundAlignmentConfig | None" = None,
 ) -> dict[str, Any]:
+    """Convert a RobotState dict to UFO motion dicts, optionally ground-aligning each motion first.
+
+    When ``ground_alignment`` is given, every motion is passed through
+    :func:`humanoidverse.utils.motion_data.ground_align.apply_ground_alignment`;
+    the per-frame residual penetration is stored under the
+    ``ground_penetration`` key (sliced together with the other time series by
+    the clipper) and the summary stats under ``metadata["ground_alignment"]``.
+    """
+
     validated = validate_robot_state_dict(data, robot_spec, source_name)
-    converted = {
-        motion_key: robot_state_to_ufo_motion(motion, robot_spec, source_name)
-        for motion_key, motion in validated.items()
-    }
+    converted: dict[str, Any] = {}
+    aligned_stats: list[dict[str, Any]] = []
+    for motion_key, motion in validated.items():
+        residual = None
+        stats = None
+        if ground_alignment is not None:
+            from humanoidverse.utils.motion_data.ground_align import apply_ground_alignment
+
+            motion, residual, stats = apply_ground_alignment(motion, robot_spec, ground_alignment)
+        record = robot_state_to_ufo_motion(motion, robot_spec, source_name)
+        if residual is not None and stats is not None:
+            from humanoidverse.utils.motion_data.ground_align import GROUND_PENETRATION_FIELD
+
+            record[GROUND_PENETRATION_FIELD] = np.asarray(residual, dtype=np.float32)
+            record["metadata"]["ground_alignment"] = stats
+            aligned_stats.append(stats)
+        converted[motion_key] = record
+    if aligned_stats:
+        from loguru import logger
+
+        frames = sum(int(s["frames"]) for s in aligned_stats)
+        penetrating = sum(int(s["frames_penetrating"]) for s in aligned_stats)
+        logger.info(
+            "[ground-align] source={source} motions={count} frames={frames} frames_penetrating={pen} ({pct:.1f}%) "
+            "max_penetration={maxpen:.3f}m max_lift={maxlift:.3f}m max_residual={maxres:.3f}m".format(
+                source=source_name,
+                count=len(aligned_stats),
+                frames=frames,
+                pen=penetrating,
+                pct=100.0 * penetrating / max(frames, 1),
+                maxpen=max(float(s["max_penetration_m"]) for s in aligned_stats),
+                maxlift=max(float(s["max_lift_m"]) for s in aligned_stats),
+                maxres=max(float(s["max_residual_penetration_m"]) for s in aligned_stats),
+            )
+        )
     return validate_ufo_motion_dict(converted, source_name)

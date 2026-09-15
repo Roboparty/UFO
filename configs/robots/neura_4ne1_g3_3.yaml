@@ -1,0 +1,220 @@
+# NEURA 4NE-1 G3.3 (32 actuated DoF, fingers welded) robot config for UFO training.
+#
+# Curated from the robot_inspect draft (MJCF + URDF) and the actuator constants shipped next
+# to the robot model (humanoidverse/data/robots/neura_4ne1_g3_3/neura_4ne1_g3_3_constants.py,
+# 0810 system identification + 2026-08-28 ankle spec). Design notes and the reasoning behind
+# every semantic choice live in docs/superpowers/specs/2026-09-11-neura-4ne1-g3-3-port-design.md.
+#
+# Regenerate a fresh draft for comparison with:
+#   uv run python -m humanoidverse.tools.robot_inspect \
+#     --xml humanoidverse/data/robots/neura_4ne1_g3_3/neura_4ne1_g3_3_without_hands.xml \
+#     --urdf humanoidverse/data/robots/neura_4ne1_g3_3/neura_4ne1_g3_3.urdf \
+#     --name neura_4ne1_g3_3 --out /tmp/neura_4ne1_g3_3_draft.yaml
+name: neura_4ne1_g3_3
+# The "without_hands" MJCF is the welded 39-qpos / 32-actuator model that the retargeted
+# CSVs were produced against (same joint order by construction). Joint armature / damping /
+# frictionloss in this XML are the identified passive-joint parameters; MJLab keeps them and
+# adds PD actuators on top. neura_4ne1_g3_3_sysid_without_hands.xml is an alternative
+# identification of the same robot and can be swapped in here without other changes.
+xml_path: humanoidverse/data/robots/neura_4ne1_g3_3/neura_4ne1_g3_3_without_hands.xml
+
+base_body: link_pelvis
+root_quat_order: xyzw
+coordinate_system: z_up
+dof_unit: rad
+
+control_joints:
+  # All 32 <motor> actuators, in MJCF joint order:
+  # left leg (hip_y, hip_x, hip_z, knee, ankle_y, ankle_x), right leg, torso (z, x, y),
+  # left arm (shoulder_y, shoulder_x, shoulder_z, elbow, wrist_z, wrist_x, wrist_y), right arm,
+  # head (z, x, y). y = pitch, x = roll, z = yaw.
+  mode: all_actuated
+
+# The foot collision hulls live on the (near-massless, welded) force/torque-sensor bodies, so
+# those are the bodies that register ground contact. link_{side}_ankle_x only carries visuals.
+feet:
+  - sensor_left_foot_fts
+  - sensor_right_foot_fts
+
+hands:
+  - link_left_hand_base
+  - link_right_hand_base
+
+key_bodies:
+  - link_pelvis
+  - link_torso_y
+  - sensor_left_foot_fts
+  - sensor_right_foot_fts
+  - link_left_hand_base
+  - link_right_hand_base
+
+default_dof_pos: {}
+
+training:
+  hydra_robot: neura_4ne1_g3_3/neura_4ne1_g3_3
+  # G1 enables a fall-recovery curriculum here (env.config.lie_down_init=True,
+  # env.config.lie_down_init_prob=0.3: 30% of resets start lying on the side). It is off for the
+  # 4NE-1 because the ground-alignment filter removes almost all fall/get-up reference clips of
+  # the current retargets; re-enable once floor-aware get-up data exists.
+  hydra_overrides: []
+  semantics:
+    contact_bodies:
+      - sensor_left_foot_fts
+      - sensor_right_foot_fts
+    # Substring patterns matched against body names (mirrors the G1 pelvis/shoulder/hip set):
+    # "hip" -> link_{side}_hip_{y,x,z}, "shoulder" -> link_{side}_shoulder_{y,x,z}.
+    undesired_contact_bodies:
+      - link_pelvis
+      - shoulder
+      - hip
+    # Upper torso body that carries the IMU; used as the base-COM randomization body and torso index.
+    torso_name: link_torso_y
+    # Order matters: [pitch, roll]; the ankle-roll penalty reads index 1.
+    left_ankle_dof_names:
+      - left_ankle_y
+      - left_ankle_x
+    right_ankle_dof_names:
+      - right_ankle_y
+      - right_ankle_x
+  init_state:
+    # Pelvis height that puts the lowest foot-hull vertex on the floor for the default pose below.
+    pos: [0.0, 0.0, 0.942]
+    rot: [0.0, 0.0, 0.0, 1.0]
+    lin_vel: [0.0, 0.0, 0.0]
+    ang_vel: [0.0, 0.0, 0.0]
+    # Standing pose shared with the NEURA sim2sim / tracking stacks (slightly bent knees, arms
+    # relaxed forward). Policy actions are offsets from these angles.
+    default_joint_angles:
+      left_hip_y: -0.1
+      left_hip_x: 0.0
+      left_hip_z: 0.0
+      left_knee: 0.3
+      left_ankle_y: -0.2
+      left_ankle_x: 0.0
+      right_hip_y: -0.1
+      right_hip_x: 0.0
+      right_hip_z: 0.0
+      right_knee: 0.3
+      right_ankle_y: -0.2
+      right_ankle_x: 0.0
+      torso_z: 0.0
+      torso_x: 0.0
+      torso_y: 0.0
+      left_shoulder_y: 0.2
+      left_shoulder_x: 0.05
+      left_shoulder_z: 0.0
+      left_elbow: -0.4
+      left_wrist_z: 0.0
+      left_wrist_x: 0.0
+      left_wrist_y: 0.0
+      right_shoulder_y: 0.2
+      right_shoulder_x: -0.05
+      right_shoulder_z: 0.0
+      right_elbow: -0.4
+      right_wrist_z: 0.0
+      right_wrist_x: 0.0
+      right_wrist_y: 0.0
+      head_z: 0.0
+      head_x: 0.0
+      head_y: 0.0
+  control:
+    # Same UFO action convention as G1: target = default + action * action_scale * effort_limit / kp.
+    action_scale: 0.25
+    action_clip_value: 5.0
+    normalize_action_to: 5.0
+    # Not applied on the MJLab path (kept explicit; the env only sanity-checks it).
+    effort_limit_scale: 1.0
+    # Rated torque per joint = MJCF <motor> forcerange, in control-joint order.
+    effort_limit: [110.0, 100.0, 60.0, 100.0, 134.0, 90.26,
+                   110.0, 100.0, 60.0, 100.0, 134.0, 90.26,
+                   60.0, 60.0, 60.0,
+                   60.0, 60.0, 30.0, 30.0, 30.0, 15.0, 15.0,
+                   60.0, 60.0, 30.0, 30.0, 30.0, 15.0, 15.0,
+                   10.0, 15.0, 15.0]
+    # No-load speed of the DC-motor torque-speed envelope. The URDF carries no velocity limits;
+    # 20 rad/s is the UFO/G1 default. Ankles use the 2026-08-28 hardware spec (10.97 / 16.18).
+    velocity_limit: [20.0, 20.0, 20.0, 20.0, 10.97, 16.18,
+                     20.0, 20.0, 20.0, 20.0, 10.97, 16.18,
+                     20.0, 20.0, 20.0,
+                     20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0,
+                     20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0,
+                     20.0, 20.0, 20.0]
+    # PD gains from the identified 4NE-1 G3.3 actuator groups. Keys are joint-name substrings;
+    # the first matching key wins, so keep the specific keys (shoulder_y) before generic ones.
+    stiffness:
+      hip_y: 763.685
+      hip_x: 387.727
+      hip_z: 208.298
+      knee: 387.727
+      ankle_y: 350.0
+      ankle_x: 180.0
+      torso: 208.298
+      shoulder_y: 208.298
+      shoulder_x: 208.298
+      shoulder_z: 92.824
+      elbow: 92.824
+      wrist: 10.0
+      head: 15.0
+    damping:
+      hip_y: 64.824
+      hip_x: 32.911
+      hip_z: 17.681
+      knee: 32.911
+      ankle_y: 30.0
+      ankle_x: 10.0
+      torso: 17.681
+      shoulder_y: 17.681
+      shoulder_x: 17.681
+      shoulder_z: 7.879
+      elbow: 7.879
+      wrist: 1.0
+      head: 0.75
+  actuator:
+    # Per-joint motor parameters for MJLab's DcMotorActuatorCfg. effort_limit / velocity_limit
+    # repeat the control block; armature and friction (Coulomb frictionloss) are the identified
+    # values baked into the MJCF joints.
+    source: yaml
+    joints:
+      left_hip_y: {effort_limit: 110.0, velocity_limit: 20.0, armature: 0.573315, friction: 4.12221}
+      left_hip_x: {effort_limit: 100.0, velocity_limit: 20.0, armature: 0.266968, friction: 5.77732}
+      left_hip_z: {effort_limit: 60.0, velocity_limit: 20.0, armature: 0.147498, friction: 3.34648}
+      left_knee: {effort_limit: 100.0, velocity_limit: 20.0, armature: 0.23207, friction: 4.84356}
+      left_ankle_y: {effort_limit: 134.0, velocity_limit: 10.97, armature: 0.197, friction: 1.88}
+      left_ankle_x: {effort_limit: 90.26, velocity_limit: 16.18, armature: 0.0895, friction: 1.27}
+      right_hip_y: {effort_limit: 110.0, velocity_limit: 20.0, armature: 0.556557, friction: 3.99638}
+      right_hip_x: {effort_limit: 100.0, velocity_limit: 20.0, armature: 0.317864, friction: 5.50505}
+      right_hip_z: {effort_limit: 60.0, velocity_limit: 20.0, armature: 0.135806, friction: 3.46356}
+      right_knee: {effort_limit: 100.0, velocity_limit: 20.0, armature: 0.219078, friction: 3.25115}
+      right_ankle_y: {effort_limit: 134.0, velocity_limit: 10.97, armature: 0.197, friction: 1.88}
+      right_ankle_x: {effort_limit: 90.26, velocity_limit: 16.18, armature: 0.0895, friction: 1.27}
+      torso_z: {effort_limit: 60.0, velocity_limit: 20.0, armature: 0.541999, friction: 4.98986}
+      torso_x: {effort_limit: 60.0, velocity_limit: 20.0, armature: 0.387382, friction: 4.88837}
+      torso_y: {effort_limit: 60.0, velocity_limit: 20.0, armature: 1.25118, friction: 2.52429}
+      left_shoulder_y: {effort_limit: 60.0, velocity_limit: 20.0, armature: 0.173307, friction: 3.5025}
+      left_shoulder_x: {effort_limit: 60.0, velocity_limit: 20.0, armature: 1.39518, friction: 5.72477}
+      left_shoulder_z: {effort_limit: 30.0, velocity_limit: 20.0, armature: 0.0697877, friction: 1.0699}
+      left_elbow: {effort_limit: 30.0, velocity_limit: 20.0, armature: 0.163589, friction: 3.75231}
+      left_wrist_z: {effort_limit: 30.0, velocity_limit: 20.0, armature: 0.0666, friction: 4.66}
+      left_wrist_x: {effort_limit: 15.0, velocity_limit: 20.0, armature: 0.01, friction: 2.5}
+      left_wrist_y: {effort_limit: 15.0, velocity_limit: 20.0, armature: 0.01, friction: 2.5}
+      right_shoulder_y: {effort_limit: 60.0, velocity_limit: 20.0, armature: 0.150196, friction: 4.35005}
+      right_shoulder_x: {effort_limit: 60.0, velocity_limit: 20.0, armature: 1.39478, friction: 5.86627}
+      right_shoulder_z: {effort_limit: 30.0, velocity_limit: 20.0, armature: 0.0902303, friction: 2.14404}
+      right_elbow: {effort_limit: 30.0, velocity_limit: 20.0, armature: 0.0486028, friction: 1.94259}
+      right_wrist_z: {effort_limit: 30.0, velocity_limit: 20.0, armature: 0.0666, friction: 4.66}
+      right_wrist_x: {effort_limit: 15.0, velocity_limit: 20.0, armature: 0.01, friction: 2.5}
+      right_wrist_y: {effort_limit: 15.0, velocity_limit: 20.0, armature: 0.01, friction: 2.5}
+      head_z: {effort_limit: 10.0, velocity_limit: 20.0, armature: 0.0192, friction: 2.5}
+      head_x: {effort_limit: 15.0, velocity_limit: 20.0, armature: 0.01, friction: 2.5}
+      head_y: {effort_limit: 15.0, velocity_limit: 20.0, armature: 0.01, friction: 2.5}
+
+metadata:
+  review_status: curated
+  generated_from_xml: humanoidverse/data/robots/neura_4ne1_g3_3/neura_4ne1_g3_3_without_hands.xml
+  urdf_source: humanoidverse/data/robots/neura_4ne1_g3_3/neura_4ne1_g3_3.urdf
+  curated_on: "2026-09-11"
+  gains_source: humanoidverse/data/robots/neura_4ne1_g3_3/neura_4ne1_g3_3_constants.py
+  symmetric_dofs_idx_draft:
+    # Metadata only (not consumed by training); left/right index pairs in control-joint order.
+    index_pairs: [[0, 6], [1, 7], [2, 8], [3, 9], [4, 10], [5, 11],
+                  [15, 22], [16, 23], [17, 24], [18, 25], [19, 26], [20, 27], [21, 28]]

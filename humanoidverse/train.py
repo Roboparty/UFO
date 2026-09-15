@@ -113,6 +113,11 @@ def build_ufo_mjlab_config(
     cartwheel_aux_safe: bool = False,
     num_agent_updates: int | None = None,
     robot_config: str | Path | None = None,
+    video_every_checkpoints: int = 0,
+    video_motion_ids: list[int] | None = None,
+    video_max_steps: int = 400,
+    video_render_size: int = 320,
+    video_data_path: str | None = None,
 ) -> TrainConfig:
     agent = canonical_agent_name(agent)
     robot_training = load_robot_training_spec(robot_config or DEFAULT_ROBOT_CONFIG)
@@ -244,7 +249,19 @@ def build_ufo_mjlab_config(
         distributed_sync=distributed_sync,
         distributed_global_steps=True,
         distributed_average_metrics=True,
-        tags={"backend": "mjlab", "agent": agent, "distributed_rank": distributed_rank, "distributed_world_size": distributed_world_size},
+        video_every_checkpoints=int(video_every_checkpoints),
+        video_motion_ids=list(video_motion_ids) if video_motion_ids else [0],
+        video_max_steps=int(video_max_steps),
+        video_render_size=int(video_render_size),
+        video_data_path=video_data_path,
+        video_robot_config=str(robot_training.config_path),
+        tags={
+            "backend": "mjlab",
+            "agent": agent,
+            "robot": robot_training.robot.name,
+            "distributed_rank": distributed_rank,
+            "distributed_world_size": distributed_world_size,
+        },
     )
 
 
@@ -319,6 +336,11 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         cartwheel_aux_safe=bool(args.cartwheel_aux_safe),
         num_agent_updates=args.num_agent_updates,
         robot_config=args.robot_config,
+        video_every_checkpoints=args.video_every_checkpoints,
+        video_motion_ids=args.video_motion_ids,
+        video_max_steps=args.video_max_steps,
+        video_render_size=args.video_render_size,
+        video_data_path=args.video_data_path,
     )
     print(
         "[INFO] UFO train: "
@@ -475,6 +497,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-wandb", action="store_true")
     parser.add_argument("--wandb-run-name", default=None)
     parser.add_argument(
+        "--video-every-checkpoints",
+        type=int,
+        default=0,
+        help=(
+            "Render side-by-side expert/policy preview videos after every N-th checkpoint save (rank 0, background "
+            "subprocess running humanoidverse.tracking_inference) and upload them to W&B under video/. 0 disables."
+        ),
+    )
+    parser.add_argument(
+        "--video-motion-ids",
+        type=int,
+        nargs="+",
+        default=[0],
+        help="Motion ids (into the full/inference motion set) rendered by --video-every-checkpoints.",
+    )
+    parser.add_argument("--video-max-steps", type=int, default=400, help="Max env steps per preview video (50 Hz).")
+    parser.add_argument("--video-render-size", type=int, default=320, help="Preview video height/width in pixels per panel.")
+    parser.add_argument(
         "--disable-eval-prioritization",
         action="store_true",
         help="Validation/debug only: skip tracking eval and expert prioritization without changing default training behavior.",
@@ -492,6 +532,7 @@ def parse_args() -> argparse.Namespace:
         args.num_env_steps = min(args.num_env_steps, 2048)
         args.use_wandb = False
     manifest_robot_config = None
+    args.video_data_path = None
     if args.data_manifest is not None:
         if args.data_path is not None:
             parser.error("--data-manifest and --data-path cannot be used together")
@@ -499,6 +540,9 @@ def parse_args() -> argparse.Namespace:
         args.data_path = manifest_data.train_data_paths
         args.data_mix_weights = manifest_data.train_data_weights
         manifest_robot_config = manifest_data.robot_config_path
+        # Preview videos roll out full (unclipped) motions when the manifest provides them.
+        if manifest_data.inference_paths:
+            args.video_data_path = str(next(iter(manifest_data.inference_paths.values())))
     elif args.data_path is not None:
         data_path_count = len(args.data_path)
         if args.data_mix_weights is not None:
@@ -528,6 +572,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--clip-grad-norm must be non-negative")
     if args.cartwheel_aux_safe and args.agent != "fb":
         raise ValueError("--cartwheel-aux-safe is only supported with --agent fb")
+    if args.video_every_checkpoints < 0:
+        raise ValueError("--video-every-checkpoints must be >= 0")
+    if args.video_every_checkpoints > 0 and (args.video_max_steps <= 0 or args.video_render_size <= 0):
+        raise ValueError("--video-max-steps and --video-render-size must be positive when video previews are enabled")
     return args
 
 

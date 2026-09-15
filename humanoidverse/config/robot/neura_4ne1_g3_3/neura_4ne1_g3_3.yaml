@@ -1,0 +1,263 @@
+# NEURA 4NE-1 G3.3 Hydra robot config for the MJLab training path.
+#
+# Curated from the robot_inspect --hydra-out draft. At runtime
+# humanoidverse.agents.envs.humanoidverse_mjlab._patch_humanoidverse_robot_config overrides
+# dof/body lists, key/contact bodies, torso, ankle dofs, limits, init_state, control gains and
+# asset paths from configs/robots/neura_4ne1_g3_3.yaml; the values below are kept consistent
+# with that file so the composed config is readable and so non-patched fields (motion block,
+# DR body lists, grouping metadata) have sensible robot-specific values.
+# @package _global_
+defaults:
+  - robot_base
+
+robot:
+  # Observation parameters
+  num_bodies: 70
+  dof_obs_size: 32
+  actions_dim: 32
+  lower_body_actions_dim: 15   # 12 leg dofs + 3 torso dofs (G1 convention counts the waist as lower body)
+  upper_body_actions_dim: 17   # 14 arm dofs + 3 head dofs
+  body_keys: ["lower_body", "upper_body"]
+  policy_obs_dim: -1
+  critic_obs_dim: -1
+
+  key_bodies: ["link_pelvis", "link_torso_y", "sensor_left_foot_fts", "sensor_right_foot_fts", "link_left_hand_base", "link_right_hand_base"]
+  contact_bodies: ["sensor_left_foot_fts", "sensor_right_foot_fts"]
+  num_feet: 2
+  right_foot_name: "sensor_right_foot_fts"
+  left_foot_name: "sensor_left_foot_fts"
+  foot_name: "foot_fts"
+  knee_name: "shin"
+  has_torso: true
+  torso_name: "link_torso_y"
+  has_upper_body_dof: true
+  dof_names: ['left_hip_y', 'left_hip_x', 'left_hip_z', 'left_knee', 'left_ankle_y', 'left_ankle_x',
+              'right_hip_y', 'right_hip_x', 'right_hip_z', 'right_knee', 'right_ankle_y', 'right_ankle_x',
+              'torso_z', 'torso_x', 'torso_y',
+              'left_shoulder_y', 'left_shoulder_x', 'left_shoulder_z', 'left_elbow', 'left_wrist_z', 'left_wrist_x', 'left_wrist_y',
+              'right_shoulder_y', 'right_shoulder_x', 'right_shoulder_z', 'right_elbow', 'right_wrist_z', 'right_wrist_x', 'right_wrist_y',
+              'head_z', 'head_x', 'head_y']
+  upper_dof_names: ['torso_z', 'torso_x', 'torso_y',
+                    'left_shoulder_y', 'left_shoulder_x', 'left_shoulder_z', 'left_elbow', 'left_wrist_z', 'left_wrist_x', 'left_wrist_y',
+                    'right_shoulder_y', 'right_shoulder_x', 'right_shoulder_z', 'right_elbow', 'right_wrist_z', 'right_wrist_x', 'right_wrist_y',
+                    'head_z', 'head_x', 'head_y']
+  upper_left_arm_dof_names: ['left_shoulder_y', 'left_shoulder_x', 'left_shoulder_z', 'left_elbow', 'left_wrist_z', 'left_wrist_x', 'left_wrist_y']
+  upper_right_arm_dof_names: ['right_shoulder_y', 'right_shoulder_x', 'right_shoulder_z', 'right_elbow', 'right_wrist_z', 'right_wrist_x', 'right_wrist_y']
+  lower_dof_names: ['left_hip_y', 'left_hip_x', 'left_hip_z', 'left_knee', 'left_ankle_y', 'left_ankle_x',
+                    'right_hip_y', 'right_hip_x', 'right_hip_z', 'right_knee', 'right_ankle_y', 'right_ankle_x',
+                    'torso_z', 'torso_x', 'torso_y']
+  waist_dof_names: ['torso_z', 'torso_x', 'torso_y']
+  waist_yaw_dof_name: 'torso_z'
+  waist_roll_dof_name: 'torso_x'
+  waist_pitch_dof_name: 'torso_y'
+  arm_dof_names: ['left_shoulder_y', 'left_shoulder_x', 'left_shoulder_z', 'left_elbow', 'left_wrist_z', 'left_wrist_x', 'left_wrist_y',
+                  'right_shoulder_y', 'right_shoulder_x', 'right_shoulder_z', 'right_elbow', 'right_wrist_z', 'right_wrist_x', 'right_wrist_y']
+  left_arm_dof_names: ['left_shoulder_y', 'left_shoulder_x', 'left_shoulder_z', 'left_elbow', 'left_wrist_z', 'left_wrist_x', 'left_wrist_y']
+  right_arm_dof_names: ['right_shoulder_y', 'right_shoulder_x', 'right_shoulder_z', 'right_elbow', 'right_wrist_z', 'right_wrist_x', 'right_wrist_y']
+  head_dof_names: ['head_z', 'head_x', 'head_y']
+  left_ankle_dof_names: ['left_ankle_y', 'left_ankle_x']
+  right_ankle_dof_names: ['right_ankle_y', 'right_ankle_x']
+  knee_dof_names: ['left_knee', 'right_knee']
+  symmetric_dofs_idx:
+    # Metadata only: left/right pairs in control-joint order (not consumed by training).
+    left_dofs_idx: [0, 1, 2, 3, 4, 5, 15, 16, 17, 18, 19, 20, 21]
+    right_dofs_idx: [6, 7, 8, 9, 10, 11, 22, 23, 24, 25, 26, 27, 28]
+  dof_pos_lower_limit_list: [-1.5708, -0.1501, -1.5708, -0.87266, -0.78539, -0.24434,
+                             -1.5708, -0.58643, -1.5708, -0.87266, -0.78539, -0.24434,
+                             -3.14159, -0.5236, -0.08727,
+                             -3.14159, -0.17453, -3.14159, -1.5708, -3.14159, -0.5236, -0.7854,
+                             -3.14159, -2.00713, -3.14159, -1.5708, -3.14159, -0.5236, -0.7854,
+                             -3.14159, -0.69813, -0.5236]
+  dof_pos_upper_limit_list: [1.0472, 0.58643, 1.5708, 1.39626, 0.69813, 0.24434,
+                             1.0472, 0.1501, 1.5708, 1.39626, 0.69813, 0.24434,
+                             3.14159, 0.5236, 0.34907,
+                             3.14159, 2.00713, 3.14159, 1.5708, 3.14159, 1.0472, 0.7854,
+                             3.14159, 0.17453, 3.14159, 1.5708, 3.14159, 1.0472, 0.7854,
+                             3.14159, 0.69813, 0.5236]
+  dof_vel_limit_list: [20.0, 20.0, 20.0, 20.0, 10.97, 16.18,
+                       20.0, 20.0, 20.0, 20.0, 10.97, 16.18,
+                       20.0, 20.0, 20.0,
+                       20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0,
+                       20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0,
+                       20.0, 20.0, 20.0]
+  dof_effort_limit_list: [110.0, 100.0, 60.0, 100.0, 134.0, 90.26,
+                          110.0, 100.0, 60.0, 100.0, 134.0, 90.26,
+                          60.0, 60.0, 60.0,
+                          60.0, 60.0, 30.0, 30.0, 30.0, 15.0, 15.0,
+                          60.0, 60.0, 30.0, 30.0, 30.0, 15.0, 15.0,
+                          10.0, 15.0, 15.0]
+  dof_effort_limit_scale: 1.0
+
+  # All 70 MJCF bodies (world excluded) in model order; finger and sensor bodies are welded
+  # (no joints) but stay in the list so MotionLib FK and the env body indexing match MJLab.
+  body_names: ['link_pelvis',
+               'link_left_hip_y', 'link_left_hip_x', 'link_left_hip_z', 'link_left_shin', 'link_left_ankle_y', 'link_left_ankle_x', 'sensor_left_foot_fts',
+               'link_right_hip_y', 'link_right_hip_x', 'link_right_hip_z', 'link_right_shin', 'link_right_ankle_y', 'link_right_ankle_x', 'sensor_right_foot_fts',
+               'link_torso_z', 'link_torso_x', 'link_torso_y', 'link_torso_battery',
+               'link_left_shoulder_y', 'link_left_shoulder_x', 'link_left_shoulder_z', 'link_left_lower_arm',
+               'link_left_wrist_z', 'link_left_wrist_x', 'link_left_wrist_y', 'link_left_hand_base',
+               'left_thumb_1', 'left_thumb_2', 'left_thumb_3', 'left_thumb_4', 'left_index_1', 'left_index_2',
+               'left_middle_1', 'left_middle_2', 'left_ring_1', 'left_ring_2', 'left_little_1', 'left_little_2',
+               'link_right_shoulder_y', 'link_right_shoulder_x', 'link_right_shoulder_z', 'link_right_lower_arm',
+               'link_right_wrist_z', 'link_right_wrist_x', 'link_right_wrist_y', 'link_right_hand_base',
+               'right_thumb_1', 'right_thumb_2', 'right_thumb_3', 'right_thumb_4', 'right_index_1', 'right_index_2',
+               'right_middle_1', 'right_middle_2', 'right_ring_1', 'right_ring_2', 'right_little_1', 'right_little_2',
+               'link_head_z', 'link_head_x', 'link_head_y',
+               'sensor_head_y_depth_cam_left', 'sensor_head_y_depth_cam_right',
+               'sensor_torso_y_imu', 'sensor_torso_y_lidar', 'sensor_torso_y_depth_cam',
+               'sensor_pelvis_depth_cam_front', 'sensor_pelvis_depth_cam_back', 'sensor_pelvis_imu']
+
+  # Substring patterns over body names (G1 parity: pelvis / shoulder / hip).
+  terminate_after_contacts_on: ["link_pelvis", "shoulder", "hip"]
+  penalize_contacts_on: ["link_pelvis", "shoulder", "hip"]
+  init_state:
+    pos: [0.0, 0.0, 0.942]   # x,y,z [m]; lowest foot-hull vertex on the floor for the default pose
+    rot: [0.0, 0.0, 0.0, 1.0]   # x,y,z,w [quat]
+    lin_vel: [0.0, 0.0, 0.0]
+    ang_vel: [0.0, 0.0, 0.0]
+    default_joint_angles:   # = target angles [rad] when action = 0.0
+      left_hip_y: -0.1
+      left_hip_x: 0.0
+      left_hip_z: 0.0
+      left_knee: 0.3
+      left_ankle_y: -0.2
+      left_ankle_x: 0.0
+      right_hip_y: -0.1
+      right_hip_x: 0.0
+      right_hip_z: 0.0
+      right_knee: 0.3
+      right_ankle_y: -0.2
+      right_ankle_x: 0.0
+      torso_z: 0.0
+      torso_x: 0.0
+      torso_y: 0.0
+      left_shoulder_y: 0.2
+      left_shoulder_x: 0.05
+      left_shoulder_z: 0.0
+      left_elbow: -0.4
+      left_wrist_z: 0.0
+      left_wrist_x: 0.0
+      left_wrist_y: 0.0
+      right_shoulder_y: 0.2
+      right_shoulder_x: -0.05
+      right_shoulder_z: 0.0
+      right_elbow: -0.4
+      right_wrist_z: 0.0
+      right_wrist_x: 0.0
+      right_wrist_y: 0.0
+      head_z: 0.0
+      head_x: 0.0
+      head_y: 0.0
+
+  randomize_link_body_names: ['link_pelvis',
+                              'link_left_hip_y', 'link_left_hip_x', 'link_left_hip_z', 'link_left_shin',
+                              'link_right_hip_y', 'link_right_hip_x', 'link_right_hip_z', 'link_right_shin']
+
+  control:
+    control_type: P
+    # PD gains from the identified 4NE-1 G3.3 actuator groups (joint-name substring keys).
+    stiffness:   # [N*m/rad]
+      hip_y: 763.685
+      hip_x: 387.727
+      hip_z: 208.298
+      knee: 387.727
+      ankle_y: 350.0
+      ankle_x: 180.0
+      torso: 208.298
+      shoulder_y: 208.298
+      shoulder_x: 208.298
+      shoulder_z: 92.824
+      elbow: 92.824
+      wrist: 10.0
+      head: 15.0
+    damping:   # [N*m*s/rad]
+      hip_y: 64.824
+      hip_x: 32.911
+      hip_z: 17.681
+      knee: 32.911
+      ankle_y: 30.0
+      ankle_x: 10.0
+      torso: 17.681
+      shoulder_y: 17.681
+      shoulder_x: 17.681
+      shoulder_z: 7.879
+      elbow: 7.879
+      wrist: 1.0
+      head: 0.75
+    integral:
+      hip_y: 0.0
+      hip_x: 0.0
+      hip_z: 0.0
+      knee: 0.0
+      ankle_y: 0.0
+      ankle_x: 0.0
+      torso: 0.0
+      shoulder: 0.0
+      elbow: 0.0
+      wrist: 0.0
+      head: 0.0
+    # action scale: target angle = actionScale * action * effort_limit / kp + defaultAngle
+    action_scale: 0.25
+    action_clip_value: 5.0
+    action_rescale: true
+    clip_torques: true
+    normalize_action: true
+    normalize_action_from: 1.0
+    normalize_action_to: 5.0
+
+  asset:
+    collapse_fixed_joints: true
+    replace_cylinder_with_capsule: true
+    flip_visual_attachments: false
+    armature: 0.001
+    thickness: 0.01
+    max_angular_velocity: 1000.0
+    max_linear_velocity: 1000.0
+    density: 0.001
+    angular_damping: 0.0
+    linear_damping: 0.0
+    urdf_file: null
+    usd_file: null
+    xml_file: humanoidverse/data/robots/neura_4ne1_g3_3/neura_4ne1_g3_3_without_hands.xml
+    robot_type: neura_4ne1_g3_3
+    self_collisions: 0   # 1 to disable, 0 to enable self collisions
+    default_dof_drive_mode: 3
+    fix_base_link: false
+
+  motion:
+    asset:
+      assetRoot: humanoidverse/data/robots/neura_4ne1_g3_3
+      assetFileName: neura_4ne1_g3_3_without_hands.xml
+      urdfFileName: null
+    humanoid_type: neura_4ne1_g3_3
+    bias_offset: false
+    has_self_collision: true
+    has_mesh: false
+    has_jt_limit: false
+    has_dof_subset: true
+    has_upright_start: true
+    has_smpl_pd_offset: false
+    remove_toe: false
+    motion_sym_loss: false
+    sym_loss_coef: 1
+    big_ankle: false
+    has_shape_obs: false
+    has_shape_obs_disc: false
+    has_shape_variation: false
+    uniform_sample: false
+    motion_fps_scale: 1.0
+    standardize_motion_length: true
+    standardize_motion_length_value: 10   # seconds
+    reverse_motion: false
+    # 4NE-1 has articulated head bodies, so no virtual head extension is needed (G1 adds head_link).
+    nums_extend_bodies: 0
+    extend_config: []
+    motion_tracking_link: ["link_head_y"]
+    pelvis_link: "link_pelvis"
+    base_link: "link_torso_y"
+    hips_link: ["link_left_hip_y", "link_left_hip_x", "link_left_hip_z", "link_right_hip_y", "link_right_hip_x", "link_right_hip_z"]
+
+  metadata:
+    review_status: curated
+    curated_on: "2026-09-11"
+    source: configs/robots/neura_4ne1_g3_3.yaml

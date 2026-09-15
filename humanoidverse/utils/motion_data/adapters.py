@@ -8,12 +8,12 @@ from typing import Any
 
 import joblib
 
+from humanoidverse.utils.motion_data.ground_align import GroundAlignmentConfig
 from humanoidverse.utils.motion_data.paths import expand_motion_paths
 from humanoidverse.utils.motion_data.robot_state_convert import robot_state_dict_to_ufo_motion_dict
 from humanoidverse.utils.motion_data.robot_state_readers import read_robot_state_csv, read_robot_state_npz
 from humanoidverse.utils.motion_data.schema import validate_ufo_motion_dict
 from humanoidverse.utils.robot_spec import RobotSpec
-
 
 SUPPORTED_FORMATS = {"ufo_pkl", "robot_state_csv", "robot_state_npz"}
 
@@ -51,6 +51,7 @@ def load_robot_state_csv(
     base_dir: Path | None = None,
     fps: float | int | None = None,
     columns: dict[str, Any] | None = None,
+    ground_alignment: GroundAlignmentConfig | None = None,
 ) -> dict[str, Any]:
     robot_state = read_robot_state_csv(
         path_spec,
@@ -60,7 +61,7 @@ def load_robot_state_csv(
         fps=fps,
         columns=columns,
     )
-    return robot_state_dict_to_ufo_motion_dict(robot_state, robot_spec, source_name)
+    return robot_state_dict_to_ufo_motion_dict(robot_state, robot_spec, source_name, ground_alignment=ground_alignment)
 
 
 def load_robot_state_npz(
@@ -70,6 +71,7 @@ def load_robot_state_npz(
     robot_spec: RobotSpec,
     base_dir: Path | None = None,
     fps: float | int | None = None,
+    ground_alignment: GroundAlignmentConfig | None = None,
 ) -> dict[str, Any]:
     robot_state = read_robot_state_npz(
         path_spec,
@@ -78,7 +80,7 @@ def load_robot_state_npz(
         base_dir=base_dir,
         fps=fps,
     )
-    return robot_state_dict_to_ufo_motion_dict(robot_state, robot_spec, source_name)
+    return robot_state_dict_to_ufo_motion_dict(robot_state, robot_spec, source_name, ground_alignment=ground_alignment)
 
 
 def load_motion_data_by_format(
@@ -90,9 +92,12 @@ def load_motion_data_by_format(
     fps: float | int | None = None,
     robot_spec: RobotSpec | None = None,
     columns: dict[str, Any] | None = None,
+    ground_alignment: GroundAlignmentConfig | None = None,
 ) -> dict[str, Any]:
     fmt = str(fmt)
     if fmt == "ufo_pkl":
+        if ground_alignment is not None:
+            raise ValueError("ground_alignment is only supported for robot_state_csv / robot_state_npz sources, not ufo_pkl")
         return load_ufo_pkl(path_spec, source_name=source_name, base_dir=base_dir)
     if fmt == "robot_state_csv":
         return load_robot_state_csv(
@@ -102,6 +107,7 @@ def load_motion_data_by_format(
             base_dir=base_dir,
             fps=fps,
             columns=columns,
+            ground_alignment=ground_alignment,
         )
     if fmt == "robot_state_npz":
         return load_robot_state_npz(
@@ -110,6 +116,7 @@ def load_motion_data_by_format(
             robot_spec=_require_robot_spec(fmt, robot_spec),
             base_dir=base_dir,
             fps=fps,
+            ground_alignment=ground_alignment,
         )
     raise ValueError(f"Unsupported motion data format '{fmt}'. Supported formats: {sorted(SUPPORTED_FORMATS)}")
 

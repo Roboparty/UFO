@@ -224,6 +224,8 @@ def _fps_from_npz(npz: Any, path: Path, fps: float | int | None) -> float:
         motion_fps = float(fps)
     elif "fps" in npz:
         motion_fps = float(_scalar_from_npz(npz["fps"]))
+    elif "framerate" in npz:
+        motion_fps = float(_scalar_from_npz(npz["framerate"]))
     elif "time" in npz:
         times = np.asarray(npz["time"], dtype=np.float64)
         if times.ndim != 1 or times.shape[0] < 2:
@@ -250,7 +252,12 @@ def read_robot_state_npz(
     data: dict[str, RobotStateMotion] = {}
     for path in expand_motion_paths(path_spec, base_dir=base_dir, suffix=".npz"):
         with np.load(path, allow_pickle=True) as npz:
-            missing = [field for field in ("root_pos", "root_quat", "dof_pos") if field not in npz]
+            source_fields = {
+                "root_pos": "root_pos" if "root_pos" in npz else "base_pos_w" if "base_pos_w" in npz else None,
+                "root_quat": "root_quat" if "root_quat" in npz else "base_quat_w" if "base_quat_w" in npz else None,
+                "dof_pos": "dof_pos" if "dof_pos" in npz else "joint_pos" if "joint_pos" in npz else None,
+            }
+            missing = [field for field, source_field in source_fields.items() if source_field is None]
             if missing:
                 raise ValueError(f"robot_state_npz source={source_name}, file={path}: missing fields {missing}")
             joint_names = _string_list_from_npz(npz["joint_names"]) if "joint_names" in npz else None
@@ -261,14 +268,20 @@ def read_robot_state_npz(
             motion_key = _motion_key_from_npz(npz["motion_key"]) if "motion_key" in npz else path.stem
             if motion_key in data:
                 raise ValueError(f"Duplicate motion_key={motion_key} while reading robot_state_npz source={source_name}")
+            root_quat = np.asarray(npz[source_fields["root_quat"]], dtype=np.float32)
+            if source_fields["root_quat"] == "base_quat_w" and robot_spec.root_quat_order == "xyzw":
+                root_quat = root_quat[:, [1, 2, 3, 0]]
+            metadata = {"path": str(path), "reader": "robot_state_npz", "source_fields": source_fields}
+            if "tpose_trimmed_frames" in npz:
+                metadata["tpose_trimmed_frames"] = int(_scalar_from_npz(npz["tpose_trimmed_frames"]))
             data[motion_key] = RobotStateMotion(
                 motion_key=motion_key,
-                root_pos=np.asarray(npz["root_pos"], dtype=np.float32),
-                root_quat=np.asarray(npz["root_quat"], dtype=np.float32),
-                dof_pos=np.asarray(npz["dof_pos"], dtype=np.float32),
+                root_pos=np.asarray(npz[source_fields["root_pos"]], dtype=np.float32),
+                root_quat=root_quat,
+                dof_pos=np.asarray(npz[source_fields["dof_pos"]], dtype=np.float32),
                 fps=_fps_from_npz(npz, path, fps),
                 joint_names=joint_names,
                 source=source_name,
-                metadata={"path": str(path), "reader": "robot_state_npz"},
+                metadata=metadata,
             )
     return validate_robot_state_dict(data, robot_spec, source_name)

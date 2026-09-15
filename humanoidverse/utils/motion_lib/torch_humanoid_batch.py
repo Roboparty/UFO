@@ -17,6 +17,8 @@ from humanoidverse.utils.torch_utils import (
 )
 from scipy.spatial.transform import Rotation as sRot
 import xml.etree.ElementTree as ETree
+
+from humanoidverse.utils.mjcf_xml import parse_mjcf_etree, read_mjcf_xml_bytes
 from easydict import EasyDict
 import scipy.ndimage.filters as filters
 from lxml.etree import XMLParser, parse, ElementTree, Element, SubElement
@@ -47,8 +49,9 @@ class Humanoid_Batch:
         self.asset_file = cfg.asset.assetFileName
         self.mjcf_file = self.asset_root / self.asset_file
         
+        # Comment-tolerant parse: MuJoCo accepts '--' inside XML comments, lxml/xml.etree do not.
         parser = XMLParser(remove_blank_text=True)
-        tree = parse(BytesIO(open(self.mjcf_file, "rb").read()), parser=parser,)
+        tree = parse(BytesIO(read_mjcf_xml_bytes(self.mjcf_file)), parser=parser,)
         self.dof_axis = []
 
         joints = sorted([j.attrib['name'] for j in tree.getroot().find("worldbody").findall('.//joint')])
@@ -105,15 +108,15 @@ class Humanoid_Batch:
         if bool(getattr(cfg, "has_mesh", False)):
             self.load_mesh()
         else:
-            self.tree = ETree.parse(self.mjcf_file)
+            self.tree = parse_mjcf_etree(self.mjcf_file)
             self.geom_transform = {}
             self.mesh_dict = {}
             self.body_to_mesh = defaultdict(set)
             self.mesh_to_body = {}
         
     def from_mjcf(self, path):
-        # function from Poselib: 
-        tree = ETree.parse(path)
+        # function from Poselib (comment-tolerant parse, see humanoidverse.utils.mjcf_xml):
+        tree = parse_mjcf_etree(path)
         xml_doc_root = tree.getroot()
         xml_world_body = xml_doc_root.find("worldbody")
         if xml_world_body is None:
@@ -307,7 +310,7 @@ class Humanoid_Batch:
     def load_mesh(self):
         xml_base = os.path.dirname(self.mjcf_file)
         # Read the compiler tag from the g1.xml file to find if there is a meshdir defined
-        tree = ETree.parse(self.mjcf_file)
+        tree = parse_mjcf_etree(self.mjcf_file)
         xml_doc_root = tree.getroot()
         compiler_tag = xml_doc_root.find("compiler")
         
@@ -316,7 +319,7 @@ class Humanoid_Batch:
         else:
             mesh_base = xml_base
             
-        self.tree = tree = ETree.parse(self.mjcf_file)
+        self.tree = tree = parse_mjcf_etree(self.mjcf_file)
         xml_doc_root = tree.getroot()
         xml_world_body = xml_doc_root.find("worldbody")
 

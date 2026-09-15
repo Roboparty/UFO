@@ -48,9 +48,16 @@ def _write_tiny_robot_config(root: Path) -> Path:
       </body>
     </body>
   </worldbody>
+  <contact>
+    <exclude body1="base" body2="link1"/>
+    <exclude body1="link1" body2="link2"/>
+  </contact>
   <actuator>
     <motor name="old_joint1_motor" joint="joint1"/>
   </actuator>
+  <sensor>
+    <subtreeangmom name="root_angmom" body="base"/>
+  </sensor>
 </mujoco>
 """.strip()
     )
@@ -162,6 +169,24 @@ class RobotConfigGoalRewardInferenceTest(unittest.TestCase):
             self.assertIn('body="pelvis"', text)
             self.assertEqual(text.count("<motor "), 2)
             self.assertTrue(robot_config.exists())
+
+    def test_generic_relabel_xml_repoints_contact_excludes_to_renamed_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_tiny_robot_config(root)
+            output = write_mjlab_relabel_xml(
+                root / "tiny_robot.xml",
+                root / "out",
+                ["joint1", "joint2"],
+                "tiny_robot",
+                root_body_name="base",
+            )
+            model = mujoco.MjModel.from_xml_path(str(output))
+            self.assertGreaterEqual(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis"), 0)
+            self.assertEqual(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base"), -1)
+            text = output.read_text()
+            self.assertIn('<exclude body1="pelvis" body2="link1"', text)
+            self.assertNotIn('"base"', text)
 
     def test_non_g1_default_tasks_are_locomotion_only(self) -> None:
         tasks, mode = _resolve_reward_tasks(None, _fake_robot_training("tiny_robot", 27))

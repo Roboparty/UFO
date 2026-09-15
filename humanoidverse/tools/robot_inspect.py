@@ -95,9 +95,16 @@ def _ordered_unique(values: list[str], xml_order: list[str]) -> list[str]:
 
 
 def _side_matches(lower_name: str, side_tokens: tuple[str, ...]) -> bool:
+    """Match side tokens against whole ``_``-separated name segments.
+
+    Plain substring matching is wrong for short tokens: ``r_`` is contained in
+    ``sensor_left_foot_fts`` and would classify a left foot as the right one.
+    """
+
     if side_tokens == ("",):
         return True
-    return any(token in lower_name for token in side_tokens)
+    segments = set(lower_name.replace("-", "_").split("_"))
+    return any(token in segments for token in side_tokens)
 
 
 def _select_side_candidate(
@@ -135,8 +142,11 @@ def _guess_pair(body_names: list[str], depths: dict[str, int], leaves: set[str],
         preferred = ("hand", "palm", "gripper", "wrist_yaw")
     else:
         raise ValueError(f"Unsupported semantic pair kind={kind}")
-    left = _select_side_candidate(body_names, depths, leaves, side_tokens=("left", "l_"), keywords=keywords, preferred=preferred)
-    right = _select_side_candidate(body_names, depths, leaves, side_tokens=("right", "r_"), keywords=keywords, preferred=preferred)
+    left = _select_side_candidate(body_names, depths, leaves, side_tokens=("left", "l"), keywords=keywords, preferred=preferred)
+    right = _select_side_candidate(body_names, depths, leaves, side_tokens=("right", "r"), keywords=keywords, preferred=preferred)
+    if left is not None and left == right:
+        logger.warning(f"Could not tell left and right {kind} apart (both resolved to {left!r}); please edit the robot YAML.")
+        right = None
     guessed = [name for name in (left, right) if name is not None]
     if guessed:
         return _ordered_unique(guessed, body_names)

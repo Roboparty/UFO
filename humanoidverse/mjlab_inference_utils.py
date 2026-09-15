@@ -15,6 +15,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from humanoidverse.utils.mjcf_xml import parse_mjcf_etree
+
 os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -25,8 +27,8 @@ import torch
 
 import humanoidverse
 from humanoidverse.agents.envs.humanoidverse_mjlab import (
-    HumanoidVerseMjlabConfig,
     G1_MJLAB_MJCF_PATH,
+    HumanoidVerseMjlabConfig,
 )
 from humanoidverse.utils.motion_data import prepare_manifest_dataset_path, prepare_manifest_robot_config_path
 from humanoidverse.utils.robot_spec import (
@@ -34,7 +36,6 @@ from humanoidverse.utils.robot_spec import (
     load_robot_training_spec,
     resolve_robot_config_path,
 )
-
 
 if getattr(humanoidverse, "__file__", None) is not None:
     HUMANOIDVERSE_DIR = Path(humanoidverse.__file__).parent
@@ -160,6 +161,23 @@ def _first_worldbody_body(root: ET.Element) -> ET.Element | None:
     return worldbody.find("body")
 
 
+def _rename_body_references(root: ET.Element, old_name: str, new_name: str) -> None:
+    """Repoint every MJCF body reference after the root body has been renamed.
+
+    Contact exclusions, equality constraints, targeted cameras/lights and body
+    sensors all refer to bodies by name, so renaming the body element alone
+    leaves dangling references that fail to compile.
+    """
+    for element in root.iter():
+        for attr in ("body", "body1", "body2"):
+            if element.get(attr) == old_name:
+                element.set(attr, new_name)
+        if element.get("objtype") == "body" and element.get("objname") == old_name:
+            element.set("objname", new_name)
+        if element.get("mode") in ("targetbody", "targetbodycom") and element.get("target") == old_name:
+            element.set("target", new_name)
+
+
 def _absolutize_compiler_paths(root: ET.Element, source_xml: Path) -> None:
     compiler = root.find("compiler")
     if compiler is None:
@@ -190,7 +208,7 @@ def write_mjlab_relabel_xml(
     output_dir = Path(output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tree = ET.parse(source_xml)
+    tree = parse_mjcf_etree(source_xml)
     root = tree.getroot()
     _absolutize_compiler_paths(root, source_xml)
 
@@ -202,7 +220,10 @@ def write_mjlab_relabel_xml(
     if pelvis_body is None:
         raise ValueError(f"Robot XML has no worldbody body for reward relabeling: {source_xml}")
     if pelvis_body.get("name") != "pelvis" and _find_body(root, "pelvis") is None:
+        old_pelvis_name = pelvis_body.get("name")
         pelvis_body.set("name", "pelvis")
+        if old_pelvis_name:
+            _rename_body_references(root, old_pelvis_name, "pelvis")
 
     site_name = "ufo_relabel_imu_site"
     if not any(site.get("name") == site_name for site in root.iter("site")):
@@ -269,7 +290,7 @@ def write_g1_mjlab_relabel_xml(source_xml: Path, output_dir: Path) -> Path:
     output_dir = Path(output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tree = ET.parse(source_xml)
+    tree = parse_mjcf_etree(source_xml)
     root = tree.getroot()
 
     compiler = root.find("compiler")

@@ -38,6 +38,17 @@ dependencies = [
 [[tool.uv.index]]
 url = "https://pypi.nvidia.com/"
 
+# PyTorch CUDA 12.8 wheels: required for Blackwell GPUs (sm_120, e.g. RTX PRO 6000); the default
+# PyPI wheels (cu126) fail with "no kernel image is available for execution on the device".
+# cu128 wheels also run on older architectures (sm_75+), driver >= 570 required.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
 # sim2real = [
 #     "unitree-sdk2py",
 #     "loop-rate-limiters>=1.1.0",

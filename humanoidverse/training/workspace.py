@@ -5,12 +5,12 @@
 
 import os
 
+from humanoidverse.agents.envs.expert_motion_loader import load_expert_trajectories_from_motion_lib
+from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import (
     HumanoidVerseMjlabTrackingEvaluation,
     HumanoidVerseMjlabTrackingEvaluationConfig,
 )
-from humanoidverse.agents.envs.expert_motion_loader import load_expert_trajectories_from_motion_lib
-from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
 
 os.environ["OMP_NUM_THREADS"] = "1"
 
@@ -19,12 +19,13 @@ import torch
 torch.set_float32_matmul_precision("high")
 
 import json
+import shutil
+import subprocess
+import sys
 import time
 import typing as tp
-import warnings
 from pathlib import Path
 from typing import Dict, List
-from torch.utils._pytree import tree_map
 
 import gymnasium
 import numpy as np
@@ -32,8 +33,8 @@ import pydantic
 import torch  # better to use scoped import if we use processes
 import wandb
 from packaging.version import Version
+from torch.utils._pytree import tree_map
 from tqdm import tqdm
-
 
 from humanoidverse.agents.base import BaseConfig
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
@@ -43,7 +44,14 @@ from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentConfig
 from humanoidverse.agents.misc.loggers import CSVLogger
 from humanoidverse.agents.tldr_dist_aux.agent import TldrDistAuxAgentConfig
 from humanoidverse.agents.utils import EveryNStepsChecker, get_local_workdir, set_seed_everywhere
-from humanoidverse.distributed import average_metrics, barrier, broadcast_agent_state, broadcast_object, module_sync_report, sync_floating_buffers
+from humanoidverse.distributed import (
+    average_metrics,
+    barrier,
+    broadcast_agent_state,
+    broadcast_object,
+    module_sync_report,
+    sync_floating_buffers,
+)
 
 TRAIN_LOG_FILENAME = "train_log.txt"
 REWARD_EVAL_LOG_FILENAME = "reward_eval_log.csv"
@@ -160,6 +168,21 @@ class TrainConfig(BaseConfig):
     # Note: this is in env steps (multiples of online_parallel_envs)
     eval_every_steps: int = 1_000_000
 
+    # Training-time video previews (rank 0 only). After every N-th checkpoint save, run
+    # `python -m humanoidverse.tracking_inference --save-mp4` on the saved checkpoint in a
+    # background subprocess and, once it finishes, upload the side-by-side expert/policy MP4s
+    # to W&B under `video/`. 0 disables. The subprocess uses its own 1-env MJLab instance and
+    # an offscreen EGL renderer, so the training loop is never blocked by rendering.
+    video_every_checkpoints: int = 0
+    video_motion_ids: List[int] = pydantic.Field(default_factory=lambda: [0])
+    video_max_steps: int = 400
+    video_render_size: int = 320
+    # Motion data (UFO pkl) and robot YAML for the preview rollout; default to the training data
+    # path and robot config recorded in the env config.
+    video_data_path: str | None = None
+    video_robot_config: str | None = None
+    video_wait_timeout_s: float = 1800.0
+
     tags: dict = pydantic.Field(default_factory=lambda: {})
 
     infra: dict = pydantic.Field(default_factory=dict)
@@ -198,6 +221,58 @@ class TrainConfig(BaseConfig):
 
     def build(self):
         return Workspace(self)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def build_video_preview_command(*, model_folder: Path, cfg: TrainConfig) -> list[str]:
+    """Command line for the training-time video preview subprocess (see TrainConfig.video_every_checkpoints).
+
+    ``model_folder`` must contain ``config.json`` and ``checkpoint/model`` (a snapshot of the run
+    directory layout); tracking_inference writes its MP4s to ``<model_folder>/tracking_inference``.
+    """
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "humanoidverse.tracking_inference",
+        "--model-folder",
+        str(model_folder),
+        "--device",
+        str(cfg.env.device),
+        "--headless",
+        "true",
+        "--save-mp4",
+        "true",
+        "--export-onnx",
+        "false",
+        "--disable-dr",
+        "true",
+        "--disable-obs-noise",
+        "true",
+        "--motion-list",
+        *[str(int(motion_id)) for motion_id in cfg.video_motion_ids],
+        "--max-steps",
+        str(int(cfg.video_max_steps)),
+        "--render-size",
+        str(int(cfg.video_render_size)),
+        "--log-every-steps",
+        "0",
+    ]
+    data_path = cfg.video_data_path
+    if data_path is None:
+        env_data_path = getattr(cfg.env, "lafan_tail_path", None)
+        if isinstance(env_data_path, (list, tuple)):
+            env_data_path = env_data_path[0] if env_data_path else None
+        data_path = env_data_path
+    if data_path:
+        cmd.extend(["--data-path", str(data_path)])
+    robot_config = cfg.video_robot_config or getattr(cfg.env, "robot_config_path", None)
+    if robot_config:
+        cmd.extend(["--robot-config", str(robot_config)])
+    return cmd
 
 
 def create_agent_or_load_checkpoint(work_dir: Path, cfg: TrainConfig, agent_build_kwargs: dict[str, tp.Any]):
@@ -489,6 +564,97 @@ class Workspace:
 
         self.manager = None
 
+        # Training-time video previews, see TrainConfig.video_every_checkpoints.
+        self._video_job: dict[str, tp.Any] | None = None
+        self._checkpoints_saved = 0
+
+    # ------------------------------------------------------------------
+    # Video previews
+    # ------------------------------------------------------------------
+    def _video_enabled(self) -> bool:
+        return bool(self._write_shared_artifacts) and int(self.cfg.video_every_checkpoints) > 0
+
+    def _launch_video_job(self, global_time: int) -> None:
+        if self._video_job is not None:
+            if self._video_job["proc"].poll() is None:
+                print(
+                    f"[video] preview job for checkpoint step {self._video_job['step']} is still running; "
+                    f"skipping the preview for step {global_time}",
+                    flush=True,
+                )
+                return
+            self._finish_video_job(global_time)
+        out_dir = self.work_dir / "videos" / f"step_{global_time:012d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Snapshot the model weights and env config so a later checkpoint save cannot overwrite
+        # files while the subprocess is still loading them.
+        snapshot_checkpoint = out_dir / CHECKPOINT_DIR_NAME / "model"
+        if snapshot_checkpoint.exists():
+            shutil.rmtree(snapshot_checkpoint)
+        shutil.copytree(self.work_dir / CHECKPOINT_DIR_NAME / "model", snapshot_checkpoint)
+        shutil.copy2(self.work_dir / "config.json", out_dir / "config.json")
+        log_path = out_dir / "tracking_inference.log"
+        cmd = build_video_preview_command(model_folder=out_dir, cfg=self.cfg)
+        env = dict(os.environ)
+        env.setdefault("MUJOCO_GL", "egl")
+        env.setdefault("PYOPENGL_PLATFORM", "egl")
+        with log_path.open("w") as log_file:
+            log_file.write(" ".join(cmd) + "\n\n")
+            log_file.flush()
+            proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT, cwd=str(_repo_root()), env=env)
+        self._video_job = {"proc": proc, "step": int(global_time), "out_dir": out_dir, "log": log_path, "started": time.time()}
+        print(f"[video] launched preview job for checkpoint step {global_time} (log: {log_path})", flush=True)
+
+    def _poll_video_job(self, global_time: int, *, wait: bool = False) -> None:
+        job = self._video_job
+        if job is None:
+            return
+        proc = job["proc"]
+        if proc.poll() is None:
+            if not wait:
+                return
+            try:
+                proc.wait(timeout=float(self.cfg.video_wait_timeout_s))
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                print(f"[video] preview job for step {job['step']} timed out and was killed; see {job['log']}", flush=True)
+                self._video_job = None
+                return
+        self._finish_video_job(global_time)
+
+    def _finish_video_job(self, global_time: int) -> None:
+        job = self._video_job
+        self._video_job = None
+        if job is None:
+            return
+        returncode = job["proc"].returncode
+        source_dir = job["out_dir"] / "tracking_inference"
+        videos = sorted(source_dir.glob("tracking_*.mp4")) if source_dir.exists() else []
+        # The weight snapshot is only needed while the subprocess runs.
+        shutil.rmtree(job["out_dir"] / CHECKPOINT_DIR_NAME, ignore_errors=True)
+        if returncode != 0 or not videos:
+            print(
+                f"[video] preview job for checkpoint step {job['step']} failed (returncode={returncode}, "
+                f"videos={len(videos)}); see {job['log']}",
+                flush=True,
+            )
+            return
+        moved: list[Path] = []
+        for video in videos:
+            destination = job["out_dir"] / video.name
+            shutil.move(str(video), str(destination))
+            moved.append(destination)
+        for stale in source_dir.glob("zs_*.pkl"):
+            stale.unlink()
+        elapsed = time.time() - float(job["started"])
+        print(f"[video] checkpoint step {job['step']}: {len(moved)} preview video(s) in {job['out_dir']} ({elapsed:.0f}s)", flush=True)
+        if self.cfg.use_wandb:
+            payload: dict[str, tp.Any] = {
+                f"video/{path.stem}": wandb.Video(str(path), caption=f"checkpoint step {job['step']}", format="mp4") for path in moved
+            }
+            payload["video/checkpoint_step"] = int(job["step"])
+            wandb.log(payload, step=int(global_time))
+
     def _checkpoint_buffer_path(self, checkpoint_dir: Path) -> Path:
         if self.cfg.checkpoint_rank_buffers and self.distributed_world_size > 1:
             return checkpoint_dir / "buffers" / f"train_rank_{self.distributed_rank}"
@@ -655,6 +821,10 @@ class Workspace:
             if (local_time != self._checkpoint_local_time) and checkpoint_time_checker.check(global_time):
                 checkpoint_time_checker.update_last_step(global_time)
                 self.save(local_time=local_time, global_time=global_time, optimizer_steps=self._optimizer_steps, replay_buffer=replay_buffer)
+                if self._video_enabled():
+                    self._checkpoints_saved += 1
+                    if self._checkpoints_saved % int(self.cfg.video_every_checkpoints) == 0:
+                        self._launch_video_job(global_time)
 
             if global_time >= self.cfg.num_env_steps:
                 break
@@ -982,6 +1152,8 @@ class Workspace:
                         {f"train/{k}": v for k, v in m_dict.items()},
                         step=global_time,
                     )
+                if self._video_enabled():
+                    self._poll_video_job(global_time)
                 if self._write_shared_artifacts:
                     print(m_dict)
                 total_metrics = None
@@ -998,6 +1170,8 @@ class Workspace:
             truncated = new_truncated
             done = np.logical_or(new_terminated.ravel(), new_truncated.ravel())
             info = new_info
+        if self._video_enabled():
+            self._poll_video_job(global_time, wait=True)
         train_env.close()
 
     def eval(self, t, replay_buffer):

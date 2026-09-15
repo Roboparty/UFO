@@ -355,6 +355,31 @@ class MotionDataAdapterTest(unittest.TestCase):
             self.assertEqual(data["state"].joint_names, ["joint1", "joint2"])
             self.assertAlmostEqual(float(data["state"].dof_pos[1, 0]), 0.2)
 
+    def test_robot_state_npz_reader_accepts_omniretargeting_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _, robot_config = _write_tiny_robot(root)
+            spec = load_robot_spec(robot_config)
+            path = root / "walk_retargeted.npz"
+            np.savez(
+                path,
+                base_pos_w=np.zeros((4, 3), dtype=np.float32),
+                base_quat_w=np.tile(np.asarray([[1.0, 0.1, 0.2, 0.3]], dtype=np.float32), (4, 1)),
+                joint_pos=np.asarray([[1.0, 0.1], [2.0, 0.2], [3.0, 0.3], [4.0, 0.4]], dtype=np.float32),
+                joint_names=np.asarray(["joint2", "joint1"]),
+                framerate=np.asarray(30.0),
+                tpose_trimmed_frames=np.asarray(99),
+            )
+
+            data = read_robot_state_npz(str(path), source_name="robot_npz", robot_spec=spec)
+
+            motion = data["walk_retargeted"]
+            np.testing.assert_allclose(motion.root_quat[0], [0.1, 0.2, 0.3, 1.0])
+            np.testing.assert_allclose(motion.dof_pos[1], [0.2, 2.0])
+            self.assertAlmostEqual(motion.fps, 30.0)
+            self.assertEqual(motion.metadata["source_fields"]["root_quat"], "base_quat_w")
+            self.assertEqual(motion.metadata["tpose_trimmed_frames"], 99)
+
     def test_robot_state_converter_outputs_ufo_motion_dict(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             _, robot_config = _write_tiny_robot(Path(tmpdir))

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import re
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,11 @@ from humanoidverse.utils.motion_data.adapters import (
     load_ufo_pkl,
 )
 from humanoidverse.utils.motion_data.clip import clip_ufo_motion_dict
+from humanoidverse.utils.motion_data.ground_align import (
+    GroundAlignmentConfig,
+    filter_clips_by_ground_penetration,
+    strip_ground_penetration_field,
+)
 from humanoidverse.utils.motion_data.schema import format_fps_distribution, validate_ufo_motion_dict
 from humanoidverse.utils.robot_spec import RobotSpec, load_robot_spec
 
@@ -192,6 +197,7 @@ def _prepare_dataset_path(
             data = _load_cache(output_path, source_name)
             cache_text = f"{output_path} (reused)"
         else:
+            ground_alignment = GroundAlignmentConfig.from_manifest(dataset.get("ground_alignment"))
             data = load_motion_data_by_format(
                 fmt,
                 path_spec,
@@ -200,7 +206,15 @@ def _prepare_dataset_path(
                 fps=fps,
                 robot_spec=robot_spec,
                 columns=dataset.get("columns"),
+                ground_alignment=ground_alignment,
             )
+            if ground_alignment is not None:
+                if ground_alignment.max_residual_penetration_m is not None:
+                    logger.warning(
+                        f"[ground-align] dataset={dataset_name} split={split}: max_residual_penetration_m only filters "
+                        "auto_build training clips; whole motions of pre-split datasets are kept"
+                    )
+                data = strip_ground_penetration_field(data)
             dump_ufo_pkl(data, output_path, source_name)
             cache_text = str(output_path)
 
@@ -244,6 +258,7 @@ def _prepare_auto_build_dataset(
         train_data = _load_cache(train_path, f"{source_name}:train")
         cache_text = "reused"
     else:
+        ground_alignment = GroundAlignmentConfig.from_manifest(dataset.get("ground_alignment"))
         full_data = load_motion_data_by_format(
             fmt,
             source_path,
@@ -252,6 +267,7 @@ def _prepare_auto_build_dataset(
             fps=dataset.get("fps"),
             robot_spec=robot_spec,
             columns=dataset.get("columns"),
+            ground_alignment=ground_alignment,
         )
         auto_build = dict(dataset.get("auto_build") or {})
         train_clip_seconds = float(auto_build.get("train_clip_seconds", 10.0))
@@ -264,6 +280,20 @@ def _prepare_auto_build_dataset(
             min_clip_seconds=float(auto_build.get("min_clip_seconds", 1.0)),
             source_name=f"{source_name}:train",
         )
+        if ground_alignment is not None:
+            if ground_alignment.max_residual_penetration_m is not None:
+                total_clips = len(train_data)
+                train_data, dropped = filter_clips_by_ground_penetration(
+                    train_data,
+                    float(ground_alignment.max_residual_penetration_m),
+                    source_name=f"{source_name}:train",
+                )
+                logger.info(
+                    f"[ground-align] dataset={dataset_name} kept {len(train_data)}/{total_clips} training clips "
+                    f"(dropped {len(dropped)} with residual penetration > {ground_alignment.max_residual_penetration_m:.3f} m)"
+                )
+            full_data = strip_ground_penetration_field(full_data)
+            train_data = strip_ground_penetration_field(train_data)
         dump_ufo_pkl(full_data, full_path, f"{source_name}:full")
         dump_ufo_pkl(train_data, train_path, f"{source_name}:train")
         cache_text = "built"

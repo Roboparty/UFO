@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from humanoidverse.export_backward_encoder import export_backward_encoder_from_checkpoint
+from humanoidverse.export.backward_encoder import export_backward_encoder_from_checkpoint
 
 
 def main(
