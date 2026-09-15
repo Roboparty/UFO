@@ -1,6 +1,10 @@
 # Git LFS: track large files for push
 humanoidverse/data/**/*.pkl filter=lfs diff=lfs merge=lfs -text
 humanoidverse/data/**/*.npz filter=lfs diff=lfs merge=lfs -text
+humanoidverse/data/robots/**/*.glb filter=lfs diff=lfs merge=lfs -text
+humanoidverse/data/robots/**/*.STL filter=lfs diff=lfs merge=lfs -text
+humanoidverse/data/robots/**/*.stl filter=lfs diff=lfs merge=lfs -text
+humanoidverse/data/robots/**/*.obj filter=lfs diff=lfs merge=lfs -text
 
 humanoidverse/data/lafan_29dof.pkl filter=lfs diff=lfs merge=lfs -text
 humanoidverse/data/lafan_29dof_10s-clipped.pkl filter=lfs diff=lfs merge=lfs -text

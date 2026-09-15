@@ -1,0 +1,317 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="neura_4ne1_g3_3" serial_number="NRXXXXXX">
+
+  <!--GROUPS: Representation of a set of joints and links. This can be useful for specifying DOF to plan for, defining arms, end effectors, etc-->
+
+  <!-- Arm Groups -->
+  <group name='left_arm'>
+    <joint name='left_shoulder_y'/>
+    <joint name='left_shoulder_x'/>
+    <joint name='left_shoulder_z'/>
+    <joint name='left_elbow'/>
+    <joint name='left_wrist_z'/>
+    <joint name='left_wrist_x'/>
+    <joint name='left_wrist_y'/>
+  </group>
+
+  <group name='right_arm'>
+    <joint name='right_shoulder_y'/>
+    <joint name='right_shoulder_x'/>
+    <joint name='right_shoulder_z'/>
+    <joint name='right_elbow'/>
+    <joint name='right_wrist_z'/>
+    <joint name='right_wrist_x'/>
+    <joint name='right_wrist_y'/>
+  </group>
+
+  <group name='arms'>
+    <joint name='left_shoulder_y'/>
+    <joint name='left_shoulder_x'/>
+    <joint name='left_shoulder_z'/>
+    <joint name='left_elbow'/>
+    <joint name='left_wrist_z'/>
+    <joint name='left_wrist_x'/>
+    <joint name='left_wrist_y'/>
+    <joint name='right_shoulder_y'/>
+    <joint name='right_shoulder_x'/>
+    <joint name='right_shoulder_z'/>
+    <joint name='right_elbow'/>
+    <joint name='right_wrist_z'/>
+    <joint name='right_wrist_x'/>
+    <joint name='right_wrist_y'/>
+  </group>
+
+  <!-- Leg Groups -->
+  <group name='left_leg'>
+    <joint name='left_hip_y'/>
+    <joint name='left_hip_x'/>
+    <joint name='left_hip_z'/>
+    <joint name='left_knee'/>
+    <joint name='left_ankle_y'/>
+    <joint name='left_ankle_x'/>
+  </group>
+
+  <group name='right_leg'>
+    <joint name='right_hip_y'/>
+    <joint name='right_hip_x'/>
+    <joint name='right_hip_z'/>
+    <joint name='right_knee'/>
+    <joint name='right_ankle_y'/>
+    <joint name='right_ankle_x'/>
+  </group>
+
+  <group name='legs'>
+    <joint name='left_hip_y'/>
+    <joint name='left_hip_x'/>
+    <joint name='left_hip_z'/>
+    <joint name='left_knee'/>
+    <joint name='left_ankle_y'/>
+    <joint name='left_ankle_x'/>
+    <joint name='right_hip_y'/>
+    <joint name='right_hip_x'/>
+    <joint name='right_hip_z'/>
+    <joint name='right_knee'/>
+    <joint name='right_ankle_y'/>
+    <joint name='right_ankle_x'/>
+  </group>
+
+  <!-- Torso and Head -->
+  <group name='torso'>
+    <joint name='torso_z'/>
+    <joint name='torso_x'/>
+    <joint name='torso_y'/>
+  </group>
+
+  <group name='head'>
+    <joint name='head_z'/>
+    <joint name='head_x'/>
+    <joint name='head_y'/>
+  </group>
+
+  <!-- Full Body -->
+  <group name='full_body'>
+    <joint name='left_hip_y'/>
+    <joint name='left_hip_x'/>
+    <joint name='left_hip_z'/>
+    <joint name='left_knee'/>
+    <joint name='left_ankle_y'/>
+    <joint name='left_ankle_x'/>
+    <joint name='right_hip_y'/>
+    <joint name='right_hip_x'/>
+    <joint name='right_hip_z'/>
+    <joint name='right_knee'/>
+    <joint name='right_ankle_y'/>
+    <joint name='right_ankle_x'/>
+    <joint name='torso_z'/>
+    <joint name='torso_x'/>
+    <joint name='torso_y'/>
+    <joint name='left_shoulder_y'/>
+    <joint name='left_shoulder_x'/>
+    <joint name='left_shoulder_z'/>
+    <joint name='left_elbow'/>
+    <joint name='left_wrist_z'/>
+    <joint name='left_wrist_x'/>
+    <joint name='left_wrist_y'/>
+    <joint name='right_shoulder_y'/>
+    <joint name='right_shoulder_x'/>
+    <joint name='right_shoulder_z'/>
+    <joint name='right_elbow'/>
+    <joint name='right_wrist_z'/>
+    <joint name='right_wrist_x'/>
+    <joint name='right_wrist_y'/>
+    <joint name='head_z'/>
+    <joint name='head_x'/>
+    <joint name='head_y'/>
+  </group>
+
+  <!-- GROUP STATES: Named configurations for typical robot poses -->
+
+  <!-- Home/Neutral Standing Pose -->
+  <group_state name="home" group="full_body">
+    <joint name="left_hip_y" value="0" />
+    <joint name="left_hip_x" value="0" />
+    <joint name="left_hip_z" value="0" />
+    <joint name="left_knee" value="0" />
+    <joint name="left_ankle_y" value="0" />
+    <joint name="left_ankle_x" value="0" />
+    <joint name="right_hip_y" value="0" />
+    <joint name="right_hip_x" value="0" />
+    <joint name="right_hip_z" value="0" />
+    <joint name="right_knee" value="0" />
+    <joint name="right_ankle_y" value="0" />
+    <joint name="right_ankle_x" value="0" />
+    <joint name="torso_z" value="0" />
+    <joint name="torso_x" value="0" />
+    <joint name="torso_y" value="0" />
+    <joint name="left_shoulder_y" value="0" />
+    <joint name="left_shoulder_x" value="0.5" />
+    <joint name="left_shoulder_z" value="0" />
+    <joint name="left_elbow" value="0" />
+    <joint name="left_wrist_z" value="0" />
+    <joint name="left_wrist_x" value="0" />
+    <joint name="left_wrist_y" value="0" />
+    <joint name="right_shoulder_y" value="0" />
+    <joint name="right_shoulder_x" value="-0.5" />
+    <joint name="right_shoulder_z" value="0" />
+    <joint name="right_elbow" value="0" />
+    <joint name="right_wrist_z" value="0" />
+    <joint name="right_wrist_x" value="0" />
+    <joint name="right_wrist_y" value="0" />
+    <joint name="head_z" value="0" />
+    <joint name="head_x" value="0" />
+    <joint name="head_y" value="0" />
+  </group_state>
+
+  <!-- Arms Down Rest Position -->
+  <group_state name="arms_rest" group="arms">
+    <joint name="left_shoulder_y" value="0" />
+    <joint name="left_shoulder_x" value="0" />
+    <joint name="left_shoulder_z" value="0" />
+    <joint name="left_elbow" value="0" />
+    <joint name="left_wrist_z" value="0" />
+    <joint name="left_wrist_x" value="0" />
+    <joint name="left_wrist_y" value="0" />
+    <joint name="right_shoulder_y" value="0" />
+    <joint name="right_shoulder_x" value="0" />
+    <joint name="right_shoulder_z" value="0" />
+    <joint name="right_elbow" value="0" />
+    <joint name="right_wrist_z" value="0" />
+    <joint name="right_wrist_x" value="0" />
+    <joint name="right_wrist_y" value="0" />
+  </group_state>
+
+  <!-- Arms Ready Position (raised slightly) -->
+  <group_state name="arms_ready" group="arms">
+    <joint name="left_shoulder_y" value="0" />
+    <joint name="left_shoulder_x" value="1.0" />
+    <joint name="left_shoulder_z" value="0" />
+    <joint name="left_elbow" value="-1.0" />
+    <joint name="left_wrist_z" value="0" />
+    <joint name="left_wrist_x" value="0.5" />
+    <joint name="left_wrist_y" value="0" />
+    <joint name="right_shoulder_y" value="0" />
+    <joint name="right_shoulder_x" value="-1.0" />
+    <joint name="right_shoulder_z" value="0" />
+    <joint name="right_elbow" value="1.0" />
+    <joint name="right_wrist_z" value="0" />
+    <joint name="right_wrist_x" value="-0.5" />
+    <joint name="right_wrist_y" value="0" />
+  </group_state>
+
+  <!-- Standing Pose - Legs Slightly Bent -->
+  <!-- <group_state name="standing" group="legs">
+    <joint name="left_hip_y" value="-0.1" />
+    <joint name="left_hip_x" value="0" />
+    <joint name="left_hip_z" value="0" />
+    <joint name="left_knee" value="0.3" />
+    <joint name="left_ankle_y" value="-0.2" />
+    <joint name="left_ankle_x" value="0" />
+    <joint name="right_hip_y" value="-0.1" />
+    <joint name="right_hip_x" value="0" />
+    <joint name="right_hip_z" value="0" />
+    <joint name="right_knee" value="0.3" />
+    <joint name="right_ankle_y" value="-0.2" />
+    <joint name="right_ankle_x" value="0" />
+  </group_state> -->
+
+  <group_state name="standing" group="full_body">
+    <joint name="left_hip_y" value="-0.1" />
+    <joint name="left_hip_x" value="0" />
+    <joint name="left_hip_z" value="0" />
+    <joint name="left_knee" value="0.3" />
+    <joint name="left_ankle_y" value="-0.2" />
+    <joint name="left_ankle_x" value="0" />
+    <joint name="right_hip_y" value="-0.1" />
+    <joint name="right_hip_x" value="0" />
+    <joint name="right_hip_z" value="0" />
+    <joint name="right_knee" value="0.3" />
+    <joint name="right_ankle_y" value="-0.2" />
+    <joint name="right_ankle_x" value="0" />
+    <joint name="torso_z" value="0" />
+    <joint name="torso_x" value="0" />
+    <joint name="torso_y" value="0" />
+    <joint name="left_shoulder_y" value="0.2" />
+    <joint name="left_shoulder_x" value="0.05" />
+    <joint name="left_shoulder_z" value="0" />
+    <joint name="left_elbow" value="-0.4" />
+    <joint name="left_wrist_z" value="0" />
+    <joint name="left_wrist_x" value="0" />
+    <joint name="left_wrist_y" value="0" />
+    <joint name="right_shoulder_y" value="0.2" />
+    <joint name="right_shoulder_x" value="-0.05" />
+    <joint name="right_shoulder_z" value="0" />
+    <joint name="right_elbow" value="-0.4" />
+    <joint name="right_wrist_z" value="0" />
+    <joint name="right_wrist_x" value="0" />
+    <joint name="right_wrist_y" value="0" />
+    <joint name="head_z" value="0" />
+    <joint name="head_x" value="0" />
+    <joint name="head_y" value="0" />
+  </group_state>
+
+  <!-- Sitting Pose -->
+  <group_state name="sitting" group="legs">
+    <joint name="left_hip_y" value="0" />
+    <joint name="left_hip_x" value="0" />
+    <joint name="left_hip_z" value="0" />
+    <joint name="left_knee" value="1.39626" />
+    <joint name="left_ankle_y" value="0" />
+    <joint name="left_ankle_x" value="0" />
+    <joint name="right_hip_y" value="0" />
+    <joint name="right_hip_x" value="0" />
+    <joint name="right_hip_z" value="0" />
+    <joint name="right_knee" value="1.39626" />
+    <joint name="right_ankle_y" value="0" />
+    <joint name="right_ankle_x" value="0" />
+  </group_state>
+
+  <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
+  <!-- Adjacent links in the chain typically don't collide -->
+  <disable_collisions link1="link_pelvis" link2="link_left_hip_y" reason="Adjacent"/>
+  <disable_collisions link1="link_pelvis" link2="link_right_hip_y" reason="Adjacent"/>
+  <disable_collisions link1="link_pelvis" link2="link_torso_z" reason="Adjacent"/>
+
+  <!-- Left leg chain -->
+  <disable_collisions link1="link_left_hip_y" link2="link_left_hip_x" reason="Adjacent"/>
+  <disable_collisions link1="link_left_hip_x" link2="link_left_hip_z" reason="Adjacent"/>
+  <disable_collisions link1="link_left_hip_z" link2="link_left_shin" reason="Adjacent"/>
+  <disable_collisions link1="link_left_shin" link2="link_left_ankle_y" reason="Adjacent"/>
+  <disable_collisions link1="link_left_ankle_y" link2="link_left_ankle_x" reason="Adjacent"/>
+
+  <!-- Right leg chain -->
+  <disable_collisions link1="link_right_hip_y" link2="link_right_hip_x" reason="Adjacent"/>
+  <disable_collisions link1="link_right_hip_x" link2="link_right_hip_z" reason="Adjacent"/>
+  <disable_collisions link1="link_right_hip_z" link2="link_right_shin" reason="Adjacent"/>
+  <disable_collisions link1="link_right_shin" link2="link_right_ankle_y" reason="Adjacent"/>
+  <disable_collisions link1="link_right_ankle_y" link2="link_right_ankle_x" reason="Adjacent"/>
+
+  <!-- Torso chain -->
+  <disable_collisions link1="link_torso_z" link2="link_torso_x" reason="Adjacent"/>
+  <disable_collisions link1="link_torso_x" link2="link_torso_y" reason="Adjacent"/>
+
+  <!-- Left arm chain -->
+  <disable_collisions link1="link_torso_y" link2="link_left_shoulder_y" reason="Adjacent"/>
+  <disable_collisions link1="link_left_shoulder_y" link2="link_left_shoulder_x" reason="Adjacent"/>
+  <disable_collisions link1="link_left_shoulder_x" link2="link_left_shoulder_z" reason="Adjacent"/>
+  <disable_collisions link1="link_left_shoulder_z" link2="link_left_lower_arm" reason="Adjacent"/>
+  <disable_collisions link1="link_left_lower_arm" link2="link_left_wrist_z" reason="Adjacent"/>
+  <disable_collisions link1="link_left_wrist_z" link2="link_left_wrist_x" reason="Adjacent"/>
+  <disable_collisions link1="link_left_wrist_x" link2="link_left_wrist_y" reason="Adjacent"/>
+  <disable_collisions link1="link_left_wrist_y" link2="link_left_hand" reason="Adjacent"/>
+
+  <!-- Right arm chain -->
+  <disable_collisions link1="link_torso_y" link2="link_right_shoulder_y" reason="Adjacent"/>
+  <disable_collisions link1="link_right_shoulder_y" link2="link_right_shoulder_x" reason="Adjacent"/>
+  <disable_collisions link1="link_right_shoulder_x" link2="link_right_shoulder_z" reason="Adjacent"/>
+  <disable_collisions link1="link_right_shoulder_z" link2="link_right_lower_arm" reason="Adjacent"/>
+  <disable_collisions link1="link_right_lower_arm" link2="link_right_wrist_z" reason="Adjacent"/>
+  <disable_collisions link1="link_right_wrist_z" link2="link_right_wrist_x" reason="Adjacent"/>
+  <disable_collisions link1="link_right_wrist_x" link2="link_right_wrist_y" reason="Adjacent"/>
+  <disable_collisions link1="link_right_wrist_y" link2="link_right_hand" reason="Adjacent"/>
+
+  <!-- Head chain -->
+  <disable_collisions link1="link_torso_y" link2="link_head_z" reason="Adjacent"/>
+  <disable_collisions link1="link_head_z" link2="link_head_x" reason="Adjacent"/>
+  <disable_collisions link1="link_head_x" link2="link_head_y" reason="Adjacent"/>
+
+</robot>

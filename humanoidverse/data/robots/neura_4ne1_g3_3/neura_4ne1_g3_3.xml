@@ -1,0 +1,672 @@
+<mujoco model="neura_4ne1_g3_3">
+  <default>
+    <default class="robot">
+      <default class="visual">
+        <geom contype="0" conaffinity="0" group="2" density="0" />
+      </default>
+      <default class="collision">
+        <geom contype="1" conaffinity="1" group="3" />
+      </default>
+      <geom type="mesh" />
+    </default>
+    <default class="floor">
+      <geom type="plane" size="0 0 0.05" material="groundplane" />
+    </default>
+    <mesh maxhullvert="64" />
+  </default>
+  <compiler angle="radian" meshdir="." />
+  <option integrator="implicitfast" />
+  <visual>
+    <global offwidth="3840" offheight="2160" />
+  </visual>
+  <asset>
+    <mesh name="link_pelvis" content_type="model/stl" file="meshes/visual/link_pelvis.STL" />
+    <mesh name="link_pelvis_convex_hull" content_type="model/obj" file="meshes/collision/link_pelvis_convex_hull.obj" />
+    <mesh name="link_left_hip_y" content_type="model/stl" file="meshes/visual/link_left_hip_y.STL" />
+    <mesh name="link_left_hip_y_convex_hull" content_type="model/obj" file="meshes/collision/link_left_hip_y_convex_hull.obj" />
+    <mesh name="link_left_hip_x" content_type="model/stl" file="meshes/visual/link_left_hip_x.STL" />
+    <mesh name="link_left_hip_x_convex_hull" content_type="model/obj" file="meshes/collision/link_left_hip_x_convex_hull.obj" />
+    <mesh name="link_left_hip_z" content_type="model/stl" file="meshes/visual/link_left_hip_z.STL" />
+    <mesh name="link_left_hip_z_convex_hull" content_type="model/obj" file="meshes/collision/link_left_hip_z_convex_hull.obj" />
+    <mesh name="link_left_shin" content_type="model/stl" file="meshes/visual/link_left_shin.STL" />
+    <mesh name="link_left_shin_convex_hull" content_type="model/obj" file="meshes/collision/link_left_shin_convex_hull.obj" />
+    <mesh name="link_left_ankle_y" content_type="model/stl" file="meshes/visual/link_left_ankle_y.STL" />
+    <mesh name="link_left_ankle_y_convex_hull" content_type="model/obj" file="meshes/collision/link_left_ankle_y_convex_hull.obj" />
+    <mesh name="link_left_ankle_x" content_type="model/stl" file="meshes/visual/link_left_ankle_x.STL" />
+    <mesh name="link_left_ankle_x_convex_hull" content_type="model/obj" file="meshes/collision/link_left_ankle_x_convex_hull.obj" />
+    <mesh name="link_right_hip_y" content_type="model/stl" file="meshes/visual/link_right_hip_y.STL" />
+    <mesh name="link_right_hip_y_convex_hull" content_type="model/obj" file="meshes/collision/link_right_hip_y_convex_hull.obj" />
+    <mesh name="link_right_hip_x" content_type="model/stl" file="meshes/visual/link_right_hip_x.STL" />
+    <mesh name="link_right_hip_x_convex_hull" content_type="model/obj" file="meshes/collision/link_right_hip_x_convex_hull.obj" />
+    <mesh name="link_right_hip_z" content_type="model/stl" file="meshes/visual/link_right_hip_z.STL" />
+    <mesh name="link_right_hip_z_convex_hull" content_type="model/obj" file="meshes/collision/link_right_hip_z_convex_hull.obj" />
+    <mesh name="link_right_shin" content_type="model/stl" file="meshes/visual/link_right_shin.STL" />
+    <mesh name="link_right_shin_convex_hull" content_type="model/obj" file="meshes/collision/link_right_shin_convex_hull.obj" />
+    <mesh name="link_right_ankle_y" content_type="model/stl" file="meshes/visual/link_right_ankle_y.STL" />
+    <mesh name="link_right_ankle_y_convex_hull" content_type="model/obj" file="meshes/collision/link_right_ankle_y_convex_hull.obj" />
+    <mesh name="link_right_ankle_x" content_type="model/stl" file="meshes/visual/link_right_ankle_x.STL" />
+    <mesh name="link_right_ankle_x_convex_hull" content_type="model/obj" file="meshes/collision/link_right_ankle_x_convex_hull.obj" />
+    <mesh name="link_torso_z" content_type="model/stl" file="meshes/visual/link_torso_z.STL" />
+    <mesh name="link_torso_z_convex_hull" content_type="model/obj" file="meshes/collision/link_torso_z_convex_hull.obj" />
+    <mesh name="link_torso_x" content_type="model/stl" file="meshes/visual/link_torso_x.STL" />
+    <mesh name="link_torso_x_convex_hull" content_type="model/obj" file="meshes/collision/link_torso_x_convex_hull.obj" />
+    <mesh name="link_torso_y" content_type="model/stl" file="meshes/visual/link_torso_y.STL" />
+    <mesh name="link_torso_y_convex_hull" content_type="model/obj" file="meshes/collision/link_torso_y_convex_hull.obj" />
+    <mesh name="link_left_shoulder_y" content_type="model/stl" file="meshes/visual/link_left_shoulder_y.STL" />
+    <mesh name="link_left_shoulder_y_convex_hull" content_type="model/obj" file="meshes/collision/link_left_shoulder_y_convex_hull.obj" />
+    <mesh name="link_left_shoulder_x" content_type="model/stl" file="meshes/visual/link_left_shoulder_x.STL" />
+    <mesh name="link_left_shoulder_x_convex_hull" content_type="model/obj" file="meshes/collision/link_left_shoulder_x_convex_hull.obj" />
+    <mesh name="link_left_shoulder_z" content_type="model/stl" file="meshes/visual/link_left_shoulder_z.STL" />
+    <mesh name="link_left_shoulder_z_convex_hull" content_type="model/obj" file="meshes/collision/link_left_shoulder_z_convex_hull.obj" />
+    <mesh name="link_left_lower_arm" content_type="model/stl" file="meshes/visual/link_left_lower_arm.STL" />
+    <mesh name="link_left_lower_arm_convex_hull" content_type="model/obj" file="meshes/collision/link_left_lower_arm_convex_hull.obj" />
+    <mesh name="link_left_wrist_z" content_type="model/stl" file="meshes/visual/link_left_wrist_z.STL" />
+    <mesh name="link_left_wrist_z_convex_hull" content_type="model/obj" file="meshes/collision/link_left_wrist_z_convex_hull.obj" />
+    <mesh name="link_left_wrist_x" content_type="model/stl" file="meshes/visual/link_left_wrist_x.STL" />
+    <mesh name="link_left_wrist_x_convex_hull" content_type="model/obj" file="meshes/collision/link_left_wrist_x_convex_hull.obj" />
+    <mesh name="link_left_wrist_y" content_type="model/stl" file="meshes/visual/link_left_wrist_y.STL" />
+    <mesh name="link_left_wrist_y_convex_hull" content_type="model/obj" file="meshes/collision/link_left_wrist_y_convex_hull.obj" />
+    <mesh name="left_base_link" content_type="model/stl" file="meshes/visual/left_base_link.STL" />
+    <mesh name="left_base_link_convex_hull" content_type="model/obj" file="meshes/collision/left_base_link_convex_hull.obj" />
+    <mesh name="left_thumb_1" content_type="model/stl" file="meshes/visual/left_thumb_1.STL" />
+    <mesh name="left_thumb_1_convex_hull" content_type="model/obj" file="meshes/collision/left_thumb_1_convex_hull.obj" />
+    <mesh name="left_thumb_2" content_type="model/stl" file="meshes/visual/left_thumb_2.STL" />
+    <mesh name="left_thumb_2_convex_hull" content_type="model/obj" file="meshes/collision/left_thumb_2_convex_hull.obj" />
+    <mesh name="left_thumb_3" content_type="model/stl" file="meshes/visual/left_thumb_3.STL" />
+    <mesh name="left_thumb_3_convex_hull" content_type="model/obj" file="meshes/collision/left_thumb_3_convex_hull.obj" />
+    <mesh name="left_thumb_4" content_type="model/stl" file="meshes/visual/left_thumb_4.STL" />
+    <mesh name="left_thumb_4_convex_hull" content_type="model/obj" file="meshes/collision/left_thumb_4_convex_hull.obj" />
+    <mesh name="left_index_1" content_type="model/stl" file="meshes/visual/left_index_1.STL" />
+    <mesh name="left_index_1_convex_hull" content_type="model/obj" file="meshes/collision/left_index_1_convex_hull.obj" />
+    <mesh name="left_index_2" content_type="model/stl" file="meshes/visual/left_index_2.STL" />
+    <mesh name="left_index_2_convex_hull" content_type="model/obj" file="meshes/collision/left_index_2_convex_hull.obj" />
+    <mesh name="left_middle_1" content_type="model/stl" file="meshes/visual/left_middle_1.STL" />
+    <mesh name="left_middle_1_convex_hull" content_type="model/obj" file="meshes/collision/left_middle_1_convex_hull.obj" />
+    <mesh name="left_middle_2" content_type="model/stl" file="meshes/visual/left_middle_2.STL" />
+    <mesh name="left_middle_2_convex_hull" content_type="model/obj" file="meshes/collision/left_middle_2_convex_hull.obj" />
+    <mesh name="left_ring_1" content_type="model/stl" file="meshes/visual/left_ring_1.STL" />
+    <mesh name="left_ring_1_convex_hull" content_type="model/obj" file="meshes/collision/left_ring_1_convex_hull.obj" />
+    <mesh name="left_ring_2" content_type="model/stl" file="meshes/visual/left_ring_2.STL" />
+    <mesh name="left_ring_2_convex_hull" content_type="model/obj" file="meshes/collision/left_ring_2_convex_hull.obj" />
+    <mesh name="left_little_1" content_type="model/stl" file="meshes/visual/left_little_1.STL" />
+    <mesh name="left_little_1_convex_hull" content_type="model/obj" file="meshes/collision/left_little_1_convex_hull.obj" />
+    <mesh name="left_little_2" content_type="model/stl" file="meshes/visual/left_little_2.STL" />
+    <mesh name="left_little_2_convex_hull" content_type="model/obj" file="meshes/collision/left_little_2_convex_hull.obj" />
+    <mesh name="link_right_shoulder_y" content_type="model/stl" file="meshes/visual/link_right_shoulder_y.STL" />
+    <mesh name="link_right_shoulder_y_convex_hull" content_type="model/obj" file="meshes/collision/link_right_shoulder_y_convex_hull.obj" />
+    <mesh name="link_right_shoulder_x" content_type="model/stl" file="meshes/visual/link_right_shoulder_x.STL" />
+    <mesh name="link_right_shoulder_x_convex_hull" content_type="model/obj" file="meshes/collision/link_right_shoulder_x_convex_hull.obj" />
+    <mesh name="link_right_shoulder_z" content_type="model/stl" file="meshes/visual/link_right_shoulder_z.STL" />
+    <mesh name="link_right_shoulder_z_convex_hull" content_type="model/obj" file="meshes/collision/link_right_shoulder_z_convex_hull.obj" />
+    <mesh name="link_right_lower_arm" content_type="model/stl" file="meshes/visual/link_right_lower_arm.STL" />
+    <mesh name="link_right_lower_arm_convex_hull" content_type="model/obj" file="meshes/collision/link_right_lower_arm_convex_hull.obj" />
+    <mesh name="link_right_wrist_z" content_type="model/stl" file="meshes/visual/link_right_wrist_z.STL" />
+    <mesh name="link_right_wrist_z_convex_hull" content_type="model/obj" file="meshes/collision/link_right_wrist_z_convex_hull.obj" />
+    <mesh name="link_right_wrist_x" content_type="model/stl" file="meshes/visual/link_right_wrist_x.STL" />
+    <mesh name="link_right_wrist_x_convex_hull" content_type="model/obj" file="meshes/collision/link_right_wrist_x_convex_hull.obj" />
+    <mesh name="link_right_wrist_y" content_type="model/stl" file="meshes/visual/link_right_wrist_y.STL" />
+    <mesh name="link_right_wrist_y_convex_hull" content_type="model/obj" file="meshes/collision/link_right_wrist_y_convex_hull.obj" />
+    <mesh name="right_base_link" content_type="model/stl" file="meshes/visual/right_base_link.STL" />
+    <mesh name="right_base_link_convex_hull" content_type="model/obj" file="meshes/collision/right_base_link_convex_hull.obj" />
+    <mesh name="right_thumb_1" content_type="model/stl" file="meshes/visual/right_thumb_1.STL" />
+    <mesh name="right_thumb_1_convex_hull" content_type="model/obj" file="meshes/collision/right_thumb_1_convex_hull.obj" />
+    <mesh name="right_thumb_2" content_type="model/stl" file="meshes/visual/right_thumb_2.STL" />
+    <mesh name="right_thumb_2_convex_hull" content_type="model/obj" file="meshes/collision/right_thumb_2_convex_hull.obj" />
+    <mesh name="right_thumb_3" content_type="model/stl" file="meshes/visual/right_thumb_3.STL" />
+    <mesh name="right_thumb_3_convex_hull" content_type="model/obj" file="meshes/collision/right_thumb_3_convex_hull.obj" />
+    <mesh name="right_thumb_4" content_type="model/stl" file="meshes/visual/right_thumb_4.STL" />
+    <mesh name="right_thumb_4_convex_hull" content_type="model/obj" file="meshes/collision/right_thumb_4_convex_hull.obj" />
+    <mesh name="right_index_1" content_type="model/stl" file="meshes/visual/right_index_1.STL" />
+    <mesh name="right_index_1_convex_hull" content_type="model/obj" file="meshes/collision/right_index_1_convex_hull.obj" />
+    <mesh name="right_index_2" content_type="model/stl" file="meshes/visual/right_index_2.STL" />
+    <mesh name="right_index_2_convex_hull" content_type="model/obj" file="meshes/collision/right_index_2_convex_hull.obj" />
+    <mesh name="right_middle_1" content_type="model/stl" file="meshes/visual/right_middle_1.STL" />
+    <mesh name="right_middle_1_convex_hull" content_type="model/obj" file="meshes/collision/right_middle_1_convex_hull.obj" />
+    <mesh name="right_middle_2" content_type="model/stl" file="meshes/visual/right_middle_2.STL" />
+    <mesh name="right_middle_2_convex_hull" content_type="model/obj" file="meshes/collision/right_middle_2_convex_hull.obj" />
+    <mesh name="right_ring_1" content_type="model/stl" file="meshes/visual/right_ring_1.STL" />
+    <mesh name="right_ring_1_convex_hull" content_type="model/obj" file="meshes/collision/right_ring_1_convex_hull.obj" />
+    <mesh name="right_ring_2" content_type="model/stl" file="meshes/visual/right_ring_2.STL" />
+    <mesh name="right_ring_2_convex_hull" content_type="model/obj" file="meshes/collision/right_ring_2_convex_hull.obj" />
+    <mesh name="right_little_1" content_type="model/stl" file="meshes/visual/right_little_1.STL" />
+    <mesh name="right_little_1_convex_hull" content_type="model/obj" file="meshes/collision/right_little_1_convex_hull.obj" />
+    <mesh name="right_little_2" content_type="model/stl" file="meshes/visual/right_little_2.STL" />
+    <mesh name="right_little_2_convex_hull" content_type="model/obj" file="meshes/collision/right_little_2_convex_hull.obj" />
+    <mesh name="link_head_z" content_type="model/stl" file="meshes/visual/link_head_z.STL" />
+    <mesh name="link_head_z_convex_hull" content_type="model/obj" file="meshes/collision/link_head_z_convex_hull.obj" />
+    <mesh name="link_head_x" content_type="model/stl" file="meshes/visual/link_head_x.STL" />
+    <mesh name="link_head_x_convex_hull" content_type="model/obj" file="meshes/collision/link_head_x_convex_hull.obj" />
+    <mesh name="link_head_y" content_type="model/stl" file="meshes/visual/link_head_y.STL" />
+    <mesh name="link_head_y_convex_hull" content_type="model/obj" file="meshes/collision/link_head_y_convex_hull.obj" />
+    <mesh name="sensor_head_y_depth_cam_left" content_type="model/stl" file="meshes/visual/sensor_head_y_depth_cam_left.STL" />
+    <mesh name="sensor_head_y_depth_cam_right" content_type="model/stl" file="meshes/visual/sensor_head_y_depth_cam_right.STL" />
+    <mesh name="sensor_torso_y_imu" content_type="model/stl" file="meshes/visual/sensor_torso_y_imu.STL" />
+    <mesh name="sensor_torso_y_lidar" content_type="model/stl" file="meshes/visual/sensor_torso_y_lidar.STL" />
+    <mesh name="sensor_pelvis_depth_cam_front" content_type="model/stl" file="meshes/visual/sensor_pelvis_depth_cam_front.STL" />
+    <mesh name="sensor_pelvis_depth_cam_back" content_type="model/stl" file="meshes/visual/sensor_pelvis_depth_cam_back.STL" />
+    <mesh name="sensor_pelvis_imu" content_type="model/stl" file="meshes/visual/sensor_pelvis_imu.STL" />
+    <material name="default_material" rgba="0.7 0.7 0.7 1" />
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300" />
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2" />
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072" />
+  </asset>
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1" directional="true" />
+    <geom name="floor" class="floor" />
+    <body name="link_pelvis" childclass="robot" pos="0 0 0.9535">
+      <inertial pos="-0.00761522 1.626e-05 0.0272548" quat="0.70164 0.703227 -0.0804389 0.0818707" mass="8.70816" diaginertia="0.0666031 0.0547261 0.0486578" />
+      <freejoint name="floating_base_joint" />
+      <geom mesh="link_pelvis" class="visual" name="link_pelvis_visual" material="default_material" />
+      <geom mesh="link_pelvis_convex_hull" class="collision" name="link_pelvis_collision" />
+      <body name="link_left_hip_y" pos="0 0.1035 0">
+        <inertial pos="-0.00085739 0.00671914 -0.00242998" quat="0.693099 0.155198 0.134733 0.690923" mass="2.36664" diaginertia="0.00775555 0.00464982 0.00416631" />
+        <joint name="left_hip_y" pos="0 0 0" axis="0 1 0" range="-1.5708 1.0472" />
+        <geom mesh="link_left_hip_y" class="visual" name="link_left_hip_y_visual" material="default_material" />
+        <geom mesh="link_left_hip_y_convex_hull" class="collision" name="link_left_hip_y_collision" />
+        <body name="link_left_hip_x">
+          <inertial pos="0.00966209 0.00495795 -0.184932" quat="0.787549 -0.0213768 0.0232001 0.615444" mass="6.43177" diaginertia="0.0478326 0.045136 0.0181852" />
+          <joint name="left_hip_x" pos="0 0 0" axis="1 0 0" range="-0.1501 0.58643" />
+          <geom mesh="link_left_hip_x" class="visual" name="link_left_hip_x_visual" material="default_material" />
+          <geom mesh="link_left_hip_x_convex_hull" class="collision" name="link_left_hip_x_collision" />
+          <body name="link_left_hip_z">
+            <inertial pos="1.751e-05 -0.0186992 -0.383906" quat="0.696274 -0.115413 0.116349 0.698817" mass="2.79954" diaginertia="0.0114144 0.0101464 0.00418563" />
+            <joint name="left_hip_z" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" />
+            <geom mesh="link_left_hip_z" class="visual" name="link_left_hip_z_visual" material="default_material" />
+            <geom mesh="link_left_hip_z_convex_hull" class="collision" name="link_left_hip_z_collision" />
+            <body name="link_left_shin" pos="0 0.00425 -0.4275">
+              <inertial pos="-0.00521801 0.0005944 -0.153633" quat="0.997235 -0.00528963 0.021649 -0.0708932" mass="7.39811" diaginertia="0.11933 0.118182 0.0112594" />
+              <joint name="left_knee" pos="0 0 0" axis="0 1 0" range="-0.87266 1.39626" />
+              <geom mesh="link_left_shin" class="visual" name="link_left_shin_visual" material="default_material" />
+              <geom mesh="link_left_shin_convex_hull" class="collision" name="link_left_shin_collision" />
+              <body name="link_left_ankle_y" pos="0 0 -0.43">
+                <inertial pos="0 0 -0.00575014" quat="0.5 0.5 -0.5 0.5" mass="0.0355494" diaginertia="5.12e-06 4.85e-06 4.85e-06" />
+                <joint name="left_ankle_y" pos="0 0 0" axis="0 1 0" range="-0.78539 0.69813" />
+                <geom mesh="link_left_ankle_y" class="visual" name="link_left_ankle_y_visual" material="default_material" />
+                <geom mesh="link_left_ankle_y_convex_hull" class="collision" name="link_left_ankle_y_collision" />
+                <body name="link_left_ankle_x" pos="0 0 -0.0115">
+                  <inertial pos="0.0199357 -0.0004603 -0.0504806" quat="0.0019063 0.745394 0.00172469 0.666619" mass="2.02903" diaginertia="0.0137705 0.0133291 0.00333288" />
+                  <joint name="left_ankle_x" pos="0 0 0" axis="1 0 0" range="-0.24434 0.24434" />
+                  <geom mesh="link_left_ankle_x" class="visual" name="link_left_ankle_x_visual" material="default_material" />
+                  <geom mesh="link_left_ankle_x_convex_hull" class="collision" name="link_left_ankle_x_collision" />
+                  <site name="left_foot_sole" pos="0.035 0 -0.083" size="0.02" />
+                  <site name="left_foot_toe" pos="0.19 0 -0.076" size="0.02" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="link_right_hip_y" pos="0 -0.1035 0">
+        <inertial pos="-0.0008574 -0.00671913 -0.00242715" quat="0.690658 0.135584 0.152917 0.693704" mass="2.36664" diaginertia="0.00775475 0.00464857 0.0041684" />
+        <joint name="right_hip_y" pos="0 0 0" axis="0 1 0" range="-1.5708 1.0472" />
+        <geom mesh="link_right_hip_y" class="visual" name="link_right_hip_y_visual" material="default_material" />
+        <geom mesh="link_right_hip_y_convex_hull" class="collision" name="link_right_hip_y_collision" />
+        <body name="link_right_hip_x">
+          <inertial pos="0.00959897 -0.00494495 -0.184909" quat="0.615532 0.0228673 -0.022035 0.787472" mass="6.43188" diaginertia="0.0478607 0.0451353 0.018202" />
+          <joint name="right_hip_x" pos="0 0 0" axis="1 0 0" range="-0.58643 0.1501" />
+          <geom mesh="link_right_hip_x" class="visual" name="link_right_hip_x_visual" material="default_material" />
+          <geom mesh="link_right_hip_x_convex_hull" class="collision" name="link_right_hip_x_collision" />
+          <body name="link_right_hip_z">
+            <inertial pos="2.833e-05 0.018698 -0.383901" quat="0.699232 0.116485 -0.115479 0.695824" mass="2.79911" diaginertia="0.0114138 0.0101451 0.00418258" />
+            <joint name="right_hip_z" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" />
+            <geom mesh="link_right_hip_z" class="visual" name="link_right_hip_z_visual" material="default_material" />
+            <geom mesh="link_right_hip_z_convex_hull" class="collision" name="link_right_hip_z_collision" />
+            <body name="link_right_shin" pos="0 -0.00425 -0.4275">
+              <inertial pos="-0.00520136 -0.0005936 -0.153655" quat="0.996882 0.00540594 0.0217273 0.0756586" mass="7.39814" diaginertia="0.11935 0.118196 0.011262" />
+              <joint name="right_knee" pos="0 0 0" axis="0 1 0" range="-0.87266 1.39626" />
+              <geom mesh="link_right_shin" class="visual" name="link_right_shin_visual" material="default_material" />
+              <geom mesh="link_right_shin_convex_hull" class="collision" name="link_right_shin_collision" />
+              <body name="link_right_ankle_y" pos="0 0 -0.43">
+                <inertial pos="0 0 -0.00575014" quat="0.5 0.5 -0.5 0.5" mass="0.0355494" diaginertia="5.12e-06 4.85e-06 4.85e-06" />
+                <joint name="right_ankle_y" pos="0 0 0" axis="0 1 0" range="-0.78539 0.69813" />
+                <geom mesh="link_right_ankle_y" class="visual" name="link_right_ankle_y_visual" material="default_material" />
+                <geom mesh="link_right_ankle_y_convex_hull" class="collision" name="link_right_ankle_y_collision" />
+                <body name="link_right_ankle_x" pos="0 0 -0.0115">
+                  <inertial pos="0.0199383 0.00046354 -0.0505228" quat="-0.00241289 0.745473 -0.00236824 0.666527" mass="2.02846" diaginertia="0.0137703 0.0133272 0.00332905" />
+                  <joint name="right_ankle_x" pos="0 0 0" axis="1 0 0" range="-0.24434 0.24434" />
+                  <geom mesh="link_right_ankle_x" class="visual" name="link_right_ankle_x_visual" material="default_material" />
+                  <geom mesh="link_right_ankle_x_convex_hull" class="collision" name="link_right_ankle_x_collision" />
+                  <site name="right_foot_sole" pos="0.035 0 -0.083" size="0.02" />
+                  <site name="right_foot_toe" pos="0.19 0 -0.076" size="0.02" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="link_torso_z" pos="0 0 0.25">
+        <inertial pos="0.0160563 -3.854e-05 -0.050691" quat="0.988796 0.000599457 0.149274 -0.000641127" mass="2.28511" diaginertia="0.00840502 0.00788603 0.00254735" />
+        <joint name="torso_z" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+        <geom mesh="link_torso_z" class="visual" name="link_torso_z_visual" material="default_material" />
+        <geom mesh="link_torso_z_convex_hull" class="collision" name="link_torso_z_collision" />
+        <body name="link_torso_x">
+          <inertial pos="-0.00180321 -0.0155271 0.0555193" quat="0.675424 0.0880234 -0.0861285 0.727074" mass="2.2975" diaginertia="0.0104743 0.0099562 0.00233421" />
+          <joint name="torso_x" pos="0 0 0" axis="1 0 0" range="-0.5236 0.5236" />
+          <geom mesh="link_torso_x" class="visual" name="link_torso_x_visual" material="default_material" />
+          <geom mesh="link_torso_x_convex_hull" class="collision" name="link_torso_x_collision" />
+          <body name="link_torso_y" pos="0 0 0.114">
+            <inertial pos="0.00801001 -0.00306474 0.0862078" quat="0.99935 -0.0357256 0.00213452 -0.00441421" mass="12.101" diaginertia="0.169136 0.157666 0.111521" />
+            <joint name="torso_y" pos="0 0 0" axis="0 1 0" range="-0.08727 0.34907" />
+            <geom mesh="link_torso_y" class="visual" name="link_torso_y_visual" material="default_material" />
+            <geom mesh="link_torso_y_convex_hull" class="collision" name="link_torso_y_collision" />
+            <body name="link_torso_battery">
+              <inertial pos="-0.148271 2.272e-05 0.0675059" quat="0.99935 -2.91644e-05 0.0360488 -8.58138e-05" mass="3.05333" diaginertia="0.0355813 0.0256822 0.0134857" />
+            </body>
+            <body name="link_left_shoulder_y" pos="0 0.20737 0.14908" quat="0.994522 0.104529 0 0">
+              <inertial pos="0.015621 -0.0504564 0.00069015" quat="0.701801 0.692676 -0.149993 -0.0719561" mass="2.55805" diaginertia="0.00987734 0.00916689 0.0036382" />
+              <joint name="left_shoulder_y" pos="0 0 0" axis="0 1 0" range="-3.14159 3.14159" />
+              <geom mesh="link_left_shoulder_y" class="visual" name="link_left_shoulder_y_visual" material="default_material" />
+              <geom mesh="link_left_shoulder_y_convex_hull" class="collision" name="link_left_shoulder_y_collision" />
+              <body name="link_left_shoulder_x">
+                <inertial pos="-0.00404916 -0.00026908 -0.0650242" quat="0.712796 -0.00885662 -0.0070205 0.70128" mass="2.15741" diaginertia="0.0153697 0.0152518 0.00263531" />
+                <joint name="left_shoulder_x" pos="0 0 0" axis="1 0 0" range="-0.17453 2.00713" />
+                <geom mesh="link_left_shoulder_x" class="visual" name="link_left_shoulder_x_visual" material="default_material" />
+                <geom mesh="link_left_shoulder_x_convex_hull" class="collision" name="link_left_shoulder_x_collision" />
+                <body name="link_left_shoulder_z">
+                  <inertial pos="-0.00010103 0.00459489 -0.2475" quat="0.998681 0.0426006 0.00064596 -0.0286615" mass="1.45277" diaginertia="0.00398402 0.00394506 0.00154425" />
+                  <joint name="left_shoulder_z" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+                  <geom mesh="link_left_shoulder_z" class="visual" name="link_left_shoulder_z_visual" material="default_material" />
+                  <geom mesh="link_left_shoulder_z_convex_hull" class="collision" name="link_left_shoulder_z_collision" />
+                  <body name="link_left_lower_arm" pos="0 0 -0.2915">
+                    <inertial pos="0.00013253 -0.0146394 -0.0410178" quat="0.701008 0.102945 -0.103831 0.698004" mass="1.27813" diaginertia="0.0037586 0.00348805 0.00112732" />
+                    <joint name="left_elbow" pos="0 0 0" axis="0 1 0" range="-1.5708 1.5708" />
+                    <geom mesh="link_left_lower_arm" class="visual" name="link_left_lower_arm_visual" material="default_material" />
+                    <geom mesh="link_left_lower_arm_convex_hull" class="collision" name="link_left_lower_arm_collision" />
+                    <body name="link_left_wrist_z" quat="0.707105 0 0 0.707108">
+                      <inertial pos="-0.00284395 4.656e-05 -0.170116" quat="0.997503 -0.0006511 0.0160592 -0.0687748" mass="1.39986" diaginertia="0.00472532 0.00471104 0.00132748" />
+                      <joint name="left_wrist_z" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+                      <geom mesh="link_left_wrist_z" class="visual" name="link_left_wrist_z_visual" material="default_material" />
+                      <geom mesh="link_left_wrist_z_convex_hull" class="collision" name="link_left_wrist_z_collision" />
+                      <body name="link_left_wrist_x" pos="0.011 0 -0.2905">
+                        <inertial pos="0.00065545 -5.491e-05 -0.00631851" quat="0.9996 0 -0.028284 0" mass="0.0287057" diaginertia="2.27283e-06 2.04e-06 1.38717e-06" />
+                        <joint name="left_wrist_x" pos="0 0 0" axis="0 1 0" range="-0.5236 1.0472" />
+                        <geom mesh="link_left_wrist_x" class="visual" name="link_left_wrist_x_visual" material="default_material" />
+                        <geom mesh="link_left_wrist_x_convex_hull" class="collision" name="link_left_wrist_x_collision" />
+                        <body name="link_left_wrist_y" pos="0.001179 0 -0.013448" quat="0.999044 0 -0.0437231 0">
+                          <inertial pos="-0.0143406 0 -0.0111173" quat="0 0.794588 0 0.607149" mass="0.10304" diaginertia="4.22037e-05 3.225e-05 2.56363e-05" />
+                          <joint name="left_wrist_y" pos="0 0 0" axis="1 0 0" range="-0.7854 0.7854" />
+                          <geom mesh="link_left_wrist_y" class="visual" name="link_left_wrist_y_visual" material="default_material" />
+                          <geom mesh="link_left_wrist_y_convex_hull" class="collision" name="link_left_wrist_y_collision" />
+                          <body name="link_left_hand_base" pos="-0.01 0 -0.0235" quat="0.707105 0 0 -0.707108">
+                            <inertial pos="-5.81855e-05 0.0036856 -0.0826154" quat="0.697744 0.0337152 -0.0395624 0.714459" mass="0.260034" diaginertia="0.000268293 0.000223639 0.000131386" />
+                            <geom mesh="left_base_link" class="visual" name="link_left_hand_base_visual" material="default_material" />
+                            <geom mesh="left_base_link_convex_hull" class="collision" name="link_left_hand_base_collision" />
+                            <body name="left_thumb_1" pos="0.0269 -0.02101 -0.07075">
+                              <inertial pos="0.00178423 -0.000649405 -0.00313589" quat="0.609482 0.695344 0.128439 -0.358513" mass="0.00115519" diaginertia="6.58579e-08 5.87769e-08 3.77927e-08" />
+                              <joint name="left_thumb_1_joint" pos="0 0 0" axis="0 0 -1" range="0 1.15" actuatorfrcrange="-10 10" />
+                              <geom mesh="left_thumb_1" class="visual" name="left_thumb_1_visual" material="default_material" />
+                              <geom mesh="left_thumb_1_convex_hull" class="collision" name="left_thumb_1_collision" />
+                              <body name="left_thumb_2" pos="0.0063016 -0.011924 -0.00125" quat="0.696363 -0.696365 0.122789 -0.122789">
+                                <inertial pos="0.0141077 0.0132729 0.00905028" quat="0.65319 0.270895 -0.653128 0.270891" mass="0.016" diaginertia="1.3971e-06 1.14195e-06 9.89493e-07" />
+                                <joint name="left_thumb_2_joint" pos="0 0 0" axis="0 0 1" range="0 0.55" actuatorfrcrange="-10 10" />
+                                <geom mesh="left_thumb_2" class="visual" name="left_thumb_2_visual" material="default_material" />
+                                <geom mesh="left_thumb_2_convex_hull" class="collision" name="left_thumb_2_collision" />
+                                <body name="left_thumb_3" pos="0.026828 0.02583 0.00315">
+                                  <inertial pos="0.0175211 -0.000458783 0.00589187" quat="0.689932 0.68741 -0.159656 -0.161158" mass="0.012" diaginertia="4.90101e-07 4.24725e-07 3.7664e-07" />
+                                  <joint name="left_thumb_3_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                  <geom mesh="left_thumb_3" class="visual" name="left_thumb_3_visual" material="default_material" />
+                                  <geom mesh="left_thumb_3_convex_hull" class="collision" name="left_thumb_3_collision" />
+                                  <body name="left_thumb_4" pos="0.027027 0.0069965 -0.00145">
+                                    <inertial pos="0.0159973 0.00631058 0.00734331" quat="0.308125 0.306985 0.636085 0.63735" mass="0.01" diaginertia="9.67936e-07 9.25704e-07 4.39366e-07" />
+                                    <joint name="left_thumb_4_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                    <geom mesh="left_thumb_4" class="visual" name="left_thumb_4_visual" material="default_material" />
+                                    <geom mesh="left_thumb_4_convex_hull" class="collision" name="left_thumb_4_collision" />
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="left_index_1" pos="0.025387 -0.00056467 -0.15686" quat="0.491197 -0.508648 -0.50865 0.491199">
+                              <inertial pos="-0.00183599 0.0123544 -0.00665153" quat="0.4848 0.514683 -0.484931 0.514696" mass="0.0071995" diaginertia="1.32915e-06 1.28615e-06 5.76927e-07" />
+                              <joint name="left_index_1_joint" pos="0 0 0" axis="0 0 1" range="0 1.6" actuatorfrcrange="-10 10" />
+                              <geom mesh="left_index_1" class="visual" name="left_index_1_visual" material="default_material" />
+                              <geom mesh="left_index_1_convex_hull" class="collision" name="left_index_1_collision" />
+                              <body name="left_index_2" pos="-0.0016312 0.032734 -0.00055">
+                                <inertial pos="0.00040542 0.0257004 -0.00610831" quat="0.702978 0.703607 0.0750632 0.0715825" mass="0.00968688" diaginertia="2.34233e-06 2.30248e-06 3.04577e-07" />
+                                <joint name="left_index_2_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                <geom mesh="left_index_2" class="visual" name="left_index_2_visual" material="default_material" />
+                                <geom mesh="left_index_2_convex_hull" class="collision" name="left_index_2_collision" />
+                              </body>
+                            </body>
+                            <body name="left_middle_1" pos="0.0037996 -0.00056467 -0.157" quat="0.499998 -0.5 -0.500002 0.5">
+                              <inertial pos="-0.00229271 0.0122779 -0.00665151" quat="0.475172 0.523583 -0.475307 0.523598" mass="0.0071995" diaginertia="1.32913e-06 1.28614e-06 5.76927e-07" />
+                              <joint name="left_middle_1_joint" pos="0 0 0" axis="0 0 1" range="0 1.6" actuatorfrcrange="-1 1" />
+                              <geom mesh="left_middle_1" class="visual" name="left_middle_1_visual" material="default_material" />
+                              <geom mesh="left_middle_1_convex_hull" class="collision" name="left_middle_1_collision" />
+                              <body name="left_middle_2" pos="-0.0028436 0.032651 -0.00055">
+                                <inertial pos="7.51984e-05 0.0274488 -0.00610023" quat="0.703913 0.703925 0.067032 0.0670976" mass="0.0104612" diaginertia="2.84801e-06 2.80723e-06 3.32779e-07" />
+                                <joint name="left_middle_2_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                <geom mesh="left_middle_2" class="visual" name="left_middle_2_visual" material="default_material" />
+                                <geom mesh="left_middle_2_convex_hull" class="collision" name="left_middle_2_collision" />
+                              </body>
+                            </body>
+                            <body name="left_ring_1" pos="-0.017813 -0.00056467 -0.15614" quat="0.512925 -0.48673 -0.486732 0.512927">
+                              <inertial pos="-0.0024053 0.0122563 -0.00665151" quat="0.472763 0.525759 -0.4729 0.525774" mass="0.0071995" diaginertia="1.32913e-06 1.28613e-06 5.76927e-07" />
+                              <joint name="left_ring_1_joint" pos="0 0 0" axis="0 0 1" range="0 1.6" actuatorfrcrange="-10 10" />
+                              <geom mesh="left_ring_1" class="visual" name="left_ring_1_visual" material="default_material" />
+                              <geom mesh="left_ring_1_convex_hull" class="collision" name="left_ring_1_collision" />
+                              <body name="left_ring_2" pos="-0.0031431 0.032624 -0.00055">
+                                <inertial pos="0.000667145 0.0256949 -0.0061083" quat="0.703335 0.703979 0.0714872 0.0679937" mass="0.00968685" diaginertia="2.34233e-06 2.30247e-06 3.04576e-07" />
+                                <joint name="left_ring_2_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                <geom mesh="left_ring_2" class="visual" name="left_ring_2_visual" material="default_material" />
+                                <geom mesh="left_ring_2_convex_hull" class="collision" name="left_ring_2_collision" />
+                              </body>
+                            </body>
+                            <body name="left_little_1" pos="-0.039144 -0.00056467 -0.15226" quat="0.525476 -0.473152 -0.473154 0.525478">
+                              <inertial pos="-0.00316889 0.0120815 -0.00665149" quat="0.456037 0.540325 -0.456186 0.540346" mass="0.00719946" diaginertia="1.32912e-06 1.28612e-06 5.76925e-07" />
+                              <joint name="left_little_1_joint" pos="0 0 0" axis="0 0 1" range="0 1.6" actuatorfrcrange="-10 10" />
+                              <geom mesh="left_little_1" class="visual" name="left_little_1_visual" material="default_material" />
+                              <geom mesh="left_little_1_convex_hull" class="collision" name="left_little_1_collision" />
+                              <body name="left_little_2" pos="-0.005182 0.032363 -0.00055">
+                                <inertial pos="0.00469504 0.020442 -0.00610049" quat="0.706681 0.706688 0.0244341 0.0244339" mass="0.00759268" diaginertia="1.28165e-06 1.23907e-06 2.26503e-07" />
+                                <joint name="left_little_2_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                <geom mesh="left_little_2" class="visual" name="left_little_2_visual" material="default_material" />
+                                <geom mesh="left_little_2_convex_hull" class="collision" name="left_little_2_collision" />
+                              </body>
+                            </body>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+            <body name="link_right_shoulder_y" pos="0 -0.20737 0.14908" quat="0.994522 -0.104529 0 0">
+              <inertial pos="0.0156192 0.0504579 0.00068949" quat="0.692685 0.701914 0.0718487 0.149474" mass="2.55803" diaginertia="0.00987281 0.00916645 0.00364231" />
+              <joint name="right_shoulder_y" pos="0 0 0" axis="0 1 0" range="-3.14159 3.14159" />
+              <geom mesh="link_right_shoulder_y" class="visual" name="link_right_shoulder_y_visual" material="default_material" />
+              <geom mesh="link_right_shoulder_y_convex_hull" class="collision" name="link_right_shoulder_y_collision" />
+              <body name="link_right_shoulder_x">
+                <inertial pos="-0.00404843 0.00029834 -0.0650237" quat="0.723868 -0.0069082 -0.00891594 0.689847" mass="2.15736" diaginertia="0.0153699 0.0152514 0.00263521" />
+                <joint name="right_shoulder_x" pos="0 0 0" axis="1 0 0" range="-2.00713 0.17453" />
+                <geom mesh="link_right_shoulder_x" class="visual" name="link_right_shoulder_x_visual" material="default_material" />
+                <geom mesh="link_right_shoulder_x_convex_hull" class="collision" name="link_right_shoulder_x_collision" />
+                <body name="link_right_shoulder_z">
+                  <inertial pos="-0.00011102 -0.00459506 -0.2475" quat="0.998741 -0.0426393 0.000723531 0.026425" mass="1.45275" diaginertia="0.00398389 0.00394505 0.00154419" />
+                  <joint name="right_shoulder_z" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+                  <geom mesh="link_right_shoulder_z" class="visual" name="link_right_shoulder_z_visual" material="default_material" />
+                  <geom mesh="link_right_shoulder_z_convex_hull" class="collision" name="link_right_shoulder_z_collision" />
+                  <body name="link_right_lower_arm" pos="0 0 -0.2915">
+                    <inertial pos="4.278e-05 0.0146401 -0.0410179" quat="0.698038 -0.103536 0.10331 0.700964" mass="1.27815" diaginertia="0.00375912 0.00348809 0.00112739" />
+                    <joint name="right_elbow" pos="0 0 0" axis="0 1 0" range="-1.5708 1.5708" />
+                    <geom mesh="link_right_lower_arm" class="visual" name="link_right_lower_arm_visual" material="default_material" />
+                    <geom mesh="link_right_lower_arm_convex_hull" class="collision" name="link_right_lower_arm_collision" />
+                    <body name="link_right_wrist_z" quat="0.707105 0 0 -0.707108">
+                      <inertial pos="-0.00284395 4.656e-05 -0.170116" quat="0.997503 -0.0006511 0.0160592 -0.0687748" mass="1.39986" diaginertia="0.00472532 0.00471104 0.00132748" />
+                      <joint name="right_wrist_z" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+                      <geom mesh="link_right_wrist_z" class="visual" name="link_right_wrist_z_visual" material="default_material" />
+                      <geom mesh="link_right_wrist_z_convex_hull" class="collision" name="link_right_wrist_z_collision" />
+                      <body name="link_right_wrist_x" pos="0.011 0 -0.2905">
+                        <inertial pos="0.00065545 -5.491e-05 -0.00631851" quat="0.9996 0 -0.028284 0" mass="0.0287057" diaginertia="2.27283e-06 2.04e-06 1.38717e-06" />
+                        <joint name="right_wrist_x" pos="0 0 0" axis="0 1 0" range="-0.5236 1.0472" />
+                        <geom mesh="link_right_wrist_x" class="visual" name="link_right_wrist_x_visual" material="default_material" />
+                        <geom mesh="link_right_wrist_x_convex_hull" class="collision" name="link_right_wrist_x_collision" />
+                        <body name="link_right_wrist_y" pos="0.001179 0 -0.013448" quat="0.999044 0 -0.0437231 0">
+                          <inertial pos="-0.0143406 0 -0.0111173" quat="0 0.794588 0 0.607149" mass="0.10304" diaginertia="4.22037e-05 3.225e-05 2.56363e-05" />
+                          <joint name="right_wrist_y" pos="0 0 0" axis="1 0 0" range="-0.7854 0.7854" />
+                          <geom mesh="link_right_wrist_y" class="visual" name="link_right_wrist_y_visual" material="default_material" />
+                          <geom mesh="link_right_wrist_y_convex_hull" class="collision" name="link_right_wrist_y_collision" />
+                          <body name="link_right_hand_base" pos="-0.01 0 -0.0235" quat="0.707105 0 0 0.707108">
+                            <inertial pos="-4.91697e-05 -0.00297934 -0.0724838" quat="0.714156 -0.041306 0.0350618 0.697887" mass="0.260034" diaginertia="0.00028598 0.000240564 0.000154318" />
+                            <geom mesh="right_base_link" class="visual" name="link_right_hand_base_visual" material="default_material" />
+                            <geom mesh="right_base_link_convex_hull" class="collision" name="link_right_hand_base_collision" />
+                            <body name="right_thumb_1" pos="0.0269 0.02101 -0.069" quat="1.34924e-11 3.67321e-06 1 3.67321e-06">
+                              <inertial pos="-0.00178423 0.000649411 0.00488589" quat="0.609481 0.695344 0.128437 -0.358515" mass="0.00115519" diaginertia="6.58579e-08 5.87769e-08 3.77927e-08" />
+                              <joint name="right_thumb_1_joint" pos="0 0 0" axis="0 0 -1" range="0 1.15" actuatorfrcrange="-10 10" />
+                              <geom mesh="right_thumb_1" class="visual" name="right_thumb_1_visual" material="default_material" />
+                              <geom mesh="right_thumb_1_convex_hull" class="collision" name="right_thumb_1_collision" />
+                              <body name="right_thumb_2" pos="-0.0063016 0.011924 0.003" quat="0.122797 0.122797 0.696364 0.696361">
+                                <inertial pos="0.0141071 0.013272 -0.0090503" quat="0.653094 0.270971 -0.653141 0.271017" mass="0.016" diaginertia="1.39688e-06 1.14175e-06 9.89349e-07" />
+                                <joint name="right_thumb_2_joint" pos="0 0 0" axis="0 0 1" range="0 0.55" actuatorfrcrange="-10 10" />
+                                <geom mesh="right_thumb_2" class="visual" name="right_thumb_2_visual" material="default_material" />
+                                <geom mesh="right_thumb_2_convex_hull" class="collision" name="right_thumb_2_collision" />
+                                <body name="right_thumb_3" pos="0.034968 0.021325 -0.0015">
+                                  <inertial pos="0.00937844 0.00404408 -0.00753947" quat="0.686654 0.690582 -0.161401 -0.159853" mass="0.012" diaginertia="4.9004e-07 4.24794e-07 3.76617e-07" />
+                                  <joint name="right_thumb_3_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                  <geom mesh="right_thumb_3" class="visual" name="right_thumb_3_visual" material="default_material" />
+                                  <geom mesh="right_thumb_3_convex_hull" class="collision" name="right_thumb_3_collision" />
+                                  <body name="right_thumb_4" pos="0.018887 0.011501 -0.0002">
+                                    <inertial pos="0.0109974 0.00131063 -0.00734352" quat="0.306916 0.308192 0.637344 0.636092" mass="0.01" diaginertia="9.67919e-07 9.25691e-07 4.39361e-07" />
+                                    <joint name="right_thumb_4_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                    <geom mesh="right_thumb_4" class="visual" name="right_thumb_4_visual" material="default_material" />
+                                    <geom mesh="right_thumb_4_convex_hull" class="collision" name="right_thumb_4_collision" />
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="right_index_1" pos="0.038679 0.00056467 -0.1564" quat="0.508647 -0.491199 0.491201 -0.508648">
+                              <inertial pos="-0.00183546 0.0123553 -0.00664922" quat="0.484907 0.514648 -0.484865 0.514692" mass="0.00719999" diaginertia="1.32925e-06 1.28623e-06 5.76964e-07" />
+                              <joint name="right_index_1_joint" pos="0 0 0" axis="0 0 1" range="0 1.6" actuatorfrcrange="-10 10" />
+                              <geom mesh="right_index_1" class="visual" name="right_index_1_visual" material="default_material" />
+                              <geom mesh="right_index_1_convex_hull" class="collision" name="right_index_1_collision" />
+                              <body name="right_index_2" pos="-0.0016312 0.032734 -0.00055">
+                                <inertial pos="0.000405081 0.0257028 -0.00609276" quat="0.703612 0.702971 0.0715956 0.0750715" mass="0.00968594" diaginertia="2.34184e-06 2.30201e-06 3.04584e-07" />
+                                <joint name="right_index_2_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                <geom mesh="right_index_2" class="visual" name="right_index_2_visual" material="default_material" />
+                                <geom mesh="right_index_2_convex_hull" class="collision" name="right_index_2_collision" />
+                              </body>
+                            </body>
+                            <body name="right_middle_1" pos="0.0171 0.00056467 -0.157" quat="0.499998 -0.5 0.500002 -0.5">
+                              <inertial pos="-0.00229221 0.0122787 -0.00664924" quat="0.47528 0.52355 -0.47524 0.523594" mass="0.00719999" diaginertia="1.32924e-06 1.28622e-06 5.76964e-07" />
+                              <joint name="right_middle_1_joint" pos="0 0 0" axis="0 0 1" range="0 1.6" actuatorfrcrange="-10 10" />
+                              <geom mesh="right_middle_1" class="visual" name="right_middle_1_visual" material="default_material" />
+                              <geom mesh="right_middle_1_convex_hull" class="collision" name="right_middle_1_collision" />
+                              <body name="right_middle_2" pos="-0.0028436 0.032651 -0.00055">
+                                <inertial pos="7.55635e-05 0.0274472 -0.00610051" quat="0.703921 0.703917 0.0669721 0.067155" mass="0.0104603" diaginertia="2.8477e-06 2.80695e-06 3.32744e-07" />
+                                <joint name="right_middle_2_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                <geom mesh="right_middle_2" class="visual" name="right_middle_2_visual" material="default_material" />
+                                <geom mesh="right_middle_2_convex_hull" class="collision" name="right_middle_2_collision" />
+                              </body>
+                            </body>
+                            <body name="right_ring_1" pos="-0.0045302 0.00056467 -0.15683" quat="0.486728 -0.512927 0.512929 -0.48673">
+                              <inertial pos="-0.00240481 0.0122572 -0.00664924" quat="0.472873 0.525725 -0.472833 0.52577" mass="0.00719999" diaginertia="1.32924e-06 1.28622e-06 5.76964e-07" />
+                              <joint name="right_ring_1_joint" pos="0 0 0" axis="0 0 1" range="0 1.6" actuatorfrcrange="-10 10" />
+                              <geom mesh="right_ring_1" class="visual" name="right_ring_1_visual" material="default_material" />
+                              <geom mesh="right_ring_1_convex_hull" class="collision" name="right_ring_1_collision" />
+                              <body name="right_ring_2" pos="-0.0031431 0.032624 -0.00055">
+                                <inertial pos="0.000666831 0.0256973 -0.00609277" quat="0.703985 0.703327 0.0680113 0.0714909" mass="0.00968594" diaginertia="2.34184e-06 2.30201e-06 3.04584e-07" />
+                                <joint name="right_ring_2_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                <geom mesh="right_ring_2" class="visual" name="right_ring_2_visual" material="default_material" />
+                                <geom mesh="right_ring_2_convex_hull" class="collision" name="right_ring_2_collision" />
+                              </body>
+                            </body>
+                            <body name="right_little_1" pos="-0.025916 0.00056467 -0.15365" quat="0.47315 -0.525478 0.52548 -0.473152">
+                              <inertial pos="-0.00316845 0.0120824 -0.00664923" quat="0.456153 0.540294 -0.456113 0.54034" mass="0.00719995" diaginertia="1.32923e-06 1.28621e-06 5.76963e-07" />
+                              <joint name="right_little_1_joint" pos="0 0 0" axis="0 0 1" range="0 1.6" actuatorfrcrange="-10 10" />
+                              <geom mesh="right_little_1" class="visual" name="right_little_1_visual" material="default_material" />
+                              <geom mesh="right_little_1_convex_hull" class="collision" name="right_little_1_collision" />
+                              <body name="right_little_2" pos="-0.005182 0.032363 -0.00055" quat="0.707105 0 0 0.707108">
+                                <inertial pos="0.0204417 -0.00469494 -0.0061" quat="0.482475 0.482374 0.517036 0.51692" mass="0.00759282" diaginertia="1.28167e-06 1.2391e-06 2.26514e-07" />
+                                <joint name="right_little_2_joint" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-10 10" />
+                                <geom mesh="right_little_2" class="visual" name="right_little_2_visual" material="default_material" />
+                                <geom mesh="right_little_2_convex_hull" class="collision" name="right_little_2_collision" />
+                              </body>
+                            </body>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+            <body name="link_head_z" pos="0 0 0.257">
+              <inertial pos="0.00058186 0 0.0101572" quat="0.00244106 0.670197 -0.00254367 0.742175" mass="0.560582" diaginertia="0.00033485 0.00024657 0.00024487" />
+              <joint name="head_z" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+              <geom mesh="link_head_z" class="visual" name="link_head_z_visual" material="default_material" />
+              <geom mesh="link_head_z_convex_hull" class="collision" name="link_head_z_collision" />
+              <body name="link_head_x" pos="-0.013 0 0.009">
+                <inertial pos="0 3.045e-05 0.00954084" quat="0.707107 0.707107 0 0" mass="0.00990074" diaginertia="4.3e-07 2.9e-07 2.7e-07" />
+                <joint name="head_x" pos="0 0 0" axis="1 0 0" range="-0.69813 0.69813" />
+                <geom mesh="link_head_x" class="visual" name="link_head_x_visual" material="default_material" />
+                <geom mesh="link_head_x_convex_hull" class="collision" name="link_head_x_collision" />
+                <body name="link_head_y" pos="0 0 0.011">
+                  <inertial pos="0.042354 -0.0007982 0.124954" quat="0.696183 0.0325986 0.0134559 0.716998" mass="1.6345" diaginertia="0.00748242 0.00649097 0.0044501" />
+                  <joint name="head_y" pos="0 0 0" axis="0 1 0" range="-0.5236 0.5236" />
+                  <geom mesh="link_head_y" class="visual" name="link_head_y_visual" material="default_material" />
+                  <geom mesh="link_head_y_convex_hull" class="collision" name="link_head_y_collision" />
+                  <body name="sensor_head_y_depth_cam_left" pos="0.08011 0.027 0.065199" quat="0.525476 0.473152 -0.473154 -0.525478">
+                    <inertial pos="9.08176e-08 7.72507e-05 -0.01033" mass="0" diaginertia="0 0 0" />
+                    <geom mesh="sensor_head_y_depth_cam_left" class="visual" name="sensor_head_y_depth_cam_left_visual" material="default_material" />
+                  </body>
+                  <body name="sensor_head_y_depth_cam_right" pos="0.08011 -0.027 0.065199" quat="0.525476 0.473152 -0.473154 -0.525478">
+                    <inertial pos="9.08176e-08 7.72507e-05 -0.01033" mass="0" diaginertia="0 0 0" />
+                    <geom mesh="sensor_head_y_depth_cam_right" class="visual" name="sensor_head_y_depth_cam_right_visual" material="default_material" />
+                  </body>
+                </body>
+              </body>
+            </body>
+            <body name="sensor_torso_y_imu" pos="-0.03545 0.0615 0.2239" quat="1.32679e-06 1 0 0">
+              <inertial pos="0.0149584 -0.00990766 -0.000196532" mass="0" diaginertia="0 0 0" />
+              <geom mesh="sensor_torso_y_imu" class="visual" name="sensor_torso_y_imu_visual" material="default_material" />
+              <site name="sensor_torso_y_imu_site" pos="0 0 0" quat="1 0 0 0" />
+            </body>
+            <body name="sensor_torso_y_lidar" pos="0.14881 0 0.03245" quat="0.97237 0 0.233446 0">
+              <inertial pos="-0.0001943 1.86207e-07 -0.00449646" mass="0" diaginertia="0 0 0" />
+              <geom mesh="sensor_torso_y_lidar" class="visual" name="sensor_torso_y_lidar_visual" material="default_material" />
+            </body>
+            <body name="sensor_torso_y_depth_cam" pos="0.13655 0 0.0083925" quat="0.369472 -0.6029 0.602902 -0.369474">
+              <inertial pos="0.0600003 -0.000162264 -0.0176555" mass="0" diaginertia="0 0 0" />
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="sensor_pelvis_depth_cam_front" pos="0.071474 -0.024984 0.08589" quat="0.695444 0.12789 -0.12789 -0.695447">
+        <inertial pos="-0.0249838 -0.0617779 0.0386149" mass="0" diaginertia="0 0 0" />
+        <geom mesh="sensor_pelvis_depth_cam_front" class="visual" name="sensor_pelvis_depth_cam_front_visual" material="default_material" />
+      </body>
+      <body name="sensor_pelvis_depth_cam_back" pos="-0.09357 -0.025196 0.039474" quat="0.64889 0.292642 0.288747 0.640255">
+        <inertial pos="0.0264509 -0.0238415 0.10332" mass="0" diaginertia="0 0 0" />
+        <geom mesh="sensor_pelvis_depth_cam_back" class="visual" name="sensor_pelvis_depth_cam_back_visual" material="default_material" />
+      </body>
+      <body name="sensor_pelvis_imu" pos="0.045176 0 -0.034593">
+        <inertial pos="0 0 0" mass="0" diaginertia="0 0 0" />
+        <geom mesh="sensor_pelvis_imu" class="visual" name="sensor_pelvis_imu_visual" material="default_material" />
+      </body>
+      <site name="link_pelvis_site" pos="0 0 0" quat="1 0 0 0" />
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="left_hip_y" joint="left_hip_y" ctrllimited="true" ctrlrange="-110 110" forcelimited="true" forcerange="-110 110" />
+    <motor name="left_hip_x" joint="left_hip_x" ctrllimited="true" ctrlrange="-100 100" forcelimited="true" forcerange="-100 100" />
+    <motor name="left_hip_z" joint="left_hip_z" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="left_knee" joint="left_knee" ctrllimited="true" ctrlrange="-100 100" forcelimited="true" forcerange="-100 100" />
+    <motor name="left_ankle_y" joint="left_ankle_y" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="left_ankle_x" joint="left_ankle_x" ctrllimited="true" ctrlrange="-35 35" forcelimited="true" forcerange="-35 35" />
+    <motor name="right_hip_y" joint="right_hip_y" ctrllimited="true" ctrlrange="-110 110" forcelimited="true" forcerange="-110 110" />
+    <motor name="right_hip_x" joint="right_hip_x" ctrllimited="true" ctrlrange="-100 100" forcelimited="true" forcerange="-100 100" />
+    <motor name="right_hip_z" joint="right_hip_z" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="right_knee" joint="right_knee" ctrllimited="true" ctrlrange="-100 100" forcelimited="true" forcerange="-100 100" />
+    <motor name="right_ankle_y" joint="right_ankle_y" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="right_ankle_x" joint="right_ankle_x" ctrllimited="true" ctrlrange="-35 35" forcelimited="true" forcerange="-35 35" />
+    <motor name="torso_z" joint="torso_z" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="torso_x" joint="torso_x" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="torso_y" joint="torso_y" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="left_shoulder_y" joint="left_shoulder_y" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="left_shoulder_x" joint="left_shoulder_x" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="left_shoulder_z" joint="left_shoulder_z" ctrllimited="true" ctrlrange="-30 30" forcelimited="true" forcerange="-30 30" />
+    <motor name="left_elbow" joint="left_elbow" ctrllimited="true" ctrlrange="-30 30" forcelimited="true" forcerange="-30 30" />
+    <motor name="left_wrist_z" joint="left_wrist_z" ctrllimited="true" ctrlrange="-30 30" forcelimited="true" forcerange="-30 30" />
+    <motor name="left_wrist_x" joint="left_wrist_x" ctrllimited="true" ctrlrange="-15 15" forcelimited="true" forcerange="-15 15" />
+    <motor name="left_wrist_y" joint="left_wrist_y" ctrllimited="true" ctrlrange="-15 15" forcelimited="true" forcerange="-15 15" />
+    <motor name="right_shoulder_y" joint="right_shoulder_y" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="right_shoulder_x" joint="right_shoulder_x" ctrllimited="true" ctrlrange="-60 60" forcelimited="true" forcerange="-60 60" />
+    <motor name="right_shoulder_z" joint="right_shoulder_z" ctrllimited="true" ctrlrange="-30 30" forcelimited="true" forcerange="-30 30" />
+    <motor name="right_elbow" joint="right_elbow" ctrllimited="true" ctrlrange="-30 30" forcelimited="true" forcerange="-30 30" />
+    <motor name="right_wrist_z" joint="right_wrist_z" ctrllimited="true" ctrlrange="-30 30" forcelimited="true" forcerange="-30 30" />
+    <motor name="right_wrist_x" joint="right_wrist_x" ctrllimited="true" ctrlrange="-15 15" forcelimited="true" forcerange="-15 15" />
+    <motor name="right_wrist_y" joint="right_wrist_y" ctrllimited="true" ctrlrange="-15 15" forcelimited="true" forcerange="-15 15" />
+    <motor name="head_z" joint="head_z" ctrllimited="true" ctrlrange="-10 10" forcelimited="true" forcerange="-10 10" />
+    <motor name="head_x" joint="head_x" ctrllimited="true" ctrlrange="-15 15" forcelimited="true" forcerange="-15 15" />
+    <motor name="head_y" joint="head_y" ctrllimited="true" ctrlrange="-15 15" forcelimited="true" forcerange="-15 15" />
+  </actuator>
+  <contact>
+    <!-- head -->
+    <exclude body1="link_head_x" body2="link_head_y" />
+    <exclude body1="link_head_x" body2="link_head_z" />
+    <exclude body1="link_head_y" body2="link_head_z" />
+    <!-- head / torso -->
+    <exclude body1="link_head_x" body2="link_torso_y" />
+    <exclude body1="link_head_y" body2="link_torso_y" />
+    <exclude body1="link_head_z" body2="link_torso_y" />
+    <!-- left arm -->
+    <exclude body1="link_left_lower_arm" body2="link_left_shoulder_x" />
+    <exclude body1="link_left_lower_arm" body2="link_left_shoulder_z" />
+    <exclude body1="link_left_lower_arm" body2="link_left_wrist_z" />
+    <exclude body1="link_left_shoulder_x" body2="link_left_shoulder_y" />
+    <exclude body1="link_left_shoulder_x" body2="link_left_shoulder_z" />
+    <exclude body1="link_left_shoulder_x" body2="link_left_wrist_z" />
+    <exclude body1="link_left_wrist_x" body2="link_left_wrist_y" />
+    <exclude body1="link_left_wrist_x" body2="link_left_wrist_z" />
+    <exclude body1="link_left_wrist_y" body2="link_left_wrist_z" />
+    <!-- left arm / torso -->
+    <exclude body1="link_left_shoulder_x" body2="link_torso_y" />
+    <exclude body1="link_left_shoulder_y" body2="link_torso_y" />
+    <exclude body1="link_left_shoulder_z" body2="link_torso_y" />
+    <!-- left hand -->
+    <exclude body1="left_thumb_2" body2="link_left_hand_base" />
+    <!-- left hand / left arm -->
+    <exclude body1="link_left_hand_base" body2="link_left_wrist_y" />
+    <!-- left leg -->
+    <exclude body1="link_left_ankle_x" body2="link_left_ankle_y" />
+    <exclude body1="link_left_ankle_x" body2="link_left_shin" />
+    <exclude body1="link_left_ankle_y" body2="link_left_shin" />
+    <exclude body1="link_left_hip_x" body2="link_left_hip_y" />
+    <exclude body1="link_left_hip_x" body2="link_left_hip_z" />
+    <exclude body1="link_left_hip_y" body2="link_left_hip_z" />
+    <exclude body1="link_left_hip_z" body2="link_left_shin" />
+    <!-- left leg / torso -->
+    <exclude body1="link_left_hip_x" body2="link_pelvis" />
+    <exclude body1="link_left_hip_y" body2="link_pelvis" />
+    <exclude body1="link_left_hip_z" body2="link_pelvis" />
+    <!-- right arm -->
+    <exclude body1="link_right_lower_arm" body2="link_right_shoulder_x" />
+    <exclude body1="link_right_lower_arm" body2="link_right_shoulder_z" />
+    <exclude body1="link_right_lower_arm" body2="link_right_wrist_z" />
+    <exclude body1="link_right_shoulder_x" body2="link_right_shoulder_y" />
+    <exclude body1="link_right_shoulder_x" body2="link_right_shoulder_z" />
+    <exclude body1="link_right_shoulder_x" body2="link_right_wrist_z" />
+    <exclude body1="link_right_wrist_x" body2="link_right_wrist_y" />
+    <exclude body1="link_right_wrist_x" body2="link_right_wrist_z" />
+    <exclude body1="link_right_wrist_y" body2="link_right_wrist_z" />
+    <!-- right arm / torso -->
+    <exclude body1="link_right_shoulder_x" body2="link_torso_y" />
+    <exclude body1="link_right_shoulder_y" body2="link_torso_y" />
+    <exclude body1="link_right_shoulder_z" body2="link_torso_y" />
+    <!-- right hand -->
+    <exclude body1="link_right_hand_base" body2="right_thumb_2" />
+    <!-- right hand / right arm -->
+    <exclude body1="link_right_hand_base" body2="link_right_wrist_y" />
+    <!-- right leg -->
+    <exclude body1="link_right_ankle_x" body2="link_right_ankle_y" />
+    <exclude body1="link_right_ankle_x" body2="link_right_shin" />
+    <exclude body1="link_right_ankle_y" body2="link_right_shin" />
+    <exclude body1="link_right_hip_x" body2="link_right_hip_y" />
+    <exclude body1="link_right_hip_x" body2="link_right_hip_z" />
+    <exclude body1="link_right_hip_y" body2="link_right_hip_z" />
+    <exclude body1="link_right_hip_z" body2="link_right_shin" />
+    <!-- torso -->
+    <exclude body1="link_pelvis" body2="link_torso_z" />
+    <exclude body1="link_torso_x" body2="link_torso_y" />
+    <exclude body1="link_torso_x" body2="link_torso_z" />
+    <exclude body1="link_torso_y" body2="link_torso_z" />
+    <!-- torso / right leg -->
+    <exclude body1="link_pelvis" body2="link_right_hip_x" />
+    <exclude body1="link_pelvis" body2="link_right_hip_y" />
+    <exclude body1="link_pelvis" body2="link_right_hip_z" />
+  </contact>
+  <sensor>
+    <framepos name="link_pelvis_site_pos" objtype="site" objname="link_pelvis_site" />
+    <framequat name="link_pelvis_site_quat" objtype="site" objname="link_pelvis_site" />
+    <framelinvel name="link_pelvis_site_linvel" objtype="site" objname="link_pelvis_site" />
+    <frameangvel name="link_pelvis_site_angvel" objtype="site" objname="link_pelvis_site" />
+    <velocimeter name="link_pelvis_site_vel" site="link_pelvis_site" />
+    <gyro name="sensor_torso_y_imu_gyro" site="sensor_torso_y_imu_site" />
+    <accelerometer name="sensor_torso_y_imu_accel" site="sensor_torso_y_imu_site" />
+    <velocimeter name="sensor_torso_y_imu_vel" site="sensor_torso_y_imu_site" />
+    <subtreeangmom name="root_angmom" body="link_pelvis" />
+  </sensor>
+  <keyframe>
+    <key name="standing" qpos="0 0 0.942027 1 0 0 0 -0.1 0 0 0.3 -0.2 0 -0.1 0 0 0.3 -0.2 0 0 0 0 0.2 0.05 0 -0.4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.2 -0.05 0 -0.4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0" />
+  </keyframe>
+</mujoco>

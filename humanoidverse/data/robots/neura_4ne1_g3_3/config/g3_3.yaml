@@ -1,0 +1,180 @@
+# Post-processing config for neura_4ne1_g3_3.
+#
+# The MJCF is generated from neura_4ne1_g3_3.urdf and is overwritten on every
+# re-export. Everything in this file is re-applied by postprocess.py afterwards,
+# so no hand edit of the XML is ever needed (or preserved).
+#
+# Scope: joint damping, armature and frictionloss are deliberately NOT handled.
+
+# Spawn the pelvis above the floor instead of inside it.
+pelvis_pos: [0, 0, 0.9535]
+
+# Collision hull decimation, performed by the MuJoCo compiler at load time and
+# applied uniformly to all the collision meshes. Caps each hull at 64 vertices, down
+# from a mean of 818 and a max of 3091 in the exported meshes. MuJoCo's
+# simplification keeps a subset of the original vertices rather than shrinking
+# the surface, so the extreme points -- and with them the standing height set
+# below -- survive untouched.
+maxhullvert: 64
+
+option:
+  integrator: implicitfast
+
+add_floor: true
+
+# Robot-robot self-collision is ENABLED. Contact is filtered by the exclude list
+# below rather than by switching contype off completely, so real self-collisions
+# are still detected. Verified to give 0 contacts at the nominal pose.
+self_collision: true
+
+# Body pairs whose collision hulls overlap by construction. MuJoCo already
+# filters direct parent-child pairs; these are the rest.
+excludes:
+  - [link_head_x, link_head_y]
+  - [link_head_x, link_head_z]
+  - [link_head_x, link_torso_y]
+  - [link_head_y, link_head_z]
+  - [link_head_y, link_torso_y]
+  - [link_head_z, link_torso_y]
+  - [link_left_ankle_x, link_left_ankle_y]
+  - [link_left_ankle_x, link_left_shin]
+  - [link_left_ankle_y, link_left_shin]
+  - [link_left_hand_base, left_thumb_2]
+  - [link_left_hand_base, link_left_wrist_y]
+  - [link_left_hip_x, link_left_hip_y]
+  - [link_left_hip_x, link_left_hip_z]
+  - [link_left_hip_x, link_pelvis]
+  - [link_left_hip_y, link_left_hip_z]
+  - [link_left_hip_y, link_pelvis]
+  - [link_left_hip_z, link_left_shin]
+  - [link_left_hip_z, link_pelvis]
+  - [link_left_lower_arm, link_left_shoulder_x]
+  - [link_left_lower_arm, link_left_shoulder_z]
+  - [link_left_lower_arm, link_left_wrist_z]
+  - [link_left_shoulder_x, link_left_shoulder_y]
+  - [link_left_shoulder_x, link_left_shoulder_z]
+  - [link_left_shoulder_x, link_left_wrist_z]
+  - [link_left_shoulder_x, link_torso_y]
+  - [link_left_shoulder_y, link_torso_y]
+  - [link_left_shoulder_z, link_torso_y]
+  - [link_left_wrist_x, link_left_wrist_y]
+  - [link_left_wrist_x, link_left_wrist_z]
+  - [link_left_wrist_y, link_left_wrist_z]
+  - [link_pelvis, link_right_hip_x]
+  - [link_pelvis, link_right_hip_y]
+  - [link_pelvis, link_right_hip_z]
+  - [link_pelvis, link_torso_z]
+  - [link_right_ankle_x, link_right_ankle_y]
+  - [link_right_ankle_x, link_right_shin]
+  - [link_right_ankle_y, link_right_shin]
+  - [link_right_hand_base, link_right_wrist_y]
+  - [link_right_hand_base, right_thumb_2]
+  - [link_right_hip_x, link_right_hip_y]
+  - [link_right_hip_x, link_right_hip_z]
+  - [link_right_hip_y, link_right_hip_z]
+  - [link_right_hip_z, link_right_shin]
+  - [link_right_lower_arm, link_right_shoulder_x]
+  - [link_right_lower_arm, link_right_shoulder_z]
+  - [link_right_lower_arm, link_right_wrist_z]
+  - [link_right_shoulder_x, link_right_shoulder_y]
+  - [link_right_shoulder_x, link_right_shoulder_z]
+  - [link_right_shoulder_x, link_right_wrist_z]
+  - [link_right_shoulder_x, link_torso_y]
+  - [link_right_shoulder_y, link_torso_y]
+  - [link_right_shoulder_z, link_torso_y]
+  - [link_right_wrist_x, link_right_wrist_y]
+  - [link_right_wrist_x, link_right_wrist_z]
+  - [link_right_wrist_y, link_right_wrist_z]
+  - [link_torso_x, link_torso_y]
+  - [link_torso_x, link_torso_z]
+  - [link_torso_y, link_torso_z]
+
+# balanceinertia silently rewrites any inertia that violates the triangle
+# inequality. No body in this model violates it, and
+# compiling with and without the flag gives bit-identical mass and inertia. It
+# is removed so that a bad inertia introduced later fails loudly instead of
+# being quietly repaired. The 8 massless bodies are the sensor mounts, which
+# are welded to their parent and therefore legitimately massless.
+compiler_remove: [balanceinertia]
+
+# Effort limits in Nm
+# Applied as both ctrlrange (clamps the command) and forcerange (clamps the
+# applied torque, so a future gear change cannot bypass the limit).
+actuator_effort_limits:
+  left_hip_y: [-110, 110]
+  left_hip_x: [-100, 100]
+  left_hip_z: [-60, 60]
+  left_knee: [-100, 100]
+  left_ankle_y: [-60, 60]
+  left_ankle_x: [-35, 35]
+  right_hip_y: [-110, 110]
+  right_hip_x: [-100, 100]
+  right_hip_z: [-60, 60]
+  right_knee: [-100, 100]
+  right_ankle_y: [-60, 60]
+  right_ankle_x: [-35, 35]
+  torso_z: [-60, 60]
+  torso_x: [-60, 60]
+  torso_y: [-60, 60]
+  left_shoulder_y: [-60, 60]
+  left_shoulder_x: [-60, 60]
+  left_shoulder_z: [-30, 30]
+  left_elbow: [-30, 30]
+  left_wrist_z: [-30, 30]
+  left_wrist_x: [-15, 15]
+  left_wrist_y: [-15, 15]
+  right_shoulder_y: [-60, 60]
+  right_shoulder_x: [-60, 60]
+  right_shoulder_z: [-30, 30]
+  right_elbow: [-30, 30]
+  right_wrist_z: [-30, 30]
+  right_wrist_x: [-15, 15]
+  right_wrist_y: [-15, 15]
+  head_z: [-10, 10]
+  head_x: [-15, 15]
+  head_y: [-15, 15]
+
+# Reference frames for state and IMU sensors.
+sites:
+  - {body: link_pelvis,        name: link_pelvis_site,        pos: [0, 0, 0], quat: [1, 0, 0, 0]}
+  - {body: sensor_torso_y_imu, name: sensor_torso_y_imu_site, pos: [0, 0, 0], quat: [1, 0, 0, 0]}
+  - {body: link_left_ankle_x,  name: left_foot_sole,  pos: [0.035, 0, -0.083], size: 0.02}
+  - {body: link_left_ankle_x,  name: left_foot_toe,   pos: [0.19, 0, -0.076], size: 0.02}
+  - {body: link_right_ankle_x, name: right_foot_sole, pos: [0.035, 0, -0.083], size: 0.02}
+  - {body: link_right_ankle_x, name: right_foot_toe,  pos: [0.19, 0, -0.076], size: 0.02}
+
+sensors:
+  - {type: framepos,      name: link_pelvis_site_pos,       objtype: site, objname: link_pelvis_site}
+  - {type: framequat,     name: link_pelvis_site_quat,      objtype: site, objname: link_pelvis_site}
+  - {type: framelinvel,   name: link_pelvis_site_linvel,    objtype: site, objname: link_pelvis_site}
+  - {type: frameangvel,   name: link_pelvis_site_angvel,    objtype: site, objname: link_pelvis_site}
+  - {type: velocimeter,   name: link_pelvis_site_vel,       site: link_pelvis_site}
+  - {type: gyro,          name: sensor_torso_y_imu_gyro,    site: sensor_torso_y_imu_site}
+  - {type: accelerometer, name: sensor_torso_y_imu_accel,   site: sensor_torso_y_imu_site}
+  - {type: velocimeter,   name: sensor_torso_y_imu_vel,     site: sensor_torso_y_imu_site}
+  - {type: subtreeangmom, name: root_angmom,                body: link_pelvis}
+
+# Named poses. qpos is assembled by joint name, so any joint left out sits at 0
+# and adding or removing joints (e.g., the 24 finger joints) cannot silently
+# shift the pose
+#
+# base_pos z was computed as the height at which the lowest
+# vertex of the foot collision hulls meets the floor plane. Verified against
+# meshes/collision at maxhullvert 64.
+keyframes:
+  - name: standing
+    base_pos: [0, 0, 0.942027]
+    base_quat: [1, 0, 0, 0]
+    joints:
+      left_hip_y: -0.1
+      left_knee: 0.3
+      left_ankle_y: -0.2
+      right_hip_y: -0.1
+      right_knee: 0.3
+      right_ankle_y: -0.2
+      left_shoulder_y: 0.2
+      left_shoulder_x: 0.05
+      left_elbow: -0.4
+      right_shoulder_y: 0.2
+      right_shoulder_x: -0.05
+      right_elbow: -0.4
