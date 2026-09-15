@@ -228,7 +228,7 @@ UFO 支持基于 manifest 的多数据源混合。每个数据源之间的采样
 
 ## 文档链接
 
-- [Import Wizard](docs/import_wizard.md)：RobotState schema、数据检查和数据构建。
+- [Import Wizard](docs/import_wizard.md)：RobotState schema、开头 T-pose 裁剪、数据检查和数据构建。
 - [Robot-Config Training](docs/robot_config_training.md)：实验性的 robot-aware training 初始化说明。
 - [Training and Inference](docs/TRAIN_INFERENCE.md)：更多训练和推理命令。
 - [Deploy branch](https://github.com/Roboparty/UFO/tree/deploy)：G1 实机部署和遥操作运行时。

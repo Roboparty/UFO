@@ -82,6 +82,30 @@ Example smoke command:
   --smoke
 ```
 
+## Worked Example: NEURA 4NE-1 G3.3
+
+`configs/robots/neura_4ne1_g3_3.yaml` is a fully curated robot config that shows what the
+drafts need before formal training:
+
+- `feet` / `training.semantics.contact_bodies` must be the bodies that own the foot collision
+  geoms (`sensor_{left,right}_foot_fts`, left first); the MJLab contact sensor is body-scoped.
+- `training.semantics.torso_name` is the chest link (`link_torso_y`) used for base-COM
+  randomization and torso metrics.
+- `left/right_ankle_dof_names` are ordered `[pitch, roll]`.
+- `training.control.stiffness/damping` keys are joint-name substrings (first match wins); the
+  values come from the identified 4NE-1 actuator groups shipped next to the MJCF.
+- `training.control.effort_limit` equals the MJCF motor force range; together with the gains it
+  fixes the per-joint action scale `0.25 * effort / kp`.
+- `training.actuator.source: yaml` lists effort, velocity, armature, and Coulomb friction per
+  joint (the G1 mode-15 table only knows G1 joint names).
+- `training.init_state.pos` puts the lowest foot-hull vertex on the floor for the default pose.
+- The Hydra group `neura_4ne1_g3_3/neura_4ne1_g3_3` keeps `motion.extend_config: []` (real head
+  bodies exist) and lists all 70 MJCF bodies; MotionLib needs one `pose_aa` slot per body.
+
+Robot MJCFs exported by external tools may contain `--` inside XML comments. MuJoCo accepts
+this, Python XML parsers do not; UFO strips comments before parsing (`humanoidverse/utils/mjcf_xml.py`),
+so such assets can be used unchanged.
+
 Current limitations:
 
 - The first version still requires `training.hydra_robot` to select a base

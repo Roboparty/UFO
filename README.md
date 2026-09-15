@@ -128,7 +128,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --buffer-size 5120000
 ```
 
-### 4. TeCH training on G1
+### 4. TeCH Training on G1
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -235,15 +235,63 @@ Optional: run `humanoidverse.tools.data_inspect` first if you want to validate t
 
 See [Import Wizard](docs/import_wizard.md) for data schemas and import commands, and [Robot-Config Training](docs/robot_config_training.md) for required training fields, current constraints, and bring-up guidance.
 
+## Path C: NEURA 4NE-1 G3.3
+
+A complete, curated bring-up of the NEURA 4NE-1 G3.3 (32 actuated DoF, fingers welded) on
+LaFAN1 motions retargeted from G1 ships with the repository. Design notes and the data
+analysis are in [docs/superpowers/specs/2026-09-11-neura-4ne1-g3-3-port-design.md](docs/superpowers/specs/2026-09-11-neura-4ne1-g3-3-port-design.md).
+
+| File | Role |
+| --- | --- |
+| `configs/robots/neura_4ne1_g3_3.yaml` | Curated robot config (feet, torso, PD gains, torque limits, default pose, actuator table). |
+| `humanoidverse/config/robot/neura_4ne1_g3_3/neura_4ne1_g3_3.yaml` | Hydra robot group used by the training environment. |
+| `configs/data/lafan_neura_4ne1_g3_3.yaml` | Manifest pointing at Git LFS UFO pickles (10s train clips + full inference motions). |
+| `scripts/train_4ne1_g3_3.sh` | Single-GPU TeCH (default) or FB training with W&B logging and preview videos. |
+
+Motions are under `humanoidverse/data/lafan1_4ne1_groundoffset/` (Git LFS):
+`lafan_4ne1_g3_3_train_near10s_ufo.pkl` for training, `lafan_4ne1_g3_3_full_ufo.pkl` for
+tracking inference, and source OmniRetargeting NPZs under `motions/` (leading T-poses already
+trimmed). After `git lfs pull`, training can start without rebuilding `cache/`.
+
+```bash
+# 1. Fetch LFS motion pickles (required on a fresh clone)
+git lfs pull
+
+# 2. Smoke test
+./run_train.sh --agent tech --robot-config configs/robots/neura_4ne1_g3_3.yaml \
+  --data-manifest configs/data/lafan_neura_4ne1_g3_3.yaml --gpu-ids single --smoke \
+  --work-dir runs/smoke_4ne1_g3_3
+
+# 3. Full training in a tmux session (W&B + preview videos under video/)
+/usr/bin/tmux new-session -d -s ufo_4ne1_train -c "$PWD" \
+  'bash scripts/train_4ne1_g3_3.sh 2>&1 | tee -a runs/ufo_tech_4ne1_g3_3_groundoffset.log'
+
+# 4. Tracking inference with MP4 export (always pass the 4NE-1 robot config and data)
+CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.tracking_inference \
+  --model-folder runs/ufo_fb_4ne1_g3_3 --robot-config configs/robots/neura_4ne1_g3_3.yaml \
+  --data-manifest configs/data/lafan_neura_4ne1_g3_3.yaml --dataset lafan_4ne1_g3_3 \
+  --device cuda:0 --headless --save-mp4 --motion-list 28 22 --export-onnx true
+```
+
+Notes:
+
+- Blackwell GPUs (sm_120) need the CUDA 12.8 torch wheels; `pyproject.toml` pins torch to the
+  `pytorch-cu128` index, so a plain `uv sync` works.
+- `--video-every-checkpoints N` renders side-by-side expert/policy previews in a background
+  subprocess after every N-th checkpoint and logs them to W&B (`--video-motion-ids` indexes the
+  full inference motion set; see [Training and Inference](docs/TRAIN_INFERENCE.md)).
+- Goal and reward inference remain G1-centric; tracking inference and ONNX export work for the 4NE-1.
+
 ## Multi-source skill injection
 
 UFO supports manifest-based, source-weighted multi-source data mixing. This is useful for injecting rare agile skills, such as cartwheel motions, while preserving the base motion distribution. The dataset identity is sampled from a fixed source ratio, and prioritized sampling is applied within each source. See `configs/data/example_mix.yaml` for a compact manifest example.
 
 ## Documentation
 
-- [Import Wizard](docs/import_wizard.md): RobotState schemas, inspection, and data building.
-- [Robot-Config Training](docs/robot_config_training.md): experimental robot-aware training initialization.
-- [Training and Inference](docs/TRAIN_INFERENCE.md): additional commands and runtime notes.
+- [Import Wizard](docs/import_wizard.md): RobotState schemas, T-pose trim, inspection, data building, and ground alignment.
+- [Robot-Config Training](docs/robot_config_training.md): experimental robot-aware training initialization, with the 4NE-1 as a worked example.
+- [Training and Inference](docs/TRAIN_INFERENCE.md): additional commands, preview videos, and runtime notes.
+- [4NE-1 G3.3 port design notes](docs/superpowers/specs/2026-09-11-neura-4ne1-g3-3-port-design.md): decisions, data analysis, and follow-ups.
 - [Deploy branch](https://github.com/Roboparty/UFO/tree/deploy): G1 real-robot deployment and teleoperation runtime.
 
 ## Citation / License

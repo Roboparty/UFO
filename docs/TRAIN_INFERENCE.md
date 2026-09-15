@@ -54,6 +54,22 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 
 TeCH was previously exposed as the TLDR preset in early UFO versions. `--agent tldr` is kept as a deprecated compatibility alias for `--agent tech`.
 
+## Preview Videos During Training
+
+```bash
+./run_train.sh --agent fb ... --use-wandb \
+  --video-every-checkpoints 1 --video-motion-ids 28 22 0 --video-max-steps 400 --video-render-size 320
+```
+
+After every N-th checkpoint save, rank 0 snapshots the model weights and launches
+`python -m humanoidverse.tracking_inference --save-mp4` as a background subprocess (own 1-env
+MJLab instance, offscreen EGL renderer). When it finishes, the side-by-side expert/policy MP4s
+are moved to `<work_dir>/videos/step_<global_step>/` and logged to W&B under `video/` with the
+checkpoint step as caption. `--video-motion-ids` indexes the full (unclipped) inference motion
+set of the manifest, or the training data when no manifest is used. Training is never blocked;
+a job that is still running when the next checkpoint arrives is left alone and the new preview
+is skipped.
+
 ## Tracking Inference
 
 ```bash

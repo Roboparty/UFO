@@ -7,6 +7,7 @@ The available commands are:
 - `humanoidverse.tools.robot_inspect`
 - `humanoidverse.tools.data_inspect`
 - `humanoidverse.tools.data_build`
+- `humanoidverse.tools.motion_trim_tpose`
 
 These tools generate and check configuration files, then call the existing `RobotSpec`, motion adapters, and manifest auto-build path. They do not change FB/TeCH algorithms, MotionLib sampling, or the training environment.
 
@@ -98,6 +99,67 @@ uv run python -m humanoidverse.tools.data_build \
 ```
 
 Remove `--smoke` and set the desired GPU and training options only after the import path has been checked.
+
+## Trim Leading T-Pose Holds
+
+LAFAN1 captures start with a static T-pose for a few seconds. Absolute shoulder angles after
+retargeting can wrap by ±π, so the cut is not a fixed frame count. The tool finds the end of
+the opening hold as the later of:
+
+- the first frame whose mean arm-joint distance from frame 0 exceeds 0.45 rad (wrapped)
+- the first frame whose mean joint speed exceeds 0.004 rad/frame, if that hold lasted at least 0.3 s
+
+then drops an extra 0.2 s. The search is capped at 20 s. Time-series arrays in the NPZ
+(`joint_pos`, `base_pos_w`, `base_quat_w`, and any other length-T field) are sliced together.
+The number of dropped frames is stored as `tpose_trimmed_frames`; a second run skips the file.
+A sibling `*.mp4` with the original (pre-trim) frame count is re-encoded from the same start
+frame so preview videos stay aligned with the NPZ.
+
+```bash
+uv run python -m humanoidverse.tools.motion_trim_tpose \
+  --source humanoidverse/data/lafan1_4ne1_groundoffset/motions \
+  --dry-run
+
+uv run python -m humanoidverse.tools.motion_trim_tpose \
+  --source humanoidverse/data/lafan1_4ne1_groundoffset/motions
+```
+
+`--skip-npz` / `--skip-video` process only one of the two. This was applied in place to all 77
+motions under `humanoidverse/data/lafan1_4ne1_groundoffset/motions` (drops of 66–316 frames,
+2.2–10.5 s at 30 fps). These NPZs still use `joint_pos` / `base_pos_w` / `base_quat_w` /
+`framerate`; map them to `dof_pos` / `root_pos` / `root_quat` / `fps` before `data_build`.
+
+## Ground Alignment for Floor-Unaware Retargets
+
+Some retargeting pipelines match keypoints only and let the target robot's collision
+geometry sink below the floor (feet, hands, or the whole body in lying poses). A
+`robot_state_*` dataset can opt into a correction at build time:
+
+```yaml
+datasets:
+  - name: my_motion
+    format: robot_state_csv
+    source_path: /path/to/motions/*.csv
+    fps: 30
+    ground_alignment:
+      mode: per_frame_lift            # or "none" to only measure
+      tolerance_m: 0.02               # penetration left untouched
+      smooth_seconds: 0.3             # centered moving average of the per-frame lift
+      max_residual_penetration_m: 0.15  # drop training clips still deeper than this; null keeps all
+    auto_build:
+      train_clip_seconds: 10.0
+```
+
+`data_build --ground-align [--ground-tolerance-m 0.02 --ground-smooth-seconds 0.3 --max-ground-penetration-m 0.15]`
+writes the same block. The builder runs MuJoCo forward kinematics with the robot XML for
+every frame, measures the deepest world-frame point of all collision geoms, lifts the root by
+the smoothed excess penetration, and records `metadata.ground_alignment` statistics in each
+motion. Clip filtering applies to the auto-built training clips only; the full-length
+inference motions are lifted but never dropped. `ufo_pkl` sources are not touched.
+
+Trade-offs: sustained segments (a robot lying on the floor) are lifted fully; brief spikes
+(toe digs) are only partially corrected so the root does not bounce; clearly broken clips are
+removed. The correct long-term fix is a floor-aware retargeter.
 
 ## Important Notes
 
