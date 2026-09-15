@@ -1,0 +1,16 @@
+# LaFAN1 motions retargeted onto NEURA 4NE-1 G3.3 (77 OmniRetargeting NPZ files,
+# 32 dof_pos values in named joint order, 30 fps, with leading T-poses already trimmed).
+#
+# Training and inference use the Git LFS UFO pickles below so an EC2 clone can train
+# without rebuilding cache/. Rebuild from NPZ if needed with:
+#   uv run python -c "from humanoidverse.utils.motion_data import prepare_motion_manifest as p; \
+#     print(p('configs/data/lafan_neura_4ne1_g3_3.yaml', rebuild_cache=True))"
+# after switching this dataset back to format: robot_state_npz + source_path + auto_build.
+robot_config: configs/robots/neura_4ne1_g3_3.yaml
+
+datasets:
+  - name: lafan_4ne1_g3_3
+    format: ufo_pkl
+    train_path: humanoidverse/data/lafan1_4ne1_groundoffset/lafan_4ne1_g3_3_train_near10s_ufo.pkl
+    inference_path: humanoidverse/data/lafan1_4ne1_groundoffset/lafan_4ne1_g3_3_full_ufo.pkl
+    weight: 1.0

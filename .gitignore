@@ -23,6 +23,8 @@ tea_debug.log
 # Generated inference media
 model/
 
-# Downloaded public motion data
+# Downloaded public motion data (G1 LaFAN; 4NE-1 pickles/NPZs are tracked via Git LFS)
 humanoidverse/data/lafan_29dof_10s-clipped.pkl
 humanoidverse/data/lafan_29dof.pkl
+humanoidverse/data/lafan1_4ne1_groundoffset/motions/**/*.mp4
+humanoidverse/data/lafan1_4ne1_groundoffset/git_status/
