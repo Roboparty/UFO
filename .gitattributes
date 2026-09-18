@@ -3,3 +3,7 @@ humanoidverse/data/**/*.pkl filter=lfs diff=lfs merge=lfs -text
 
 humanoidverse/data/lafan_29dof.pkl filter=lfs diff=lfs merge=lfs -text
 humanoidverse/data/lafan_29dof_10s-clipped.pkl filter=lfs diff=lfs merge=lfs -text
+
+# Retargeted LAFAN1 motion dataset.
+lafan1_kuavo_s45_gmr/**/*.csv filter=lfs diff=lfs merge=lfs -text
+lafan1_kuavo_s45_gmr/*.pkl filter=lfs diff=lfs merge=lfs -text
