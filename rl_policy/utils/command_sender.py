@@ -2,8 +2,7 @@ import time
 import numpy as np
 import zmq
 
-from utils.strings import resolve_matching_names_values
-from utils.strings import unitree_joint_names
+from utils.strings import joint_values, unitree_joint_names
 from utils.common import LowCmdMessage, PORTS
 
 
@@ -19,40 +18,12 @@ class CommandSender:
                     f"Robot type {self.robot_type} is not supported by the UFO-Deploy release runtime"
                 )
 
-        # init robot and kp kd
-        self._kp_level = 1.0  # 0.1
-
+        self._kp_level = 1.0
         self.policy_config = policy_config
-        joint_kp_dict = self.policy_config["joint_kp"]
-        joint_indices, joint_names, joint_kp = resolve_matching_names_values(
-            joint_kp_dict,
-            unitree_joint_names,
-            preserve_order=True,
-            strict=False,
-        )
-        self.joint_kp_unitree_default = np.zeros(len(unitree_joint_names))
-        self.joint_kp_unitree_default[joint_indices] = joint_kp
+        self.joint_kp_unitree_default = joint_values(policy_config["joint_kp"], unitree_joint_names)
         self.joint_kp_unitree = self.joint_kp_unitree_default.copy()
-
-        joint_kd_dict = self.policy_config["joint_kd"]
-        joint_indices, joint_names, joint_kd = resolve_matching_names_values(
-            joint_kd_dict,
-            unitree_joint_names,
-            preserve_order=True,
-            strict=False,
-        )
-        self.joint_kd_unitree = np.zeros(len(unitree_joint_names))
-        self.joint_kd_unitree[joint_indices] = joint_kd
-
-        default_joint_pos_dict = self.policy_config["default_joint_pos"]
-        joint_indices, joint_names, default_joint_pos = resolve_matching_names_values(
-            default_joint_pos_dict,
-            unitree_joint_names,
-            preserve_order=True,
-            strict=False,
-        )
-        self.default_joint_pos_unitree = np.zeros(len(unitree_joint_names))
-        self.default_joint_pos_unitree[joint_indices] = default_joint_pos
+        self.joint_kd_unitree = joint_values(policy_config["joint_kd"], unitree_joint_names)
+        self.default_joint_pos_unitree = joint_values(policy_config["default_joint_pos"], unitree_joint_names)
 
         joint_names_isaac = self.policy_config["isaac_joint_names"]
         self.joint_indices_unitree = [unitree_joint_names.index(name) for name in joint_names_isaac]
@@ -61,7 +32,7 @@ class CommandSender:
         if self.robot_type != "g1_real":
             self.zmq_context = zmq.Context.instance()
             self.low_cmd_port = robot_config.get(
-                "LOW_CMD_PORT", PORTS.get("low_cmd", 55901)
+                "LOW_CMD_PORT", PORTS["low_cmd"]
             )
             bind_addr = robot_config.get("LOW_CMD_BIND_ADDR", "*")
             bind_endpoint = f"tcp://{bind_addr}:{self.low_cmd_port}"

@@ -23,34 +23,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 
-class Reporter:
-    def __init__(self) -> None:
-        self.failures = 0
-        self.warnings = 0
-
-    def ok(self, message: str) -> None:
-        print(f"[OK] {message}")
-
-    def info(self, message: str) -> None:
-        print(f"[INFO] {message}")
-
-    def warn(self, message: str) -> None:
-        self.warnings += 1
-        print(f"[WARN] {message}")
-
-    def fail(self, message: str) -> None:
-        self.failures += 1
-        print(f"[FAIL] {message}")
-
-
-def _read_yaml(path: Path) -> dict[str, Any]:
-    import yaml
-
-    with path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    if not isinstance(data, dict):
-        raise TypeError(f"{path} did not load as a mapping")
-    return data
+from utils.policy import load_robot_config
+from scripts.onboard.deploy_helpers import Reporter
 
 
 def _as_array(value: Any) -> np.ndarray:
@@ -120,7 +94,7 @@ def main() -> int:
     if not config_path.is_absolute():
         config_path = ROOT / config_path
     try:
-        robot_config = _read_yaml(config_path)
+        robot_config = load_robot_config(config_path)
     except Exception as exc:
         reporter.fail(f"failed to read robot config: {exc.__class__.__name__}: {exc}")
         return 1

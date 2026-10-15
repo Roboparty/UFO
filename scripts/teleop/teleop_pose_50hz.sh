@@ -3,7 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 UFO_ROOT="${UFO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}"
-TELEOP_POLICY_CONFIG="${TELEOP_POLICY_CONFIG:-${POLICY_CONFIG:-${UFO_ROOT}/config/policy/g1_policy.yaml}}"
+MODEL_PATH="${MODEL_PATH:-${UFO_ROOT}/model/g1_policy/exported/FBcprAuxModel.onnx}"
+TELEOP_POLICY_CONFIG="${TELEOP_POLICY_CONFIG:-${POLICY_CONFIG:-${MODEL_PATH%.onnx}.deploy.yaml}}"
 export TELEOP_POLICY_CONFIG
 
 cd "${SCRIPT_DIR}"
@@ -11,9 +12,9 @@ cd "${SCRIPT_DIR}"
 cmd=(
     python xrobot_teleop_to_pose_zmq_server.py
     --robot unitree_g1
-    --req_bind_addr tcp://*:28701
-    --rep_bind_addr tcp://*:28702
-    --ctrl_bind_addr tcp://*:28703
+    --req_bind_addr tcp://127.0.0.1:28701
+    --rep_bind_addr tcp://127.0.0.1:28702
+    --ctrl_bind_addr tcp://127.0.0.1:28703
     --policy-config "${TELEOP_POLICY_CONFIG}"
 )
 

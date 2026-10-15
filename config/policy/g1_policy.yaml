@@ -19,7 +19,7 @@ observation:
     projected_gravity:
       scale: 1.0
     base_ang_vel: 
-      scale: 0.25
+      scale: 1.0
     prev_actions: 
       scale: 1.0
 
@@ -27,7 +27,7 @@ observation:
     prev_actions_history:
       steps: 4
     base_ang_vel_history:
-      scale: 0.25
+      scale: 1.0
       steps: 4
     dof_pos_minus_default_history: 
       default_pos: [

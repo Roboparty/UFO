@@ -123,19 +123,6 @@ def _privileged_slices(priv_dim: int, num_bodies: int, root_height_obs: bool) ->
     return out
 
 
-def _infer_root_height_obs(priv_dim: int, num_bodies: int) -> bool:
-    no_height = (num_bodies - 1) * 3 + num_bodies * 6 + num_bodies * 3 + num_bodies * 3
-    with_height = no_height + 1
-    if priv_dim == with_height:
-        return True
-    if priv_dim == no_height:
-        return False
-    raise ValueError(
-        f"Cannot infer root_height_obs from privileged_state dim {priv_dim}; "
-        f"expected {no_height} or {with_height} for {num_bodies} bodies"
-    )
-
-
 def _slice_metrics(prefix: str, offline: np.ndarray, realtime: np.ndarray, slices: Mapping[str, slice]) -> Dict[str, float]:
     row: Dict[str, float] = {}
     for name, sl in slices.items():
@@ -252,72 +239,13 @@ def _quat_continuity_summary(
 
 
 class RealtimeObsBuilder:
-    def __init__(
-        self,
-        realtime_module: Any,
-        mujoco_xml: Path,
-        root_height_obs: bool,
-        fixed_dt: float,
-        fix_quat_continuity: bool = False,
-        angvel_delta_frame: str = "local",
-    ) -> None:
-        import mujoco
+    """Replay poses through the runtime's FK and encoder observation construction."""
 
+    def __init__(self, realtime_module, inferer, fixed_dt):
         self.rzs = realtime_module
-        self.root_height_obs = bool(root_height_obs)
+        self.inferer = inferer
         self.fixed_dt = float(fixed_dt)
-        self.fix_quat_continuity = bool(fix_quat_continuity)
-        if str(angvel_delta_frame) not in ("local", "world"):
-            raise ValueError(f"angvel_delta_frame must be local or world, got {angvel_delta_frame!r}")
-        self.angvel_delta_frame = str(angvel_delta_frame)
-        self.mj_model = mujoco.MjModel.from_xml_path(str(mujoco_xml))
-        self.mj_data = mujoco.MjData(self.mj_model)
-
-        self.base_body_names = list(self.rzs.G1_29DOF_BODY_NAMES)
-        self.extend_cfg = [dict(c) for c in self.rzs.G1_29DOF_EXTEND_CONFIG]
-        self.default_pose_29 = np.asarray(self.rzs.G1_29DOF_DEFAULT_POSE_RAD, dtype=np.float32)
-
-        body_ids: List[int] = []
-        for name in self.base_body_names:
-            try:
-                body_ids.append(self.mj_model.body(name).id)
-            except KeyError as exc:
-                raise KeyError(f"Body {name!r} not found in MuJoCo XML {mujoco_xml}") from exc
-        self.body_ids = np.asarray(body_ids, dtype=np.int32)
-        self.body_names = self.base_body_names + [str(ext["joint_name"]) for ext in self.extend_cfg]
-        self.num_bodies = len(self.body_names)
-
-    def _fk_all_bodies(
-        self,
-        root_pos: np.ndarray,
-        root_quat_wxyz: np.ndarray,
-        dof_pos: np.ndarray,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        qpos = np.zeros(self.mj_model.nq, dtype=np.float64)
-        qpos[0:3] = root_pos.astype(np.float64)
-        qpos[3:7] = root_quat_wxyz.astype(np.float64)
-        qpos[7:] = dof_pos.astype(np.float64)
-        base_pos, base_quat_xyzw = self.rzs._fk_bodies_from_qpos(self.mj_model, self.mj_data, self.body_ids, qpos)
-
-        all_names = self.base_body_names.copy()
-        all_body_pos = base_pos
-        all_body_rot_xyzw = base_quat_xyzw
-
-        for ext in self.extend_cfg:
-            parent_idx = all_names.index(ext["parent_name"])
-            pos_in_parent = np.asarray(ext["pos"], dtype=np.float64).reshape(3)
-            rot_xyzw = self.rzs._wxyz_to_xyzw(np.asarray(ext["rot"], dtype=np.float64).reshape(4))
-            parent_pos = all_body_pos[parent_idx]
-            parent_rot = all_body_rot_xyzw[parent_idx]
-
-            ext_pos = parent_pos + self.rzs._quat_rotate_xyzw(parent_rot[None, :], pos_in_parent[None, :])[0]
-            ext_rot = self.rzs._quat_mul_xyzw(parent_rot[None, :], rot_xyzw[None, :])[0]
-
-            all_body_pos = np.concatenate([all_body_pos, ext_pos[None, :]], axis=0)
-            all_body_rot_xyzw = np.concatenate([all_body_rot_xyzw, ext_rot[None, :]], axis=0)
-            all_names.append(ext["joint_name"])
-
-        return all_body_pos.astype(np.float64), all_body_rot_xyzw.astype(np.float64)
+        self.body_names = inferer.base_body_names + [str(ext["joint_name"]) for ext in inferer.extend_cfg]
 
     def build_sequence(
         self,
@@ -325,7 +253,12 @@ class RealtimeObsBuilder:
         root_quat_xyzw: np.ndarray,
         dof_pos: np.ndarray,
     ) -> Dict[str, np.ndarray]:
+        root_pos = np.asarray(root_pos, dtype=np.float32)
+        root_quat_xyzw = np.asarray(root_quat_xyzw, dtype=np.float32)
+        dof_pos = np.asarray(dof_pos, dtype=np.float32)
         n = int(root_pos.shape[0])
+        if n == 0 or not np.isfinite(self.fixed_dt) or self.fixed_dt <= 0:
+            raise ValueError("Replay requires nonempty poses and a finite positive dt")
         if root_quat_xyzw.shape[0] != n or dof_pos.shape[0] != n:
             raise ValueError("root_pos, root_quat_xyzw, and dof_pos must have the same length")
 
@@ -333,16 +266,16 @@ class RealtimeObsBuilder:
         all_rot: List[np.ndarray] = []
         for i in range(n):
             root_quat_wxyz = root_quat_xyzw[i, [3, 0, 1, 2]]
-            pos_i, rot_i = self._fk_all_bodies(root_pos[i], root_quat_wxyz, dof_pos[i])
+            pos_i, rot_i = self.inferer._fk_all_bodies(root_pos[i], root_quat_wxyz, dof_pos[i])
             all_pos.append(pos_i)
             all_rot.append(rot_i)
 
-        body_pos = np.stack(all_pos, axis=0).astype(np.float32)
-        body_rot = np.stack(all_rot, axis=0).astype(np.float32)
+        body_pos = np.stack(all_pos, axis=0)
+        body_rot = np.stack(all_rot, axis=0)
 
-        body_vel = np.zeros_like(body_pos, dtype=np.float32)
+        body_vel = np.zeros_like(body_pos)
         dof_vel = np.zeros_like(dof_pos, dtype=np.float32)
-        body_ang_vel = np.zeros((n, body_rot.shape[1], 3), dtype=np.float32)
+        body_ang_vel = np.zeros((n, body_rot.shape[1], 3))
         quat_pair_dot = np.zeros((max(0, n - 1), body_rot.shape[1]), dtype=np.float32)
         quat_flip_mask = np.zeros_like(quat_pair_dot, dtype=bool)
 
@@ -355,31 +288,18 @@ class RealtimeObsBuilder:
                 body_rot[:-1],
                 body_rot[1:],
                 self.fixed_dt,
-                fix_quat_continuity=self.fix_quat_continuity,
-                delta_frame=self.angvel_delta_frame,
-            ).astype(np.float32)
+                fix_quat_continuity=self.inferer.fix_quat_continuity,
+                delta_frame=self.inferer.angvel_delta_frame,
+            )
+            if self.inferer.angvel_delta_frame == "local":
+                body_ang_vel[1:] = self.rzs._quat_rotate_xyzw(body_rot[:-1], body_ang_vel[1:])
 
-        obs_dict_priv = self.rzs._compute_humanoid_observations_max_np(
-            body_pos,
-            body_rot,
-            body_vel,
-            body_ang_vel,
-            local_root_obs=True,
-            root_height_obs=self.root_height_obs,
+        observations = self.inferer.build_observations(
+            dof_pos, dof_vel, body_pos, body_rot, body_vel, body_ang_vel,
         )
-        privileged_state = np.concatenate([v.astype(np.float32) for v in obs_dict_priv.values()], axis=-1).astype(np.float32)
-
-        ref_dof_pos = (dof_pos.astype(np.float32) - self.default_pose_29[None, :]).astype(np.float32)
-        projected_gravity = self.rzs._quat_rotate_inverse_xyzw(
-            body_rot[:, 0, :],
-            np.repeat(np.array([[0.0, 0.0, -1.0]], dtype=np.float32), n, axis=0),
-        ).astype(np.float32)
-        ref_ang_vel = body_ang_vel[:, 0, :].astype(np.float32)
-        state = np.concatenate([ref_dof_pos, dof_vel.astype(np.float32), projected_gravity, ref_ang_vel], axis=-1).astype(np.float32)
 
         return {
-            "state": state,
-            "privileged_state": privileged_state,
+            **observations,
             "body_pos": body_pos,
             "body_rot": body_rot,
             "body_vel": body_vel,
@@ -474,17 +394,6 @@ def _load_offline_motion_obs(
     return offline, meta
 
 
-def _load_onnx_session(backward_onnx: Path, provider_device: str):
-    import onnxruntime as ort
-
-    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if provider_device.startswith("cuda") else ["CPUExecutionProvider"]
-    session = ort.InferenceSession(str(backward_onnx.resolve()), providers=providers)
-    input_names = {x.name for x in session.get_inputs()}
-    output_names = [x.name for x in session.get_outputs()]
-    output_name = "z" if "z" in output_names else output_names[0]
-    return session, input_names, output_name
-
-
 def _run_encoder(session: Any, input_names: set[str], output_name: str, state: np.ndarray, privileged_state: np.ndarray) -> np.ndarray:
     feed: Dict[str, np.ndarray] = {}
     if "state" in input_names:
@@ -492,8 +401,7 @@ def _run_encoder(session: Any, input_names: set[str], output_name: str, state: n
     if "privileged_state" in input_names:
         feed["privileged_state"] = privileged_state.astype(np.float32)
     if "last_action" in input_names:
-        # Current z10 ONNX drops this input, but keep a deterministic fallback for other exports.
-        feed["last_action"] = state[:, 0:29].astype(np.float32)
+        feed["last_action"] = np.zeros_like(state[:, :29], dtype=np.float32)
     return np.asarray(session.run([output_name], feed)[0], dtype=np.float32)
 
 
@@ -515,7 +423,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=0, help="Maximum compared frames; 0 means all available.")
     parser.add_argument("--dt", type=float, default=0.0, help="Realtime finite-difference dt override. Default uses offline env.dt.")
     parser.add_argument("--fix-quat-continuity", action="store_true", help="Flip q_curr when dot(q_prev, q_curr) < 0 before realtime angular-velocity differencing.")
-    parser.add_argument("--angvel-delta-frame", choices=["local", "world"], default="local", help="Quaternion delta order for angular velocity: local=inv(q_prev)*q_curr, world=q_curr*inv(q_prev).")
+    parser.add_argument("--angvel-delta-frame", choices=["local", "world"], default="world", help="Quaternion delta order for angular velocity: local=inv(q_prev)*q_curr, world=q_curr*inv(q_prev).")
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/realtime_z_obs_alignment"))
     parser.add_argument("--summary-name", type=str, default="summary.json")
     parser.add_argument("--csv-name", type=str, default="frame_metrics.csv")
@@ -544,21 +452,18 @@ def main() -> None:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
 
     rzs = _load_module_from_path("deploy_realtime_z_server_for_alignment", realtime_path)
-    session, input_names, output_name = _load_onnx_session(backward_onnx, args.onnx_device)
-
-    num_bodies = len(rzs.G1_29DOF_BODY_NAMES) + len(rzs.G1_29DOF_EXTEND_CONFIG)
-    onnx_inputs = [(x.name, list(x.shape), x.type) for x in session.get_inputs()]
-    priv_dim_from_onnx = None
-    for name, shape, _typ in onnx_inputs:
-        if name == "privileged_state" and len(shape) >= 2 and isinstance(shape[1], int):
-            priv_dim_from_onnx = int(shape[1])
-    if priv_dim_from_onnx is None:
-        raise ValueError(f"Cannot infer privileged_state dim from ONNX inputs: {onnx_inputs}")
-
-    if args.root_height_obs == "auto":
-        root_height_obs = _infer_root_height_obs(priv_dim_from_onnx, num_bodies)
-    else:
-        root_height_obs = args.root_height_obs == "true"
+    inferer = rzs.OnlineZInferer(
+        str(backward_onnx), str(mujoco_xml), args.onnx_device, hz=50,
+        fix_quat_continuity=bool(args.fix_quat_continuity),
+        angvel_delta_frame=args.angvel_delta_frame,
+    )
+    session = inferer.session
+    onnx_inputs = [(item.name, list(item.shape), item.type) for item in session.get_inputs()]
+    input_names, output_name = inferer.session_input_names, inferer.session_output_name
+    num_bodies = len(inferer.base_body_names) + len(inferer.extend_cfg)
+    root_height_obs = inferer.root_height_obs
+    if args.root_height_obs != "auto" and (args.root_height_obs == "true") != root_height_obs:
+        raise ValueError("--root-height-obs differs from the exported metadata")
 
     offline, meta = _load_offline_motion_obs(
         bfm_zero_root=args.bfm_zero_root.resolve(),
@@ -574,14 +479,7 @@ def main() -> None:
     )
 
     dt = float(args.dt) if args.dt > 0 else float(meta["env_dt"])
-    realtime_builder = RealtimeObsBuilder(
-        rzs,
-        mujoco_xml.resolve(),
-        root_height_obs=root_height_obs,
-        fixed_dt=dt,
-        fix_quat_continuity=bool(args.fix_quat_continuity),
-        angvel_delta_frame=str(args.angvel_delta_frame),
-    )
+    realtime_builder = RealtimeObsBuilder(rzs, inferer, fixed_dt=dt)
     realtime = realtime_builder.build_sequence(offline["root_pos"], offline["root_quat_xyzw"], offline["dof_pos"])
 
     n_total = min(offline["state"].shape[0], realtime["state"].shape[0])

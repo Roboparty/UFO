@@ -1,30 +1,21 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sys
 import time
+from typing import Any
+
 import numpy as np
-from typing import Dict, Any, Type
-import sched
-from termcolor import colored
-from sshkeyboard import listen_keyboard
-from pathlib import Path
-import copy
-import joblib
-import json
-import pickle
-
-
-sys.path.append(".")
-
-
 from loguru import logger
+from sshkeyboard import listen_keyboard
+from termcolor import colored
 
-# Re-use utilities from the existing sim2real package
-from utils.strings import resolve_matching_names_values
-from utils.onnx_module import Timer
-from rl_policy.observations import Observation, ObsGroup
+
+from utils.strings import joint_values, resolve_matching_names_values
+from utils.policy import resolve_context_path, load_context, select_contexts, validate_policy_config, validate_task_config, validate_context
+from rl_policy.observations import ObsGroup
 from rl_policy.utils.state_processor import StateProcessor
 from rl_policy.utils.command_sender import CommandSender
 
@@ -35,87 +26,25 @@ def _default_realtime_z(norm_ref: float) -> np.ndarray:
     return z
 
 
-def _resolve_model_relative_context_path(
-    model_path: str,
-    exp_config: Dict[str, Any],
-    default_ctx_dir: str,
-    fallback_ctx_dirs: tuple[str, ...] = (),
-) -> Path:
-    ctx_path = Path(str(exp_config["ctx_path"])).expanduser()
-    if ctx_path.is_absolute():
-        return ctx_path
-
-    model_export_dir = Path(model_path).expanduser().resolve(strict=False).parent
-    model_root = model_export_dir.parent
-    candidates: list[Path] = []
-
-    if "ctx_dir" in exp_config:
-        candidates.append(model_root / str(exp_config["ctx_dir"]) / ctx_path)
-    else:
-        candidates.append(model_root / default_ctx_dir / ctx_path)
-        for ctx_dir in fallback_ctx_dirs:
-            candidates.append(model_root / ctx_dir / ctx_path)
-
-    # Backward compatibility: older configs used paths relative to either the
-    # model root or the exported/ directory.
-    candidates.append(model_root / ctx_path)
-    candidates.append(model_export_dir / ctx_path)
-
-    deduped: list[Path] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        resolved = candidate.resolve(strict=False)
-        key = str(resolved)
-        if key not in seen:
-            seen.add(key)
-            deduped.append(resolved)
-
-    for candidate in deduped:
-        if candidate.is_file():
-            return candidate
-
-    tried = "\n".join(f"  - {candidate}" for candidate in deduped)
-    raise FileNotFoundError(
-        f"Could not resolve context file ctx_path={ctx_path!s} for model_path={model_path!s}.\n"
-        f"Tried:\n{tried}"
-    )
-
-# -------------------------------------------------------------------------------------------------
-# High-level RL policy that plugs into the existing framework
-# -------------------------------------------------------------------------------------------------
 class UFODeployPolicy:
     def __init__(
         self,
-        robot_config: Dict[str, Any],
-        policy_config: Dict[str, Any],
-        exp_config: Dict[str, Any],
+        robot_config: dict[str, Any],
+        policy_config: dict[str, Any],
+        exp_config: dict[str, Any],
         model_path: str,
         rl_rate: int = 50,
         pico_control: bool = False,
         pico_control_addr: str = "tcp://127.0.0.1:28704",
     ) -> None:
         robot_type = robot_config["ROBOT_TYPE"]
-        if robot_type == "g1_real":
-            if os.environ.get("UFO_REAL_ROBOT_OK") != "1":
-                raise RuntimeError(
-                    "Refusing to start real robot control without UFO_REAL_ROBOT_OK=1."
-                )
-            # example: sys.path.append("/home/unitree/User/unitree_sdk2/build/lib")
-            sys.path.append("/home/unitree/unitree_sdk2_bfm/build/lib")
-            import g1_interface
-            network_interface = robot_config.get("INTERFACE", None)
-            self.robot = g1_interface.G1Interface(network_interface)
-            try:
-                self.robot.set_control_mode(g1_interface.ControlMode.PR)
-            except Exception as exc:
-                raise RuntimeError(
-                    "Failed to set G1 control mode to PR; refusing to start real robot control."
-                ) from exc
-            robot_config["robot"] = self.robot
-        # Plug-in our custom state processor & command sender
-        self.state_processor = StateProcessor(robot_config, policy_config["isaac_joint_names"])
-        self.command_sender = CommandSender(robot_config, policy_config)
-
+        if robot_type == "g1_real" and os.environ.get("UFO_REAL_ROBOT_OK") != "1":
+            raise RuntimeError("Refusing to start real robot control without UFO_REAL_ROBOT_OK=1.")
+        validate_task_config(exp_config, robot_type)
+        self.policy_metadata = validate_policy_config(model_path, policy_config)
+        self.z_dim = int(self.policy_metadata["z_dim"])
+        if not np.isfinite(rl_rate) or rl_rate <= 0:
+            raise ValueError("rl_rate must be finite and positive")
         self.rl_dt = 1.0 / rl_rate
         self.t = 0
 
@@ -127,16 +56,8 @@ class UFODeployPolicy:
         self.isaac_joint_names = policy_config["isaac_joint_names"]
         self.num_dofs = len(self.isaac_joint_names)
 
-        default_joint_pos_dict = policy_config["default_joint_pos"]
-        joint_indices, joint_names, default_joint_pos = resolve_matching_names_values(
-            default_joint_pos_dict,
-            self.isaac_joint_names,
-            preserve_order=True,
-            strict=False,
-        )
-        self.default_dof_angles = np.zeros(len(self.isaac_joint_names))
-        self.last_action  = np.zeros(len(self.isaac_joint_names))
-        self.default_dof_angles[joint_indices] = default_joint_pos
+        self.default_dof_angles = joint_values(policy_config["default_joint_pos"], self.isaac_joint_names)
+        self.last_action = np.zeros(self.num_dofs)
 
         action_scale_cfg = policy_config["action_scale"]
         self.action_scale = np.ones((self.num_dofs))
@@ -144,7 +65,7 @@ class UFODeployPolicy:
         if isinstance(action_scale_cfg, float):
             self.action_scale *= action_scale_cfg
         elif isinstance(action_scale_cfg, dict):
-            joint_ids, joint_names, action_scales = resolve_matching_names_values(
+            joint_ids, _, action_scales = resolve_matching_names_values(
                 action_scale_cfg, self.isaac_joint_names, preserve_order=True
             )
             self.action_scale[joint_ids] = action_scales
@@ -159,59 +80,26 @@ class UFODeployPolicy:
         ]
 
         # Keypress/control state
-        self.use_policy_action = False
+        self.policy_armed = False
         self.pico_control_enabled = bool(pico_control)
         self.pico_control_addr = str(pico_control_addr)
         self.pico_control_sock = None
-        self.last_pico_buttons: Dict[str, bool] = {}
+        self.last_pico_buttons: dict[str, bool] = {}
         self.stop_latched = False
-        self.pico_enable_released_after_stop = True
         self.stop_latch_enable_released_after_stop = True
         self._last_safe_stop_warning = 0.0
         self._last_invalid_z_warning = 0.0
-        self._last_z_timeout_warning = 0.0
         self._last_stop_latch_warning = 0.0
         self._exit_requested = False
         self._exit_signal_name: str | None = None
 
-        self.first_time_init = True
         self.init_count = 0
-        self.get_ready_state = False
+        self.hold_init_pose = False
         self.has_valid_low_state = False
 
-        # Joint limits
-        joint_indices, joint_names, joint_pos_lower_limit = (
-            resolve_matching_names_values(
-                robot_config["joint_pos_lower_limit"],
-                self.isaac_joint_names,
-                preserve_order=True,
-                strict=False,
-            )
-        )
-        self.joint_pos_lower_limit = np.zeros(self.num_dofs)
-        self.joint_pos_lower_limit[joint_indices] = joint_pos_lower_limit
-
-        joint_indices, joint_names, joint_pos_upper_limit = (
-            resolve_matching_names_values(
-                robot_config["joint_pos_upper_limit"],
-                self.isaac_joint_names,
-                preserve_order=True,
-                strict=False,
-            )
-        )
-        self.joint_pos_upper_limit = np.zeros(self.num_dofs)
-        self.joint_pos_upper_limit[joint_indices] = joint_pos_upper_limit
-
-        joint_indices, joint_names, joint_velocity_limit = (
-            resolve_matching_names_values(
-                robot_config["joint_velocity_limit"],
-                self.isaac_joint_names,
-                preserve_order=True,
-                strict=False,
-            )
-        )
-        self.joint_velocity_limit = np.full(self.num_dofs, np.inf)
-        self.joint_velocity_limit[joint_indices] = joint_velocity_limit
+        self.joint_pos_lower_limit = joint_values(robot_config["joint_pos_lower_limit"], self.isaac_joint_names)
+        self.joint_pos_upper_limit = joint_values(robot_config["joint_pos_upper_limit"], self.isaac_joint_names)
+        self.joint_velocity_limit = joint_values(robot_config["joint_velocity_limit"], self.isaac_joint_names, default=np.inf)
         self.q_target_slew_safety_factor = float(
             policy_config.get(
                 "q_target_slew_safety_factor",
@@ -222,9 +110,30 @@ class UFODeployPolicy:
             raise ValueError("q_target_slew_safety_factor must be a finite non-negative value")
         self.last_cmd_q: np.ndarray | None = None
 
-        # ------------------------------------------------------
-        # Joystick / keyboard setup (mirrors base_policy logic)
-        # ------------------------------------------------------
+        # Load and validate artifacts before creating the hardware interface.
+        self.setup_task(model_path, exp_config)
+        if robot_type == "g1_real":
+            sys.path.append("/home/unitree/unitree_sdk2_bfm/build/lib")
+            import g1_interface
+            if not hasattr(g1_interface.LowState(), "tick"):
+                raise RuntimeError("G1 SDK lacks low-state tick; run scripts/onboard/patch_g1_sdk.py and rebuild g1_interface")
+            network_interface = robot_config.get("INTERFACE", None)
+            self.robot = g1_interface.G1Interface(network_interface)
+            try:
+                self.robot.set_control_mode(g1_interface.ControlMode.PR)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Failed to set G1 control mode to PR; refusing to start real robot control."
+                ) from exc
+            robot_config["robot"] = self.robot
+        self.state_processor = StateProcessor(robot_config, policy_config["isaac_joint_names"])
+        self.command_sender = CommandSender(robot_config, policy_config)
+
+        self.setup_observations()
+        self.setup_controls(robot_config)
+
+    def setup_controls(self, robot_config):
+        # Start input handlers only after observations and task state are ready.
         if robot_config.get("USE_JOYSTICK", False):
             print("Using joystick")
             self.use_joystick = True
@@ -243,30 +152,41 @@ class UFODeployPolicy:
         if self.pico_control_enabled:
             self.setup_pico_control()
 
-        # Setup observations after all processors are ready
-        self.setup_observations()
-
-        # Initialize variables
-        self.exp_config = exp_config
+    def setup_task(self, model_path, exp_config):
         self.task_type = exp_config['type']
         self.start_motion = False
         logger.info(f"task_type={self.task_type}")
 
         # Task-specific setup
         if self.task_type == "tracking":
+            self.gamma = float(exp_config['gamma'])
+            self.window_size = exp_config['window_size']
+            if type(self.window_size) is not int or self.window_size <= 0:
+                raise ValueError("window_size must be a positive integer")
+            if not np.isfinite(self.gamma) or not 0 <= self.gamma <= 1:
+                raise ValueError("gamma must be finite and between 0 and 1")
+            self.t_start, self.t_end, self.t_stop = (exp_config[key] for key in ('start', 'end', 'stop'))
+            if any(type(value) is not int or value < 0 for value in (self.t_start, self.t_end, self.t_stop)):
+                raise ValueError("tracking start/end/stop must be non-negative integers")
+            if self.t_end < self.t_start:
+                raise ValueError("tracking end must not precede start")
             self.ctx_source = str(exp_config.get("ctx_source", "pkl")).lower()
             if self.ctx_source not in {"pkl", "zmq"}:
                 raise ValueError(f"Invalid ctx_source={self.ctx_source}, expected 'pkl' or 'zmq'")
 
             if self.ctx_source == "pkl":
-                ctx_path = _resolve_model_relative_context_path(
+                ctx_path = resolve_context_path(
                     model_path,
                     exp_config,
-                    default_ctx_dir="tracking_inference_mjlab",
-                    fallback_ctx_dirs=("tracking_inference",),
+                    default_ctx_dir="tracking_inference",
+                    fallback_ctx_dirs=("tracking_inference_mjlab",),
                 )
                 logger.info(f"Loading tracking context from {ctx_path}")
-                self.ctx = joblib.load(ctx_path)
+                self.ctx = np.asarray(load_context(ctx_path))
+                if validate_context(self.ctx) != self.z_dim or self.ctx.ndim != 2:
+                    raise ValueError("Tracking context must have shape [frames, model z_dim]")
+                if max(self.t_start, self.t_stop) >= len(self.ctx):
+                    raise ValueError("tracking start/stop must index an existing context frame")
                 self.ctx_zmq = None
                 self.ctx_window = None
                 self.ctx_norm_ref = float(np.linalg.norm(self.ctx[0]))
@@ -274,13 +194,16 @@ class UFODeployPolicy:
                 import zmq
                 from collections import deque
 
+                if self.z_dim != 256:
+                    raise ValueError("Live z currently requires a 256-dimensional encoder and actor")
                 self.ctx = None
                 self.ctx_norm_ref = float(exp_config.get("ctx_norm_ref", 16.0))
-                self.ctx_window = deque(maxlen=int(exp_config.get("window_size", 1)))
-                self.ctx_zmq_timeout_s = max(
-                    0.0,
-                    float(exp_config.get("ctx_zmq_timeout_ms", 200.0)) / 1000.0,
-                )
+                self.ctx_window = deque(maxlen=self.window_size)
+                self.ctx_zmq_timeout_s = float(exp_config.get("ctx_zmq_timeout_ms", 200.0)) / 1000.0
+                if not np.isfinite(self.ctx_norm_ref) or self.ctx_norm_ref <= 0:
+                    raise ValueError("ctx_norm_ref must be finite and positive")
+                if not np.isfinite(self.ctx_zmq_timeout_s) or self.ctx_zmq_timeout_s <= 0:
+                    raise ValueError("ctx_zmq_timeout_ms must be finite and positive")
                 self.ctx_zmq_start_monotonic = time.monotonic()
                 self.ctx_last_z_monotonic: float | None = None
 
@@ -300,101 +223,22 @@ class UFODeployPolicy:
                 self.ctx_latest = _default_realtime_z(self.ctx_norm_ref)
 
             logger.info(f"t_start={exp_config['start']}, t_end={exp_config['end']}, t_stop={exp_config['stop']}")
-            self.t_start = exp_config['start']
-            self.t_end = exp_config['end']
-            self.t_stop = exp_config['stop']
-
             logger.info(f"gamma={exp_config['gamma']}, window_size={exp_config['window_size']}")
-            self.gamma = exp_config['gamma']  # discount factor
-            self.window_size = exp_config['window_size']  # context window size
 
-        elif self.task_type == "reward":
-            self.z_index = 0
-            reward_path = _resolve_model_relative_context_path(
-                model_path,
-                exp_config,
-                default_ctx_dir="reward_inference_mjlab",
-                fallback_ctx_dirs=("reward_inference",),
+        elif self.task_type in {"reward", "goal"}:
+            path = resolve_context_path(
+                model_path, exp_config,
+                default_ctx_dir=f"{self.task_type}_inference",
+                fallback_ctx_dirs=(f"{self.task_type}_inference_mjlab",),
             )
-            logger.info(f"Loading reward context from {reward_path}")
-            with open(reward_path, "rb") as f:
-                self.z_dict = pickle.load(f)
-                self.z_dict_raw = copy.deepcopy(self.z_dict)
-                logger.info(colored(f"\n\nAvailable z_dict={list(self.z_dict_raw.keys())}", "green"))
-            
-            if "selected_rewards_filter_z" in exp_config:
-                selected_rewards_filter_z = exp_config['selected_rewards_filter_z'] 
-                logger.info(colored(f"\nSelected_rewards_filter_z read from config: {selected_rewards_filter_z}", "green"))
-            else:
-                raise ValueError("For task_type=reward-multiple-z-selection, selected_rewards_filter_z must be provided in the config file")
-            
-            self.z_dict = {}
-            self.selected_z_names = []
-            
-            # Iterate in the order of selected_rewards_filter_z
-            if isinstance(selected_rewards_filter_z, list):
-                for dct in selected_rewards_filter_z:
-                    k = dct['reward']
-                    selected_z_ids = dct['z_ids']
-                    if k in self.z_dict_raw:
-                        v = self.z_dict_raw[k]
-                        self.z_dict[k] = []
-                        for z_id in selected_z_ids:
-                            if z_id < len(v):
-                                self.z_dict[k].append(v[z_id])
-                                self.selected_z_names.append(f"""Reward="{k}"__Z_id={z_id}""")
-                                logger.info(f"""Added Reward="{k}"__Z_id={z_id} to self.z_dict""")
-            elif isinstance(selected_rewards_filter_z, dict):
-                for k in selected_rewards_filter_z.keys():
-                    if k in self.z_dict_raw:
-                        v = self.z_dict_raw[k]
-                        self.z_dict[k] = []
-                        for z_id in selected_rewards_filter_z[k]:
-                            if z_id < len(v):
-                                self.z_dict[k].append(v[z_id])
-                                self.selected_z_names.append(f"""Reward="{k}"__Z_id={z_id}""")
-                                logger.info(f"""Added Reward="{k}"__Z_id={z_id} to self.z_dict""")
-            
-            logger.info(colored(f"\n\nValid z_dict contains: {list(self.z_dict.keys())}", "blue"))
-            if len(self.z_dict) == 0:
-                raise ValueError("After filtering, self.z_dict is empty. Please check your selected_rewards_filter_z and available z_dict")
-            self.num_selected_rewards = len(self.z_dict.keys())
-            self.num_selected_z = len(self.selected_z_names)
-            self.selected_z = np.concatenate([val for val in self.z_dict.values()], axis=0)
-            
-            logger.info(f"self.num_selected_z={self.num_selected_z}, self.selected_z.shape={self.selected_z.shape}")
-            if self.num_selected_rewards == 1:
-                logger.info(colored(f"Only one reward is selected, make sure that is what you want", "red"))
-
-        # new goal reaching code
-        elif self.task_type == "goal":
+            logger.info(f"Loading {self.task_type} context from {path}")
+            self.selected_z, self.selected_z_names = select_contexts(load_context(path), exp_config)
+            if self.selected_z.shape[1] != self.z_dim:
+                raise ValueError("Selected contexts do not match the model z_dim")
             self.z_index = 0
-            goal_path = _resolve_model_relative_context_path(
-                model_path,
-                exp_config,
-                default_ctx_dir="goal_inference_mjlab",
-                fallback_ctx_dirs=("goal_inference",),
-            )
-            logger.info(f"Loading goal context from {goal_path}")
-            with open(goal_path, "rb") as f:
-                self.z_dict = joblib.load(f)
-                self.z_dict_raw = copy.deepcopy(self.z_dict)
-                logger.info(colored(f"\n\nAvailable z_dict={list(self.z_dict_raw.keys())}", "green"))
-            if "selected_goals" in exp_config:
-               selected_goals = exp_config['selected_goals'] 
-               logger.info(colored(f"\nSelected_goals read from config: {selected_goals}", "green"))
-            else:
-                selected_goals = self.z_dict.keys()
-            self.z_dict = {
-                k: self.z_dict[k] for k in selected_goals if k in self.z_dict
-            }
-
-            logger.info(colored(f"\n\nValid z_dict contains: {list(self.z_dict.keys())} (Total = {len(self.z_dict)})", "blue"))
-
-            self.num_selected_goals = len(self.z_dict.keys())
-            if self.num_selected_goals ==1:
-                logger.info(colored(f"Only one goal is selected, make sure that is what you want", "red"))
-
+            logger.info(f"Selected {self.task_type} contexts: {self.selected_z_names}")
+        else:
+            raise ValueError(f"Unsupported task type: {self.task_type}")
 
     def setup_policy(self, model_path):
         # load onnx policy
@@ -412,40 +256,30 @@ class UFODeployPolicy:
             model_path,
             providers=providers,
         )
-        self.onnx_input_name = self.onnx_policy_session.get_inputs()[0].name
-        self.onnx_output_name = self.onnx_policy_session.get_outputs()[0].name
+        inputs = self.onnx_policy_session.get_inputs()
+        outputs = self.onnx_policy_session.get_outputs()
+        if len(inputs) != 1 or len(outputs) != 1:
+            raise ValueError("Policy ONNX must have one input and one output")
+        for tensor, width in ((inputs[0], self.policy_metadata['actor_obs_dim']),
+                              (outputs[0], self.policy_metadata['output_action_dim'])):
+            if tensor.type != 'tensor(float)' or len(tensor.shape) != 2 or tensor.shape[-1] != width:
+                raise ValueError(f"ONNX tensor {tensor.name} differs from its metadata")
+        self.onnx_input_name = inputs[0].name
+        self.onnx_output_name = outputs[0].name
 
-        def policy_act(obs):
-            return self.onnx_policy_session.run([self.onnx_output_name], {self.onnx_input_name: obs})[0]
-        self.policy = policy_act
+    def policy(self, obs):
+        return self.onnx_policy_session.run(
+            [self.onnx_output_name], {self.onnx_input_name: obs}
+        )[0]
 
     def setup_observations(self):
-        """Setup observations for policy inference"""
-        self.observations: Dict[str, ObsGroup] = {}
-        self.reset_callbacks = []
-        self.update_callbacks = []
-        
-        # Create observation instances based on config
-        for obs_group, obs_items in self.obs_cfg.items():
-            print(f"obs_group: {obs_group}")
-            obs_funcs = {}
-            for obs_name, obs_config in obs_items.items():
-                obs_class: Type[Observation] = Observation.registry[obs_name]
-                obs_func = obs_class(env=self, **obs_config)
-                obs_funcs[obs_name] = obs_func
-                self.reset_callbacks.append(obs_func.reset)
-                self.update_callbacks.append(obs_func.update)
-                print(f"\t{obs_name}: {obs_config}")
-            self.observations[obs_group] = ObsGroup(obs_group, obs_funcs)
+        self.observations = {
+            name: ObsGroup(name, config, self) for name, config in self.obs_cfg.items()
+        }
 
     def reset(self):
-        for reset_callback in self.reset_callbacks:
-            reset_callback()
-
-    def update(self):
-        self.state_dict["action"] = self.last_action
-        for update_callback in self.update_callbacks:
-            update_callback(self.state_dict)
+        for group in self.observations.values():
+            group.reset()
 
     def _warn_throttled(self, attr_name: str, message: str, interval_s: float = 1.0) -> None:
         now = time.monotonic()
@@ -470,17 +304,17 @@ class UFODeployPolicy:
         reset_realtime_z: bool = False,
         warning_attr: str = "_last_safe_stop_warning",
     ) -> None:
-        self.use_policy_action = False
-        self.get_ready_state = False
+        self.policy_armed = False
+        self.hold_init_pose = False
         self._reset_tracking_state_to_stop(reset_realtime_z=reset_realtime_z)
         self.last_action = np.zeros_like(self.last_action)
         self._warn_throttled(warning_attr, f"Safe stop: {reason}")
 
     def enter_stop_latch(self, reason: str) -> None:
         self.stop_latched = True
-        self.pico_enable_released_after_stop = False
         self.stop_latch_enable_released_after_stop = False
         self.enter_safe_stop(reason)
+        self.reset()
 
     def _request_exit(self, signum, _frame) -> None:
         self._exit_requested = True
@@ -503,8 +337,10 @@ class UFODeployPolicy:
         )
 
     def _clear_stop_latch_for_rearm(self, source: str) -> None:
+        if not self.state_processor._prepare_low_state():
+            self._warn_stop_latch_ignored(f"{source}: low state unavailable")
+            return
         self.stop_latched = False
-        self.pico_enable_released_after_stop = True
         self.stop_latch_enable_released_after_stop = True
         logger.info(f"{source}: global stop latch cleared")
 
@@ -556,11 +392,8 @@ class UFODeployPolicy:
         )
         age_s = now - reference_time
         if age_s > timeout_s:
-            self.enter_safe_stop(
-                f"no valid realtime z for {age_s * 1000:.0f} ms",
-                reset_realtime_z=True,
-                warning_attr="_last_z_timeout_warning",
-            )
+            self.enter_stop_latch(f"no valid realtime z for {age_s * 1000:.0f} ms")
+            self._reset_tracking_state_to_stop(reset_realtime_z=True)
 
     def _apply_q_target_slew_limit(self, q_target: np.ndarray) -> np.ndarray:
         q_target = np.asarray(q_target, dtype=np.float64).reshape(-1)
@@ -605,79 +438,44 @@ class UFODeployPolicy:
             return False
 
     def prepare_obs_for_rl(self):
-        """Prepare observation for policy inference using observation classes"""
-        obs_dict: Dict[str, np.ndarray] = {}
-        self.update()
-        
-        for obs_group in self.observations.values():
-            obs = obs_group.compute()
-            obs_dict[obs_group.name] = obs[None, :].astype(np.float32)
-        
-        obs = obs_dict[obs_group.name]
+        obs_dict = {
+            name: group.compute()[None, :].astype(np.float32)
+            for name, group in self.observations.items()
+        }
+        # Training observes t-1..t-4 before inserting the current sensor frame.
+        for group in self.observations.values():
+            group.update()
 
         if self.task_type == "tracking":
             if getattr(self, "ctx_source", "pkl") == "pkl":
                 window = self.ctx[self.t:self.t + self.window_size]
-                discounts = self.gamma ** np.arange(len(window))
-                discounts = discounts / np.sum(discounts)
-                discounted_avg = np.sum(window * discounts[:, np.newaxis], axis=0)
-                discounted_avg = (
-                    discounted_avg
-                    / (np.linalg.norm(discounted_avg, axis=-1) + 1e-8)
-                    * float(np.linalg.norm(self.ctx[0]))
-                )
+                norm_ref = float(np.linalg.norm(self.ctx[0]))
             else:
-                from collections import deque
-
                 self._poll_realtime_z()
                 self._check_realtime_z_watchdog()
-
-                if self.ctx_window.maxlen != int(self.window_size):
-                    old = list(self.ctx_window)
-                    self.ctx_window = deque(old[-int(self.window_size):], maxlen=int(self.window_size))
-
                 self.ctx_window.appendleft(self.ctx_latest)
-                if len(self.ctx_window) > 0:
-                    window = np.stack(list(self.ctx_window), axis=0)
-                else:
-                    window = self.ctx_latest[None, :]
-                discounts = self.gamma ** np.arange(window.shape[0])
-                discounts = discounts / np.sum(discounts)
-                discounted_avg = np.sum(window * discounts[:, np.newaxis], axis=0)
-                discounted_avg = (
-                    discounted_avg
-                    / (np.linalg.norm(discounted_avg) + 1e-8)
-                    * float(self.ctx_norm_ref)
-                )
+                window = np.stack(self.ctx_window)
+                norm_ref = self.ctx_norm_ref
 
-            inputs = np.concatenate([obs, discounted_avg[np.newaxis, :]], axis=-1).astype(np.float32)
-            
-            if self.use_policy_action:
+            discounts = self.gamma ** np.arange(len(window))
+            discounts = discounts / np.sum(discounts)
+            z = np.sum(window * discounts[:, None], axis=0)
+            z = z / (np.linalg.norm(z) + 1e-8) * norm_ref
+
+            if self.policy_armed:
                 if self.start_motion and self.t < self.t_end:
                     self.t += 1
                     if getattr(self, "ctx_source", "pkl") == "pkl":
-                        self.t = self.t % self.ctx.shape[0]
+                        self.t %= len(self.ctx)
                     if self.t % 100 == 0:
                         logger.info(f"step={self.t}")
                 else:
                     self.t = self.t_stop
                     self.start_motion = False
-        elif self.task_type == "reward":
-            try:
-                inputs = np.concatenate([obs, self.selected_z[self.z_index]], axis=-1).astype(np.float32)
-            except Exception as e:
-                print(f"obs={obs.shape}")
-                print(f"self.selected_z[self.z_index]={self.selected_z[self.z_index].shape}")
-                raise e
-        # new goal reaching code
-        elif self.task_type == "goal":
-            try:
-                inputs = np.concatenate([obs, list(self.z_dict.values())[self.z_index]], axis=-1).astype(np.float32)
-            except Exception as e:
-                print(f"obs={obs.shape}")
-                print(f"list(self.z_dict.values())[self.z_index]]={list(self.z_dict.values())[self.z_index].shape}")
-                raise e
+        else:
+            z = self.selected_z[self.z_index]
 
+        inputs = np.concatenate([obs_dict["policy"], z[None, :]], axis=-1).astype(np.float32)
         return obs_dict, inputs
 
     def get_init_target(self):
@@ -695,26 +493,23 @@ class UFODeployPolicy:
         self._install_signal_handlers()
         self._exit_requested = False
         self._exit_signal_name = None
-        total_inference_cnt = 0
-        state_dict = {}
-        state_dict["action"] = np.zeros(self.num_actions)
-        self.state_dict = state_dict
-        self.total_inference_cnt = total_inference_cnt
-        self.perf_dict = {}
 
         try:
-            scheduler = sched.scheduler(time.perf_counter, time.sleep)
             next_run_time = time.perf_counter()
-            
-            while not self._exit_requested:
-                scheduler.enterabs(next_run_time, 1, self._rl_step_scheduled, ())
-                scheduler.run()
-                
-                next_run_time += self.rl_dt
-                self.total_inference_cnt += 1
 
-                if self.total_inference_cnt % 100 == 0:
-                    self.perf_dict = {}
+            while not self._exit_requested:
+                time.sleep(max(0.0, next_run_time - time.perf_counter()))
+                if self._exit_requested:
+                    break
+                self._rl_step_scheduled()
+                next_run_time += self.rl_dt
+                now = time.perf_counter()
+                if now > next_run_time:
+                    if now - next_run_time >= self.rl_dt:
+                        self.enter_stop_latch("control loop missed more than one period")
+                        self._send_safe_hold_command()
+                    # Expired commands must not be replayed against the same sensor frame.
+                    next_run_time = now + self.rl_dt
             if self._exit_requested:
                 logger.info(f"{self._exit_signal_name or 'signal'} received, exiting policy loop.")
         except KeyboardInterrupt:
@@ -726,81 +521,77 @@ class UFODeployPolicy:
     def _rl_step_scheduled(self):
         loop_start = time.perf_counter()
 
-        with Timer(self.perf_dict, "prepare_low_state"):
-            wireless_r2_stop = False
-            if self.use_joystick:
-                # print(f"Debug::process_joystick:")
-                wireless_r2_stop = self.process_joystick_input()
-            if self.pico_control_enabled and not wireless_r2_stop:
-                self.process_pico_control_input()
+        wireless_r2_stop = False
+        if self.use_joystick:
+            wireless_r2_stop = self.process_joystick_input()
+        if self.pico_control_enabled and not wireless_r2_stop:
+            self.process_pico_control_input()
 
-            if not self.state_processor._prepare_low_state():
-                print("low state not ready.")
-                return
-            self.has_valid_low_state = True
-            
+        if not self.state_processor._prepare_low_state():
+            self.enter_stop_latch("low state unavailable or stale")
+            self._send_safe_hold_command()
+            return
+        self.has_valid_low_state = True
+
         try:
-            with Timer(self.perf_dict, "prepare_obs"):
-                # Prepare observations
-                obs_dict, observations = self.prepare_obs_for_rl()
-                self.state_dict["is_init"] = np.zeros(1, dtype=bool)
+            # Prepare observations
+            _, observations = self.prepare_obs_for_rl()
 
-            with Timer(self.perf_dict, "policy"):  
-                # Inference
-                action = np.asarray(self.policy(observations), dtype=np.float32)
-                if not np.all(np.isfinite(action)):
-                    self.enter_safe_stop("non-finite policy action")
-                    self.state_dict["action"] = np.zeros(self.num_actions)
-                    self._send_safe_hold_command()
-                    return
-                # Clip policy action
-                action = action.clip(-1, 1)
-                action_scaled = self.action_rescale * action
-                self.last_action = action_scaled
+            # Inference
+            action = np.asarray(self.policy(observations), dtype=np.float32)
+            if action.shape != (1, self.num_actions) or not np.all(np.isfinite(action)):
+                self.enter_stop_latch("invalid policy action shape or non-finite value")
+                self._send_safe_hold_command()
+                return
+            # Clip policy action
+            action = action.clip(-1, 1)
+            action_scaled = self.action_rescale * action
         except Exception as e:
             print(f"Error in policy inference: {e}")
-            self.enter_safe_stop(f"policy inference failed: {e}")
-            self.state_dict["action"] = np.zeros(self.num_actions)
+            self.enter_stop_latch(f"policy inference failed: {e}")
             self._send_safe_hold_command()
             return
 
-        with Timer(self.perf_dict, "rule_based_control_flow"):
-            # rule based control flow
-            if self.get_ready_state:
-                q_target = self.get_init_target()
-            elif not self.use_policy_action:
-                q_target = self.state_processor.joint_pos
-            else:
-                policy_action = np.zeros((self.num_dofs))
-                policy_action[self.controlled_joint_indices] = action_scaled
-                policy_action = policy_action * self.action_scale
-                q_target = policy_action + self.default_dof_angles
+        if self.stop_latched:
+            q_target = self.state_processor.joint_pos
+        elif self.hold_init_pose:
+            q_target = self.get_init_target()
+        elif not self.policy_armed:
+            q_target = self.state_processor.joint_pos
+        else:
+            policy_action = np.zeros((self.num_dofs))
+            policy_action[self.controlled_joint_indices] = action_scaled
+            policy_action = policy_action * self.action_scale
+            q_target = policy_action + self.default_dof_angles
 
-            # Clip q target
-            # print(self.joint_pos_lower_limit)
-            q_target = np.clip(
-                q_target, self.joint_pos_lower_limit, self.joint_pos_upper_limit
-            )
-            if not np.all(np.isfinite(q_target)):
-                self.enter_safe_stop("non-finite q_target before slew limit")
-                self._send_safe_hold_command()
-                return
+        # Clip q target
+        q_target = np.clip(
+            q_target, self.joint_pos_lower_limit, self.joint_pos_upper_limit
+        )
+        if not np.all(np.isfinite(q_target)):
+            self.enter_stop_latch("non-finite q_target before slew limit")
+            self._send_safe_hold_command()
+            return
 
-            q_target = self._apply_q_target_slew_limit(q_target)
-            q_target = np.clip(
-                q_target, self.joint_pos_lower_limit, self.joint_pos_upper_limit
-            )
-            if not np.all(np.isfinite(q_target)):
-                self.enter_safe_stop("non-finite q_target after slew limit")
-                self._send_safe_hold_command()
-                return
+        q_target = self._apply_q_target_slew_limit(q_target)
+        q_target = np.clip(
+            q_target, self.joint_pos_lower_limit, self.joint_pos_upper_limit
+        )
+        if not np.all(np.isfinite(q_target)):
+            self.enter_stop_latch("non-finite q_target after slew limit")
+            self._send_safe_hold_command()
+            return
 
-            # Send command
-            cmd_q = q_target
-            cmd_dq = np.zeros(self.num_dofs)
-            cmd_tau = np.zeros(self.num_dofs)
-            self.command_sender.send_command(cmd_q, cmd_dq, cmd_tau)
-            self.last_cmd_q = np.asarray(cmd_q, dtype=np.float64).copy()
+        # Send command
+        cmd_q = q_target
+        cmd_dq = np.zeros(self.num_dofs)
+        cmd_tau = np.zeros(self.num_dofs)
+        self.command_sender.send_command(cmd_q, cmd_dq, cmd_tau)
+        self.last_cmd_q = np.asarray(cmd_q, dtype=np.float64).copy()
+        if self.policy_armed and not self.hold_init_pose and not self.stop_latched:
+            self.last_action = action_scaled
+        else:
+            self.last_action = np.zeros(self.num_actions)
 
         elapsed = time.perf_counter() - loop_start
         if elapsed > self.rl_dt:
@@ -859,7 +650,7 @@ class UFODeployPolicy:
 
         self.handle_pico_buttons(latest_buttons)
 
-    def handle_pico_buttons(self, buttons: Dict[str, bool]):
+    def handle_pico_buttons(self, buttons: dict[str, bool]):
         prev = self.last_pico_buttons
         a = bool(buttons.get("right_key_one", False))
         b = bool(buttons.get("right_key_two", False))
@@ -872,7 +663,6 @@ class UFODeployPolicy:
         combo = a and b
         prev_combo = prev_a and prev_b
         if self.stop_latched and not a and not b:
-            self.pico_enable_released_after_stop = True
             self.stop_latch_enable_released_after_stop = True
 
         if combo and not prev_combo:
@@ -883,17 +673,17 @@ class UFODeployPolicy:
                     return
                 self._clear_stop_latch_for_rearm("Pico A+B")
             logger.info("Pico A+B: enable policy and start tracking")
-            self.handle_joystick_button("R1")
-            self.handle_joystick_button("B")
+            self.handle_control_button("R1")
+            self.handle_control_button("B")
         elif a and not prev_a and not b:
             logger.info("Pico A: init")
-            self.handle_joystick_button("A")
+            self.handle_control_button("A")
         elif b and not prev_b and not a:
             logger.info("Pico B: stop policy")
-            self.handle_joystick_button("R2")
+            self.handle_control_button("R2")
         elif x and not prev_x:
             logger.info("Pico X: reset")
-            self.handle_joystick_button("X")
+            self.handle_control_button("X")
 
         self.last_pico_buttons = buttons
 
@@ -924,8 +714,8 @@ class UFODeployPolicy:
             if combo and not prev_combo:
                 if self.stop_latch_enable_released_after_stop:
                     self._clear_stop_latch_for_rearm("Wireless R1+B")
-                    self.handle_joystick_button("R1")
-                    self.handle_joystick_button("B")
+                    self.handle_control_button("R1")
+                    self.handle_control_button("B")
                 else:
                     self._warn_stop_latch_ignored("Wireless R1+B")
                 self.last_wc_msg = self.wc_msg
@@ -939,49 +729,46 @@ class UFODeployPolicy:
                 self.last_wc_msg = self.wc_msg
                 return False
 
-        # print(f"wc_msg.A: {self.wc_msg.A}")
-        if self.wc_msg.A and not self.last_wc_msg.A:
-            self.handle_joystick_button("A")
-        if self.wc_msg.B and not self.last_wc_msg.B:
-            self.handle_joystick_button("B")
-        if self.wc_msg.X and not self.last_wc_msg.X:
-            self.handle_joystick_button("X")
-        if self.wc_msg.Y and not self.last_wc_msg.Y:
-            self.handle_joystick_button("Y")
-        if self.wc_msg.L1 and not self.last_wc_msg.L1:
-            self.handle_joystick_button("L1")
-        if self.wc_msg.L2 and not self.last_wc_msg.L2:
-            self.handle_joystick_button("L2")
-        if self.wc_msg.R1 and not self.last_wc_msg.R1:
-            self.handle_joystick_button("R1")
-        
+        for button in ("A", "B", "X", "Y", "R1"):
+            if getattr(self.wc_msg, button) and not getattr(self.last_wc_msg, button):
+                self.handle_control_button(button)
+
         self.last_wc_msg = self.wc_msg
         return False
 
 
-    def handle_joystick_button(self, cur_key):
+    def handle_control_button(self, cur_key):
         if cur_key == "R1":
             if self.stop_latched:
                 self._warn_stop_latch_ignored("R1 enable")
                 return
-            logger.info("Using policy actions")
-            self.use_policy_action = True
-            self.get_ready_state = False    
+            if not self.policy_armed:
+                self.last_action = np.zeros(self.num_actions)
+                self.reset()
             if self.task_type == "reward":
-                total_z = self.num_selected_z
-                logger.info(colored(f"Switch to reward={self.selected_z_names[self.z_index]} (Count: {self.z_index+1}/{total_z})", "blue"))
-            if self.task_type == "goal":
-                logger.info(colored(f"Switch to goal={list(self.z_dict.keys())[self.z_index]} (Count: {self.z_index+1}/{len(self.z_dict)})", "blue"))
+                logger.info("Reward ready: holding initial pose; press B to start")
+            else:
+                logger.info("Using policy actions")
+            self.policy_armed = True
+            self.hold_init_pose = self.task_type == "reward"
+            if self.task_type in {"reward", "goal"}:
+                self._log_selected_context()
             if self.task_type == "tracking":
                 self.t = self.t_stop
 
         elif cur_key == "R2":
             self.enter_stop_latch("R2 stop command")
-            logger.info(colored("Actions set to zero", "blue"))
+            logger.info("Policy stopped; holding current joint positions")
         elif cur_key == "A":
-            self.get_ready_state = True
+            if self.stop_latched:
+                self._clear_stop_latch_for_rearm("A initialize")
+                if self.stop_latched:
+                    return
+            if self.task_type == "reward":
+                self.policy_armed = False
+            self.hold_init_pose = True
             self.init_count = 0
-            logger.info(colored("Setting to init state (do this when robot was in a bad shape)", "blue"))
+            logger.info("Moving to initialization pose")
         elif cur_key == "B":
             if self.stop_latched:
                 self._warn_stop_latch_ignored("B start")
@@ -990,33 +777,27 @@ class UFODeployPolicy:
                 logger.info("Starting motion")
                 self.start_motion = True
                 self.t = self.t_start
+            elif self.task_type == "reward":
+                if not self.policy_armed:
+                    logger.warning("Press R1 before B to start the reward policy")
+                    return
+                self.hold_init_pose = False
+                logger.info("Starting reward policy")
             else:
-                logger.info(colored(f"Commmand [ is undefined in current task type {self.task_type}!", "red"))
-                pass
+                logger.info(f"B / keyboard [ is unused in {self.task_type} mode")
         elif cur_key == "X":
             self.z_index = 0
             self.start_motion = False
             if self.task_type == "tracking":
                 self.t = self.t_stop
             logger.info("Resetting to stop state")
-        elif cur_key == "Y":
-            if self.task_type == "reward":
-                if self.z_index >= self.num_selected_z - 1:
-                    self.z_index = 0
-                else:
-                    self.z_index += 1
-                total_z = self.num_selected_z if self.task_type.startswith("reward-multiple-z-selection-duplicate") else self.num_selected_rewards
-                logger.info(colored(f"Switch to reward={self.selected_z_names[self.z_index]} (Count: {self.z_index+1}/{total_z})", "blue"))
-            elif self.task_type == "goal":
-                if self.z_index >= self.num_selected_goals - 1:
-                    self.z_index = 0
-                else:
-                    self.z_index += 1
-                logger.info(colored(f"Switch to goal {list(self.z_dict.keys())[self.z_index]} ({self.z_index+1}/{self.num_selected_goals})", "blue"))
+        elif cur_key == "Y" and self.task_type in {"reward", "goal"}:
+            self.z_index = (self.z_index + 1) % len(self.selected_z)
+            self._log_selected_context()
 
-        # Debug print for kp level tuning
-        if cur_key in ["Y+left", "Y+right", "A+left", "A+right"]:
-            logger.info(colored(f"Debug kp level: {self.command_sender.kp_level}", "green"))
+    def _log_selected_context(self):
+        name = self.selected_z_names[self.z_index]
+        logger.info(f"Selected {self.task_type} context ({self.z_index + 1}/{len(self.selected_z)}): {name}")
 
     # ----------------------------- Keyboard handling -----------------------------
     def _warn_unsupported_keyboard_key(self, keycode: str) -> None:
@@ -1036,7 +817,7 @@ class UFODeployPolicy:
         )
 
     def start_key_listener(self):
-        """Start a key listener using sshkeyboard (same as BasePolicy)."""
+        """Listen for keyboard commands until the process exits."""
 
         def on_press(keycode):
             try:
@@ -1044,64 +825,16 @@ class UFODeployPolicy:
             except Exception as e:
                 logger.warning(f"Keyboard key {keycode}. Error: {e}")
 
-        listener = listen_keyboard(on_press=on_press)
-        listener.start()
-        listener.join()
+        listen_keyboard(on_press=on_press)
 
     def handle_keyboard_button(self, keycode):
-        if keycode == "]":
-            if self.stop_latched:
-                self._warn_stop_latch_ignored("Keyboard ] enable")
-                return
-            logger.info("Using policy actions")
-            self.use_policy_action = True
-            self.get_ready_state = False    
-            if self.task_type == "reward":
-                total_z = self.num_selected_z
-                logger.info(colored(f"Switch to reward={self.selected_z_names[self.z_index]} (Count: {self.z_index+1}/{total_z})", "blue"))
-            if self.task_type == "goal":
-                logger.info(colored(f"Switch to goal={list(self.z_dict.keys())[self.z_index]} (Count: {self.z_index+1}/{len(self.z_dict)})", "blue"))
-            if self.task_type == "tracking":
-                self.t = self.t_stop
-        elif keycode == "[":
-            if self.stop_latched:
-                self._warn_stop_latch_ignored("Keyboard [ start")
-                return
-            if self.task_type == "tracking":
-                logger.info("Starting motion")
-                self.start_motion = True
-                self.t = self.t_start
-            else:
-                logger.info(colored(f"Commmand [ is undefined in current task type {self.task_type}!", "red"))
-                pass
-        elif keycode == "n":
-            if self.task_type == "reward":
-                if self.z_index >= self.num_selected_z - 1:
-                    self.z_index = 0
-                else:
-                    self.z_index += 1
-                total_z = self.num_selected_z if self.task_type.startswith("reward-multiple-z-selection-duplicate") else self.num_selected_rewards
-                logger.info(colored(f"Switch to reward={self.selected_z_names[self.z_index]} (Count: {self.z_index+1}/{total_z})", "blue"))
-            elif self.task_type == "goal":
-                if self.z_index >= self.num_selected_goals - 1:
-                    self.z_index = 0
-                else:
-                    self.z_index += 1
-                logger.info(colored(f"Switch to goal {list(self.z_dict.keys())[self.z_index]} ({self.z_index+1}/{self.num_selected_goals})", "blue"))
-        elif keycode == "p":
-            self.z_index = 0
-            self.start_motion = False
-            if self.task_type == "tracking":
-                self.t = self.t_stop
-            logger.info("Resetting to stop state")
+        command = {"]": "R1", "[": "B", "n": "Y", "p": "X", "i": "A"}.get(keycode)
+        if command is not None:
+            self.handle_control_button(command)
         elif keycode == "o":
-            self.use_policy_action = False
-            self.get_ready_state = False
-            logger.info("Actions set to zero")
-        elif keycode == "i":
-            self.get_ready_state = True
-            self.init_count = 0
-            logger.info("Setting to init state")
+            self.enter_safe_stop("keyboard stop")
+        elif keycode == "r":
+            self._clear_stop_latch_for_rearm("Keyboard r")
         elif keycode in {"w", "s", "a", "d", "q", "e", "z"}:
             self._warn_unsupported_keyboard_key(keycode)
         elif keycode == "5":
@@ -1116,52 +849,3 @@ class UFODeployPolicy:
             self._set_debug_kp_level(value=1.0)
         else:
             self._warn_unsupported_keyboard_key(keycode)
-        
-
-if __name__ == "__main__":
-    import argparse
-    import yaml
-    parser = argparse.ArgumentParser(description="Robot")
-    parser.add_argument(
-        "--robot_config", type=str, default="config/robot/g1.yaml", help="robot config file"
-    )
-    parser.add_argument(
-        "--policy_config", type=str, help="policy config file"
-    )
-    parser.add_argument(
-        "--model_path", type=str, help="model path"
-    )
-    parser.add_argument(
-        "--task", type=str, help="task type: tracking or reward or single or stiching", default="track-walk"
-    )
-    parser.add_argument(
-        "--pico-control", action="store_true",
-        help="Enable Pico controller buttons from the onboard teleop server for policy mode control.",
-    )
-    parser.add_argument(
-        "--pico-control-addr", type=str, default="tcp://127.0.0.1:28704",
-        help="ZMQ SUB address for Pico controller button JSON.",
-    )
-
-    args = parser.parse_args()
-
-    with open(args.policy_config) as file:
-        policy_config = yaml.load(file, Loader=yaml.FullLoader)
-    
-    with open(args.robot_config) as file:
-        robot_config = yaml.load(file, Loader=yaml.FullLoader)
-
-    with open(args.task, 'r') as file:
-        exp_config = yaml.load(file, Loader=yaml.FullLoader)
-    model_path = args.model_path
-
-    policy = UFODeployPolicy(
-        robot_config=robot_config,
-        policy_config=policy_config,
-        model_path=model_path,
-        exp_config=exp_config,
-        rl_rate=50,
-        pico_control=bool(args.pico_control),
-        pico_control_addr=str(args.pico_control_addr),
-    )
-    policy.run()

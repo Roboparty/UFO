@@ -22,7 +22,8 @@ WEB_PORT="${WEB_PORT:-8080}"
 WEB_MUJOCO_XML="${WEB_MUJOCO_XML:-${UFO_ROOT}/data/robots/g1/scene_29dof_freebase.xml}"
 CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-}"
 ENABLE_PICO_POLICY_CONTROL="${ENABLE_PICO_POLICY_CONTROL:-0}"
-TELEOP_POLICY_CONFIG="${TELEOP_POLICY_CONFIG:-${POLICY_CONFIG:-${UFO_ROOT}/config/policy/g1_policy.yaml}}"
+MODEL_PATH="${MODEL_PATH:-${UFO_ROOT}/model/g1_policy/exported/FBcprAuxModel.onnx}"
+TELEOP_POLICY_CONFIG="${TELEOP_POLICY_CONFIG:-${POLICY_CONFIG:-${MODEL_PATH%.onnx}.deploy.yaml}}"
 export TELEOP_POLICY_CONFIG
 
 [[ -d "${UFO_ROOT}" ]] || fail "UFO_ROOT does not exist: ${UFO_ROOT}"
@@ -149,9 +150,9 @@ cmd=(
   "${TELEOP_PY}" xrobot_teleop_to_pose_zmq_server.py
   --robot unitree_g1
   --xr-poll-hz "${XR_POLL_HZ:-50}"
-  --req_bind_addr tcp://*:28701
-  --rep_bind_addr tcp://*:28702
-  --ctrl_bind_addr tcp://*:28703
+  --req_bind_addr tcp://127.0.0.1:28701
+  --rep_bind_addr tcp://127.0.0.1:28702
+  --ctrl_bind_addr tcp://127.0.0.1:28703
   --policy-config "${TELEOP_POLICY_CONFIG}"
 )
 

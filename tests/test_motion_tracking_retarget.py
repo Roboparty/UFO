@@ -244,15 +244,15 @@ def test_joint_permutation_validation_and_serialization():
 
 
 def test_pico_policy_control_default_disabled_and_realtime_lookback_zero():
-    policy_launcher = (ROOT / "run_g1_teleop_policy_onboard.sh").read_text()
+    policy_launcher = (ROOT / "scripts/onboard/run_policy.sh").read_text()
     teleop_launcher = (ROOT / "scripts/teleop/teleop_pose_50hz_onboard.sh").read_text()
     teleop_server = (ROOT / "scripts/teleop/xrobot_teleop_to_pose_zmq_server.py").read_text()
     realtime_server = (ROOT / "scripts/realtime/realtime_z_server.py").read_text()
-    realtime_launcher = (ROOT / "scripts/realtime/run_realtime_z_server_onboard.sh").read_text()
+    realtime_launcher = (ROOT / "scripts/realtime/run_z_encoder.sh").read_text()
     teleop_cfg = yaml.safe_load((ROOT / "config/teleop/g1.yaml").read_text())
 
     assert 'ENABLE_PICO_POLICY_CONTROL="${ENABLE_PICO_POLICY_CONTROL:-0}"' in policy_launcher
-    assert 'ENABLE_PICO_POLICY_CONTROL=1 requires CTRL_PUB_BIND_ADDR=tcp://*:28704' in policy_launcher
+    assert 'ENABLE_PICO_POLICY_CONTROL=1 requires CTRL_PUB_BIND_ADDR=tcp://127.0.0.1:28704' in policy_launcher
     assert 'cmd+=(--pico-control --pico-control-addr "${PICO_CONTROL_ADDR}")' in policy_launcher
     assert '"${ENABLE_PICO_POLICY_CONTROL}" == "1"' in policy_launcher
     assert 'CTRL_PUB_BIND_ADDR="${CTRL_PUB_BIND_ADDR:-}"' in teleop_launcher

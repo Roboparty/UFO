@@ -11,16 +11,6 @@ INTERFACE: "lo" # Yuanhang: in simulation, lo0 for mac, lo for linux
 USE_JOYSTICK: False
 
 
-UNITREE_LEGGED_CONST:
-  HIGHLEVEL: 0xEE
-  LOWLEVEL: 0xFF
-  TRIGERLEVEL: 0xF0
-  PosStopF: 2146000000.0
-  VelStopF: 16000.0
-  MODE_MACHINE: 5
-  MODE_PR:  0
-
-
 joint_pos_lower_limit:
   left_hip_pitch_joint: -2.5307
   right_hip_pitch_joint: -2.5307  
@@ -114,15 +104,16 @@ joint_velocity_limit:
   left_wrist_yaw_joint: 22.0
   right_wrist_yaw_joint: 22.0
 
+# Simulation torque caps match the current UFO G1 mode-15 training model.
 joint_effort_limit:
-  left_hip_pitch_joint: 88.0
-  left_hip_roll_joint: 88.0
+  left_hip_pitch_joint: 139.0
+  left_hip_roll_joint: 139.0
   left_hip_yaw_joint: 88.0
   left_knee_joint: 139.0
   left_ankle_pitch_joint: 50.0
   left_ankle_roll_joint: 50.0
-  right_hip_pitch_joint: 88.0
-  right_hip_roll_joint: 88.0
+  right_hip_pitch_joint: 139.0
+  right_hip_roll_joint: 139.0
   right_hip_yaw_joint: 88.0
   right_knee_joint: 139.0
   right_ankle_pitch_joint: 50.0
@@ -135,12 +126,12 @@ joint_effort_limit:
   left_shoulder_yaw_joint: 25.0
   left_elbow_joint: 25.0
   left_wrist_roll_joint: 25.0
-  left_wrist_pitch_joint: 5.0
-  left_wrist_yaw_joint: 5.0
+  left_wrist_pitch_joint: 13.4
+  left_wrist_yaw_joint: 13.4
   right_shoulder_pitch_joint: 25.0
   right_shoulder_roll_joint: 25.0
   right_shoulder_yaw_joint: 25.0
   right_elbow_joint: 25.0
   right_wrist_roll_joint: 25.0
-  right_wrist_pitch_joint: 5.0
-  right_wrist_yaw_joint: 5.0
+  right_wrist_pitch_joint: 13.4
+  right_wrist_yaw_joint: 13.4

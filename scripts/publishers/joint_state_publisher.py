@@ -15,6 +15,7 @@ from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitial
 import sys
 sys.path.append(".")
 
+from utils.policy import load_robot_config
 from utils.strings import unitree_joint_names
 
 class JointStatePublisher:
@@ -136,8 +137,7 @@ def main():
     parser.add_argument("--freq", type=int, default=50, help="Publishing frequency")
     
     args = parser.parse_args()
-    with open(args.robot_config) as file:
-        robot_config = yaml.load(file, Loader=yaml.FullLoader)
+    robot_config = load_robot_config(args.robot_config)
     dest_joint_names = unitree_joint_names
     
     publisher = JointStatePublisher(

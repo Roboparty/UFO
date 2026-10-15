@@ -2,7 +2,6 @@ type: reward
 start: 0
 end: None
 stop: 0
-ctx_dir: reward_inference_mjlab
 ctx_path: reward_locomotion.pkl
 selected_rewards_filter_z:
   - reward: "move-ego-low0.5-0-0"

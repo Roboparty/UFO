@@ -216,7 +216,11 @@ def test_onboard_profile_source_marks_skipped_dependencies():
         encoding="utf-8"
     )
     assert "Dependency profile: {args.profile}" in source
-    assert "[SKIP]" in source
+    from scripts.onboard.check_g1_onboard_env import Reporter
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        Reporter().skip("optional dependency")
+    assert "[SKIP] optional dependency" in output.getvalue()
     assert "xrobotoolkit_sdk (teleop only)" in source
     assert "unitree_sdk2py (diagnostic only)" in source
     assert "g1_interface (control only)" in source
@@ -289,81 +293,28 @@ def test_xrobot_bootstrap_rejects_cpython38_extension():
     assert "cpython-310-aarch64-linux-gnu" in proc.stdout
 
 
-def test_dependency_matrix_documents_current_flows():
-    text = (ROOT / "docs" / "deployment_dependencies.md").read_text(encoding="utf-8")
-    assert "| Workstation | Conda with Python 3.10 |" in text
-    assert "| G1 onboard | Python 3.10 venv |" in text
-    assert "The validated G1 onboard deployment uses venv by default" in text
-    assert "| Ordinary onboard Sim2Real | No | No | No | No | No |" in text
-    assert (
-        "| PICO Teleop Sim2Real | Yes | Yes | `motion_tracking_retarget` + Mink IK | No | No for retarget |"
-        in text
-    )
-    assert "Current deploy does not require the external" in text
-    assert "It inherits\n`requirements/runtime.txt`" in text
-
-
-def test_onboard_docs_spell_out_runtime_plus_teleop_dependencies():
-    text = (ROOT / "scripts" / "onboard" / "README.md").read_text(encoding="utf-8")
-    assert "Ordinary Sim2Real does not need human pose" in text
-    assert "XRoboToolkit, `xrobotoolkit_sdk`, PICO, retargeting, `unitree_sdk2py`, GMR" in text
-    assert "`requirements/teleop.txt`\ninherits `requirements/runtime.txt`" in text
-    assert "realtime\n`z`, ONNX inference, policy code" in text
-    assert "UFO deploy has three different external dependency categories." in text
-    assert "g1_interface.cpython-310-aarch64-linux-gnu.so" in text
-    assert "g1_interface.cpython-38-aarch64-linux-gnu.so" in text
-    assert "xrobotoolkit_sdk`" in text
-    assert "unitree_sdk2py" in text
-    assert "scripts/onboard/run_preflight_suite.sh --profile ordinary" in text
-    assert "scripts/onboard/run_preflight_suite.sh --profile teleop" in text
-    assert "scripts/onboard/run_preflight_suite.sh --profile diagnostic" in text
-    assert "check_g1_onboard_env.py --target g1-onboard" in text
-    assert "check_g1_onboard_env.py --profile teleop --target g1-onboard" in text
-
-
-def test_readme_documents_official_python_environment_policy():
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "## Official Python Environment Policy" in text
-    assert "Workstation:\nConda with Python 3.10" in text
-    assert "G1 onboard:\nPython 3.10 venv" in text
-    assert "The validated G1 onboard deployment uses Python\n3.10 venv by default" in text
-    assert "For the validated G1 onboard path, activate this venv rather than a Conda" in text
-    assert "ONBOARD_PY=/home/unitree/ufo_deploy_venv/bin/python" in text
-
-
-def test_onboard_readme_documents_venv_default_path():
-    text = (ROOT / "scripts" / "onboard" / "README.md").read_text(encoding="utf-8")
-    assert "## Official Onboard Python Environment" in text
-    assert "Workstation:\nConda with Python 3.10" in text
-    assert "G1 onboard:\nPython 3.10 venv" in text
-    assert "/home/unitree/ufo_deploy_venv" in text
-    assert "Onboard preflight validates the venv default when run with the G1 onboard" in text
-    assert "Direct PC/CI calls to `check_g1_onboard_env.py` default to\n`--target workstation`" in text
-
-
-def test_teleop_readme_keeps_conda_workstation_only_for_release_path():
-    text = (ROOT / "scripts" / "teleop" / "README.md").read_text(encoding="utf-8")
-    assert "On a workstation, the release-supported default is Conda:" in text
-    assert "Use this `ufo-teleop` Conda environment for the workstation" in text
-    assert "On the G1 onboard Jetson, the validated default is a Python 3.10 venv" in text
-    assert "Direct onboard PICO teleop can use the same deployment venv" in text
-    assert "/home/unitree/ufo_deploy_venv/bin/python" in text
-
-
-def test_readme_no_longer_presents_all_sdks_as_required():
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "## External Runtime Dependencies" in text
-    assert "UFO deploy has three different external dependency categories." in text
-    assert "Required For Any Real G1 Control" in text
-    assert "Required Only For Onboard PICO Teleop" in text
-    assert "Optional Diagnostics" in text
-    assert "Unitree SDK2 Python binding, including `g1_interface`" not in text
-    assert "Install Unitree SDK" not in text
-    assert "Missing `unitree_sdk2py` does not block ordinary Sim2Real or PICO teleop." in text
-    assert "Ordinary Sim2Real does not need `xrobotoolkit_sdk`" in text
+def test_docs_link_current_launchers_and_preserve_installation_boundaries():
+    import re
+    for name in ("README.md", "scripts/onboard/README.md", "scripts/teleop/README.md", "docs/deployment_dependencies.md"):
+        path = ROOT / name
+        text = path.read_text()
+        for link in re.findall(r"\]\(([^)]+)\)", text):
+            if "://" not in link and not link.startswith("#"):
+                assert (path.parent / link.split("#")[0]).exists(), (name, link)
+    text = (ROOT / "README.md").read_text()
+    assert "config/exp/" not in text
+    assert "run_g1_teleop_policy_onboard.sh" not in text
+    for task in ("tracking", "goal", "reward", "teleop"):
+        assert f"--task {task}" in text
+    onboard = (ROOT / "scripts/onboard/README.md").read_text()
+    assert "g1_interface.cpython-310-aarch64-linux-gnu.so" in onboard
+    assert "unitree_sdk2py" in onboard and "Optional read-only" in onboard
+    teleop = (ROOT / "scripts/teleop/README.md").read_text()
+    assert "calibrat" in teleop and "height" in teleop
 
 
 if __name__ == "__main__":
+    test_docs_link_current_launchers_and_preserve_installation_boundaries()
     test_teleop_requirements_exclude_gmr_and_torch()
     test_runtime_requirements_exclude_teleop_and_training_packages()
     test_training_requirements_inherit_runtime_and_keep_torch_separate()
@@ -379,10 +330,4 @@ if __name__ == "__main__":
     test_preflight_suite_enforces_onboard_venv_by_default()
     test_xrobot_onboard_bootstrap_requires_python310_venv()
     test_xrobot_bootstrap_rejects_cpython38_extension()
-    test_dependency_matrix_documents_current_flows()
-    test_onboard_docs_spell_out_runtime_plus_teleop_dependencies()
-    test_readme_documents_official_python_environment_policy()
-    test_onboard_readme_documents_venv_default_path()
-    test_teleop_readme_keeps_conda_workstation_only_for_release_path()
-    test_readme_no_longer_presents_all_sdks_as_required()
     print("dependency layout tests ok")

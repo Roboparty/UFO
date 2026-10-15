@@ -38,7 +38,7 @@ class SimulationBridge:
         self.zmq_context = zmq.Context.instance()
 
         self.low_state_port = robot_config.get(
-            "LOW_STATE_PORT", PORTS.get("low_state", 5590)
+            "LOW_STATE_PORT", PORTS["low_state"]
         )
         low_state_bind_addr = robot_config.get("LOW_STATE_BIND_ADDR", "*")
         low_state_endpoint = f"tcp://{low_state_bind_addr}:{self.low_state_port}"
@@ -48,7 +48,7 @@ class SimulationBridge:
         self.low_state_pub.bind(low_state_endpoint)
 
         self.low_cmd_port = robot_config.get(
-            "LOW_CMD_PORT", PORTS.get("low_cmd", 5591)
+            "LOW_CMD_PORT", PORTS["low_cmd"]
         )
         low_cmd_host = robot_config.get("LOW_CMD_HOST", "127.0.0.1")
         low_cmd_endpoint = f"tcp://{low_cmd_host}:{self.low_cmd_port}"

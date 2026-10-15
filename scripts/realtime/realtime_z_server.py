@@ -36,56 +36,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import zmq
 
-# -----------------------------------------------------------------------------
-# Robot constants (G1, 29-DOF)
-# -----------------------------------------------------------------------------
-# Must match the body order used while training the latent policy. These names come from
-# humanoidverse robot config (g1_29dof_hard_waist.yaml: robot.motion.body_names
-# and robot.motion.extend_config).
-G1_29DOF_BODY_NAMES: List[str] = [
-    "pelvis",
-    "left_hip_pitch_link", "left_hip_roll_link", "left_hip_yaw_link",
-    "left_knee_link", "left_ankle_pitch_link", "left_ankle_roll_link",
-    "right_hip_pitch_link", "right_hip_roll_link", "right_hip_yaw_link",
-    "right_knee_link", "right_ankle_pitch_link", "right_ankle_roll_link",
-    "waist_yaw_link", "waist_roll_link", "torso_link",
-    "left_shoulder_pitch_link", "left_shoulder_roll_link", "left_shoulder_yaw_link",
-    "left_elbow_link",
-    "left_wrist_roll_link", "left_wrist_pitch_link", "left_wrist_yaw_link",
-    "right_shoulder_pitch_link", "right_shoulder_roll_link", "right_shoulder_yaw_link",
-    "right_elbow_link",
-    "right_wrist_roll_link", "right_wrist_pitch_link", "right_wrist_yaw_link",
-]
-
-# Extra "extend" bodies computed analytically from a parent body pose (not in
-# MuJoCo model). Order matters: appended after the base body list.
-G1_29DOF_EXTEND_CONFIG: List[Dict[str, Any]] = [
-    {
-        "joint_name": "head_link",
-        "parent_name": "torso_link",
-        "pos": [0.0, 0.0, 0.35],
-        "rot": [1.0, 0.0, 0.0, 0.0],  # wxyz convention as in the training yaml
-    },
-]
-
-# Default 29-DoF "stand" pose used to center dof_pos in state/last_action.
-# Order: 6 left leg, 6 right leg, 3 waist, 4 left shoulder/elbow, 3 left wrist,
-# 4 right shoulder/elbow, 3 right wrist. Values come from the training XML's
-# `stand` keyframe and must match the training-time dof_names order.
-G1_29DOF_DEFAULT_POSE_RAD: np.ndarray = np.array(
-    [
-        -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,   # left leg
-        -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,   # right leg
-        0.0, 0.0, 0.0,                    # waist
-        0.0, 0.0, 0.0, 0.0,               # left shoulder/elbow
-        0.0, 0.0, 0.0,                    # left wrist
-        0.0, 0.0, 0.0, 0.0,               # right shoulder/elbow
-        0.0, 0.0, 0.0,                    # right wrist
-    ],
-    dtype=np.float32,
-)
-assert G1_29DOF_DEFAULT_POSE_RAD.shape == (29,)
-
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from utils.policy import load_policy_metadata
 
 def _standing_z() -> np.ndarray:
     z = np.zeros(256, dtype=np.float32)
@@ -611,7 +563,7 @@ def parse_args() -> argparse.Namespace:
                    help="Teleop pose reply socket (server PUSH -> PULL)")
     p.add_argument("--teleop_ctrl", type=str, default="tcp://127.0.0.1:28703",
                    help="Teleop controller button socket (server PUSH -> PULL)")
-    p.add_argument("--z_bind", type=str, default="tcp://*:28711",
+    p.add_argument("--z_bind", type=str, default="tcp://127.0.0.1:28711",
                    help="ZMQ PUB bind address for the 256-D z stream")
     p.add_argument("--hz", type=float, default=50.0, help="Loop frequency in Hz")
     p.add_argument("--lookback_ms", type=float, default=15.0,
@@ -639,8 +591,8 @@ def parse_args() -> argparse.Namespace:
                    help="Use wall time between consecutive step() calls for finite differences.")
     p.add_argument("--fix-quat-continuity", action="store_true",
                    help="Before angular-velocity finite differencing, flip q_curr when dot(q_prev, q_curr) < 0. Default off for A/B checks.")
-    p.add_argument("--angvel-delta-frame", choices=["local", "world"], default="local",
-                   help="Quaternion delta order for angular velocity: local=inv(q_prev)*q_curr, world=q_curr*inv(q_prev). Default keeps old behavior.")
+    p.add_argument("--angvel-delta-frame", choices=["local", "world"], default="world",
+                   help="Finite-difference coordinate frame; local deltas are converted to world before building observations.")
     p.add_argument("--no-freeze-static-pose", action="store_true",
                    help="By default we skip backward_map when teleop repeats the same pose; "
                         "pass this flag to always recompute z.")
@@ -684,10 +636,14 @@ class OnlineZInferer:
         debug_z: bool = False,
         max_z_delta: float = 0.0,
         fix_quat_continuity: bool = False,
-        angvel_delta_frame: str = "local",
+        angvel_delta_frame: str = "world",
     ) -> None:
         import mujoco
         import onnxruntime as ort
+
+        metadata = load_policy_metadata(backward_onnx)
+        self.obs_scales = metadata["reference_observation_scales"]
+        deployment = metadata["deployment"]
 
         providers = (
             ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -722,7 +678,9 @@ class OnlineZInferer:
         self.quat_flip_step_total = 0
         self._last_quat_min_dot = 1.0
         self._last_quat_flip_count = 0
-        self.root_height_obs = bool(root_height_obs)
+        self.root_height_obs = bool(metadata["root_height_obs"])
+        if root_height_obs and not self.root_height_obs:
+            raise ValueError("--root_height_obs does not match the exported model")
 
         xml_path = Path(mujoco_xml).expanduser().resolve()
         if not xml_path.exists():
@@ -730,10 +688,13 @@ class OnlineZInferer:
         self.xml_path = xml_path
         self.mj_model = mujoco.MjModel.from_xml_path(str(xml_path))
         self.mj_data = mujoco.MjData(self.mj_model)
-        self.default_pose_29 = G1_29DOF_DEFAULT_POSE_RAD.copy()
+        joint_names = [self.mj_model.joint(i).name for i in range(self.mj_model.njnt) if self.mj_model.jnt_type[i] != mujoco.mjtJoint.mjJNT_FREE]
+        if joint_names != deployment["policy_joint_names"]:
+            raise ValueError("FK XML joint order differs from the exported policy")
+        self.default_pose_29 = np.asarray([deployment["default_joint_pos"][name] for name in deployment["policy_joint_names"]], dtype=np.float64)
 
-        self.base_body_names = list(G1_29DOF_BODY_NAMES)
-        self.extend_cfg = [dict(c) for c in G1_29DOF_EXTEND_CONFIG]
+        self.base_body_names = list(metadata["reference_body_names"])
+        self.extend_cfg = list(metadata["reference_motion_extensions"])
 
         body_ids: List[int] = []
         for name in self.base_body_names:
@@ -742,7 +703,7 @@ class OnlineZInferer:
             except KeyError as e:
                 raise KeyError(
                     f"Body '{name}' not found in MuJoCo model at {xml_path}. "
-                    f"Either fix the XML or update G1_29DOF_BODY_NAMES."
+                    f"Check the XML against reference_body_names in the exported metadata."
                 ) from e
         self.body_ids = np.asarray(body_ids, dtype=np.int32)
 
@@ -755,11 +716,6 @@ class OnlineZInferer:
         # Fallback z (used until enough history is collected)
         self.last_z = _standing_z()
         self.last_step_produced_live_z = False
-
-    def get_last_z(self) -> np.ndarray:
-        if self.last_z.shape == (256,):
-            return self.last_z.copy()
-        return _standing_z()
 
     def reset_history(self, seed_z: Optional[np.ndarray] = None) -> None:
         self.prev_root_pos = None
@@ -830,6 +786,29 @@ class OnlineZInferer:
             return None
         return z_np
 
+    def build_observations(self, dof_pos, dof_vel, body_pos, body_rot, body_vel, body_ang_vel):
+        """Build batched encoder inputs; body velocities use world coordinates."""
+        ref_dof_pos = (dof_pos - self.default_pose_29).astype(np.float32)
+        ref_dof_vel = dof_vel.astype(np.float32)
+        body_rot = body_rot.astype(np.float32)
+        body_ang_vel = body_ang_vel.astype(np.float32)
+        obs_dict_priv = _compute_humanoid_observations_max_np(
+            body_pos.astype(np.float32), body_rot, body_vel.astype(np.float32),
+            body_ang_vel, local_root_obs=True, root_height_obs=self.root_height_obs,
+        )
+        privileged_state = np.concatenate(
+            [v.astype(np.float32) for v in obs_dict_priv.values()], axis=-1
+        ).astype(np.float32) * float(self.obs_scales["max_local_self"])
+        base_quat = body_rot[:, 0, :]
+        gravity_vec = np.broadcast_to(np.array([0., 0., -1.], dtype=np.float32), (len(dof_pos), 3))
+        projected_gravity = _quat_rotate_inverse_xyzw(base_quat, gravity_vec).astype(np.float32)
+        ref_ang_vel = _quat_rotate_inverse_xyzw(base_quat, body_ang_vel[:, 0, :]).astype(np.float32)
+        state = np.concatenate(
+            [ref_dof_pos * self.obs_scales["dof_pos"], ref_dof_vel * self.obs_scales["dof_vel"],
+             projected_gravity * self.obs_scales["projected_gravity"], ref_ang_vel * self.obs_scales["base_ang_vel"]], axis=-1
+        ).astype(np.float32)
+        return {"state": state, "privileged_state": privileged_state, "last_action": np.zeros_like(ref_dof_pos)}
+
     def step(self, pose: PoseFrame, mode: str = "follow") -> Optional[np.ndarray]:
         self.last_step_produced_live_z = False
         now_wall = time.perf_counter()
@@ -886,6 +865,8 @@ class OnlineZInferer:
             fix_quat_continuity=self.fix_quat_continuity,
             delta_frame=self.angvel_delta_frame,
         )
+        if self.angvel_delta_frame == "local":
+            body_ang_vel = _quat_rotate_xyzw(self.prev_all_body_rot_xyzw, body_ang_vel)
 
         self.prev_root_pos = root_pos
         self.prev_root_quat_xyzw = root_quat_xyzw
@@ -898,44 +879,11 @@ class OnlineZInferer:
         if self._step_count <= self.drop_first_n:
             return self.last_z
 
-        # Build single-step obs (T = 1).
-        ref_body_pos = all_body_pos[None, :, :].astype(np.float32)
-        ref_body_rots = all_body_rot_xyzw[None, :, :].astype(np.float32)
-        ref_body_vels = body_vel[None, :, :].astype(np.float32)
-        ref_body_angular_vels = body_ang_vel[None, :, :].astype(np.float32)
-
-        ref_dof_pos = (dof_pos - self.default_pose_29)[None, :].astype(np.float32)
-        ref_dof_vel = dof_vel[None, :].astype(np.float32)
-
-        obs_dict_priv = _compute_humanoid_observations_max_np(
-            ref_body_pos,
-            ref_body_rots,
-            ref_body_vels,
-            ref_body_angular_vels,
-            local_root_obs=True,
-            root_height_obs=bool(self.root_height_obs),
+        observations = self.build_observations(
+            dof_pos[None, :], dof_vel[None, :], all_body_pos[None, :],
+            all_body_rot_xyzw[None, :], body_vel[None, :], body_ang_vel[None, :],
         )
-        privileged_state = np.concatenate(
-            [v.astype(np.float32) for v in obs_dict_priv.values()], axis=-1
-        ).astype(np.float32)
-
-        base_quat = ref_body_rots[:, 0, :]  # (1, 4)
-        gravity_vec = np.array([[0.0, 0.0, -1.0]], dtype=np.float32)
-        projected_gravity = _quat_rotate_inverse_xyzw(base_quat, gravity_vec).astype(np.float32)
-        ref_ang_vel = ref_body_angular_vels[:, 0, :].astype(np.float32)
-
-        state = np.concatenate(
-            [ref_dof_pos, ref_dof_vel, projected_gravity, ref_ang_vel], axis=-1
-        ).astype(np.float32)
-        last_action = ref_dof_pos  # mirrors humanoidverse.get_backward_observation()
-
-        feed: Dict[str, np.ndarray] = {}
-        if "state" in self.session_input_names:
-            feed["state"] = state
-        if "last_action" in self.session_input_names:
-            feed["last_action"] = last_action
-        if "privileged_state" in self.session_input_names:
-            feed["privileged_state"] = privileged_state
+        feed = {name: observations[name] for name in self.session_input_names}
 
         z_np = self._validate_z_output(self.session.run([self.session_output_name], feed)[0])
         if z_np is None:

@@ -1,13 +1,11 @@
 import numpy as np
 import zmq
-import threading
 import time
 
 
 from utils.strings import unitree_joint_names
 from loguru import logger
-from typing import Dict
-from utils.common import ZMQSubscriber, PORTS, LowStateMessage
+from utils.common import PORTS, LowStateMessage
 
 class StateProcessor:
     """Listens to the unitree sdk channels and converts observation into isaac compatible order.
@@ -15,7 +13,11 @@ class StateProcessor:
     """
     def __init__(self, robot_config, dest_joint_names):
         self.robot_type = robot_config["ROBOT_TYPE"]
-        self.mocap_ip = robot_config.get("MOCAP_IP", "localhost")
+        self.state_timeout_s = float(robot_config.get("LOW_STATE_TIMEOUT_MS", 200)) / 1000.0
+        if not np.isfinite(self.state_timeout_s) or self.state_timeout_s <= 0:
+            raise ValueError("LOW_STATE_TIMEOUT_MS must be finite and positive")
+        self.last_state_time = None
+        self.last_state_tick = None
         # Initialize state source
         if self.robot_type == "g1_real":
             self.robot = robot_config["robot"]
@@ -27,7 +29,7 @@ class StateProcessor:
                 )
 
             self.low_state_port = robot_config.get(
-                "LOW_STATE_PORT", PORTS.get("low_state", 55900)
+                "LOW_STATE_PORT", PORTS["low_state"]
             )
             state_host = robot_config.get("LOW_STATE_HOST", "127.0.0.1")
             state_endpoint = f"tcp://{state_host}:{self.low_state_port}"
@@ -58,49 +60,10 @@ class StateProcessor:
         self.joint_pos = self.qpos[7:]
         self.joint_vel = self.qvel[6:]
 
-        self.mocap_subscribers: Dict[str, ZMQSubscriber] = {}  # Dictionary to store ZMQ subscribers
-        self.mocap_threads = {}      # Dictionary to store subscriber threads
-        self.mocap_data = {}         # Dictionary to store received mocap data
-        self.mocap_data_lock = threading.Lock()  # Lock for thread-safe access
-
-    def register_subscriber(self, object_name: str, port: int | None = None):
-        if object_name in self.mocap_subscribers:
-            return
-
-        # init ZMQ subscriber
-        port = PORTS.get(f"{object_name}_pose", port)
-        subscriber = ZMQSubscriber(port)
-        self.mocap_subscribers[object_name] = subscriber
-
-        def _sub_thread(obj_name: str):
-            while True:
-                try:
-                    pose_msg = self.mocap_subscribers[obj_name].receive_pose()
-                    if pose_msg:
-                        with self.mocap_data_lock:
-                            self.mocap_data[f"{obj_name}_pos"] = pose_msg.position
-                            self.mocap_data[f"{obj_name}_quat"] = pose_msg.quaternion
-                except zmq.Again:
-                    time.sleep(0.001)
-                except Exception as e:
-                    logger.warning(f"{obj_name} subscriber error: {e}")
-                    time.sleep(0.01)
-
-        # start subscriber thread
-        th = threading.Thread(target=_sub_thread, args=(object_name,), daemon=True)
-        th.start()
-        self.mocap_threads[object_name] = th
-
-
-    def get_mocap_data(self, key: str):
-        """Thread-safe method to get mocap data"""
-        with self.mocap_data_lock:
-            return self.mocap_data.get(key, None)
-
     def _prepare_low_state(self):
         if hasattr(self, "low_state_socket"):
             self._receive_low_state()
-            if not self.latest_low_state:
+            if self.last_state_time is None or time.monotonic() - self.last_state_time > self.state_timeout_s:
                 return False
 
             low_state = self.latest_low_state
@@ -124,6 +87,18 @@ class StateProcessor:
             if state is None:
                 return False
 
+            # The SDK returns a cached snapshot; freshness must use its receive tick.
+            if not hasattr(state, "tick"):
+                logger.error("G1 SDK must expose low-state tick for stale-state detection")
+                return False
+            if not self._valid_state(state.imu.quat, state.imu.omega, state.motor.q, state.motor.dq):
+                return False
+            if state.tick != self.last_state_tick:
+                self.last_state_tick = state.tick
+                self.last_state_time = time.monotonic()
+            if self.last_state_time is None or time.monotonic() - self.last_state_time > self.state_timeout_s:
+                return False
+
             # IMU
             self.root_quat_b[:] = state.imu.quat  # [w, x, y, z]
             self.root_ang_vel_b[:] = state.imu.omega
@@ -133,6 +108,17 @@ class StateProcessor:
                 self.joint_pos[dst_idx] = state.motor.q[src_idx]
                 self.joint_vel[dst_idx] = state.motor.dq[src_idx]
             return True
+
+    def _valid_state(self, quat, omega, q, dq):
+        count = max(self.joint_indices_in_source) + 1
+        arrays = [np.asarray(value) for value in (quat, omega, q, dq)]
+        return (
+            arrays[0].shape == (4,) and arrays[1].shape == (3,)
+            and arrays[2].ndim == 1 and arrays[3].ndim == 1
+            and arrays[2].size >= count and arrays[3].size >= count
+            and all(np.all(np.isfinite(value)) for value in arrays)
+            and abs(float(np.linalg.norm(arrays[0])) - 1.0) < 0.1
+        )
 
     def _receive_low_state(self):
         """Fetch the most recent low state message from the ZMQ socket."""
@@ -145,6 +131,12 @@ class StateProcessor:
             except zmq.Again:
                 break
             try:
-                self.latest_low_state = LowStateMessage.from_bytes(data)
+                state = LowStateMessage.from_bytes(data)
+                if not self._valid_state(state.quaternion, state.gyroscope, state.joint_positions, state.joint_velocities):
+                    continue
+                if state.tick != self.last_state_tick:
+                    self.latest_low_state = state
+                    self.last_state_tick = state.tick
+                    self.last_state_time = time.monotonic()
             except Exception as exc:
                 logger.warning(f"Failed to decode low state message: {exc}")

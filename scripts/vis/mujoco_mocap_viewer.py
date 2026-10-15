@@ -21,7 +21,7 @@ sys.path.append(".")
 
 from utils.strings import unitree_joint_names
 
-scene = "./data/robots/g1/scene_29dof_nohand.xml"  # Robot scene, for Sim2Sim
+scene = "./data/robots/g1/scene_29dof_freebase.xml"  # Robot scene, for Sim2Sim
 
 temp_scene_base_name = "scene_temp.xml"
 
@@ -300,7 +300,7 @@ def main():
 
     root_pose_ip = "localhost"
     from utils.common import PORTS
-    root_pose_port = PORTS["pelvis"]
+    root_pose_port = PORTS["pelvis_pose"]
     
     viewer = MuJoCoMocapViewer(
         frequency=args.freq,

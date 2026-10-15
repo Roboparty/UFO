@@ -27,40 +27,8 @@ DEFAULT_SERVICE_PATTERNS = (
     "XRoboToolkit",
     "PXREARobotSDK",
 )
-CALLBACK_APIS = (
-    "register_frame_callback",
-    "clear_frame_callback",
-    "has_frame_callback",
-)
-POLLING_APIS = (
-    "is_body_data_available",
-    "get_body_joints_pose",
-    "get_body_timestamp_ns",
-    "get_A_button",
-    "get_B_button",
-    "get_X_button",
-    "get_Y_button",
-)
-
-
-class Reporter:
-    def __init__(self) -> None:
-        self.failures = 0
-        self.warnings = 0
-
-    def ok(self, message: str) -> None:
-        print(f"[OK] {message}")
-
-    def fail(self, message: str) -> None:
-        self.failures += 1
-        print(f"[FAIL] {message}")
-
-    def warn(self, message: str) -> None:
-        self.warnings += 1
-        print(f"[WARN] {message}")
-
-    def info(self, message: str) -> None:
-        print(f"[INFO] {message}")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.onboard.deploy_helpers import Reporter, check_xrobot_api as _check_xrobotoolkit_api
 
 
 def _module_origin(module: ModuleType) -> str:
@@ -78,27 +46,6 @@ def _import_module(name: str, label: str, reporter: Reporter) -> ModuleType | No
     reporter.ok(f"{label} installed")
     reporter.info(f"{name}: {_module_origin(module)}")
     return module
-
-
-def _check_xrobotoolkit_api(xrt: ModuleType, reporter: Reporter) -> None:
-    if not hasattr(xrt, "init"):
-        reporter.fail("xrobotoolkit_sdk installed but missing init()")
-        return
-
-    has_callback = all(hasattr(xrt, name) for name in CALLBACK_APIS)
-    has_polling = all(hasattr(xrt, name) for name in POLLING_APIS)
-
-    if has_callback:
-        reporter.ok("xrobotoolkit_sdk callback API available")
-    if has_polling:
-        reporter.ok("xrobotoolkit_sdk polling API available")
-    if not has_callback and not has_polling:
-        missing_callback = ", ".join(name for name in CALLBACK_APIS if not hasattr(xrt, name))
-        missing_polling = ", ".join(name for name in POLLING_APIS if not hasattr(xrt, name))
-        reporter.fail(
-            "xrobotoolkit_sdk has neither callback nor polling API "
-            f"(callback missing: {missing_callback}; polling missing: {missing_polling})"
-        )
 
 
 def _check_canonical_retarget(reporter: Reporter) -> None:

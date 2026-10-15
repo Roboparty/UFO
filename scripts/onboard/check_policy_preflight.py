@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import pickle
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,72 +14,11 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 
 
-class Reporter:
-    def __init__(self) -> None:
-        self.failures = 0
-        self.warnings = 0
+sys.path.insert(0, str(ROOT))
+from utils.policy import resolve_context_path, validate_policy_config, load_context, select_contexts, validate_context, validate_task_config
 
-    def ok(self, message: str) -> None:
-        print(f"[OK] {message}")
-
-    def info(self, message: str) -> None:
-        print(f"[INFO] {message}")
-
-    def warn(self, message: str) -> None:
-        self.warnings += 1
-        print(f"[WARN] {message}")
-
-    def fail(self, message: str) -> None:
-        self.failures += 1
-        print(f"[FAIL] {message}")
-
-
-def _read_yaml(path: Path) -> dict[str, Any]:
-    import yaml
-
-    with path.open("r", encoding="utf-8") as f:
-        data = yaml.load(f, Loader=yaml.FullLoader)
-    if not isinstance(data, dict):
-        raise TypeError(f"{path} did not load as a mapping")
-    return data
-
-
-def _resolve_model_relative_context_path(
-    model_path: Path,
-    exp_config: dict[str, Any],
-    default_ctx_dir: str,
-    fallback_ctx_dirs: tuple[str, ...] = (),
-) -> Path:
-    ctx_path = Path(str(exp_config["ctx_path"])).expanduser()
-    if ctx_path.is_absolute():
-        return ctx_path
-
-    model_export_dir = model_path.expanduser().resolve(strict=False).parent
-    model_root = model_export_dir.parent
-    candidates: list[Path] = []
-
-    if "ctx_dir" in exp_config:
-        candidates.append(model_root / str(exp_config["ctx_dir"]) / ctx_path)
-    else:
-        candidates.append(model_root / default_ctx_dir / ctx_path)
-        for ctx_dir in fallback_ctx_dirs:
-            candidates.append(model_root / ctx_dir / ctx_path)
-
-    candidates.append(model_root / ctx_path)
-    candidates.append(model_export_dir / ctx_path)
-
-    seen: set[str] = set()
-    for candidate in candidates:
-        resolved = candidate.resolve(strict=False)
-        key = str(resolved)
-        if key in seen:
-            continue
-        seen.add(key)
-        if resolved.is_file():
-            return resolved
-
-    tried = "\n".join(f"  - {candidate.resolve(strict=False)}" for candidate in candidates)
-    raise FileNotFoundError(f"could not resolve ctx_path={ctx_path}\nTried:\n{tried}")
+from utils.policy import load_yaml as _read_yaml, load_robot_config
+from scripts.onboard.deploy_helpers import Reporter
 
 
 class _DummyStateProcessor:
@@ -95,15 +33,16 @@ class _DummyStateProcessor:
 class _DummyEnv:
     def __init__(self, num_dof: int, num_actions: int) -> None:
         self.num_actions = int(num_actions)
+        self.last_action = np.zeros(self.num_actions, dtype=np.float32)
         self.state_processor = _DummyStateProcessor(num_dof)
 
 
 def _compute_obs_dim(policy_config: dict[str, Any], reporter: Reporter) -> int | None:
     sys.path.insert(0, str(ROOT))
     try:
-        from rl_policy.observations import ObsGroup, Observation
+        from rl_policy.observations import ObsGroup
     except Exception as exc:
-        reporter.fail(f"failed to import observation registry: {exc.__class__.__name__}: {exc}")
+        reporter.fail(f"failed to import observations: {exc.__class__.__name__}: {exc}")
         return None
 
     joint_names = list(policy_config.get("isaac_joint_names", []))
@@ -117,32 +56,9 @@ def _compute_obs_dim(policy_config: dict[str, Any], reporter: Reporter) -> int |
 
     group_dims: dict[str, int] = {}
     for group_name, obs_items in obs_cfg.items():
-        if not isinstance(obs_items, dict):
-            reporter.fail(f"observation group {group_name!r} is not a mapping")
-            return None
-
-        funcs = {}
-        for obs_name, obs_config in obs_items.items():
-            cls = Observation.registry.get(obs_name)
-            if cls is None:
-                reporter.fail(f"observation {obs_name!r} is not registered")
-                return None
-            if obs_config is None:
-                obs_config = {}
-            if not isinstance(obs_config, dict):
-                reporter.fail(f"observation config for {obs_name!r} is not a mapping")
-                return None
-            try:
-                funcs[obs_name] = cls(env=env, **obs_config)
-            except Exception as exc:
-                reporter.fail(f"failed to construct observation {obs_name}: {exc.__class__.__name__}: {exc}")
-                return None
-
         try:
-            action = np.zeros(len(policy_joint_names), dtype=np.float32)
-            for func in funcs.values():
-                func.update({"action": action})
-            value = ObsGroup(group_name, funcs).compute()
+            group = ObsGroup(group_name, obs_items, env)
+            value = group.compute()
         except Exception as exc:
             reporter.fail(f"failed to compute observation group {group_name}: {exc.__class__.__name__}: {exc}")
             return None
@@ -163,12 +79,12 @@ def _compute_obs_dim(policy_config: dict[str, Any], reporter: Reporter) -> int |
 
 def _load_context_dim(exp_config: dict[str, Any], model_path: Path, reporter: Reporter) -> int | None:
     task_type = str(exp_config.get("type", ""))
-    if task_type != "tracking":
-        reporter.warn(f"only tracking task context is checked here, got type={task_type!r}")
+    if task_type not in {"tracking", "reward", "goal"}:
+        reporter.fail(f"unsupported task type={task_type!r}")
         return None
 
     ctx_source = str(exp_config.get("ctx_source", "pkl")).lower()
-    if ctx_source == "zmq":
+    if task_type == "tracking" and ctx_source == "zmq":
         ctx_dim = 256
         reporter.ok("tracking context source is ZMQ")
         reporter.info(f"ctx_zmq_addr: {exp_config.get('ctx_zmq_addr', 'tcp://127.0.0.1:28711')}")
@@ -181,40 +97,19 @@ def _load_context_dim(exp_config: dict[str, Any], model_path: Path, reporter: Re
         return None
 
     try:
-        import joblib
-    except Exception as exc:
-        reporter.fail(f"joblib import failed for pkl context: {exc.__class__.__name__}: {exc}")
-        return None
-
-    try:
-        ctx_path = _resolve_model_relative_context_path(
-            model_path,
-            exp_config,
-            default_ctx_dir="tracking_inference_mjlab",
-            fallback_ctx_dirs=("tracking_inference",),
+        ctx_path = resolve_context_path(
+            model_path, exp_config, default_ctx_dir=f"{task_type}_inference",
+            fallback_ctx_dirs=(f"{task_type}_inference_mjlab",),
         )
-        ctx = joblib.load(ctx_path)
-    except Exception:
-        try:
-            ctx_path = _resolve_model_relative_context_path(
-                model_path,
-                exp_config,
-                default_ctx_dir="tracking_inference_mjlab",
-                fallback_ctx_dirs=("tracking_inference",),
-            )
-            with ctx_path.open("rb") as f:
-                ctx = pickle.load(f)
-        except Exception as exc:
-            reporter.fail(f"failed to load tracking context: {exc.__class__.__name__}: {exc}")
-            return None
-
-    arr = np.asarray(ctx)
-    if arr.ndim < 2 or arr.shape[-1] <= 0 or not np.all(np.isfinite(arr[:1])):
-        reporter.fail(f"tracking context has invalid shape/value: {arr.shape}")
+        ctx = load_context(ctx_path)
+        dimension = validate_context(ctx)
+        if task_type != "tracking":
+            select_contexts(ctx, exp_config)
+    except Exception as exc:
+        reporter.fail(f"failed to load {task_type} context: {exc.__class__.__name__}: {exc}")
         return None
-    reporter.ok(f"tracking context loads: {ctx_path}")
-    reporter.info(f"tracking context shape: {arr.shape}")
-    return int(arr.shape[-1])
+    reporter.ok(f"{task_type} context loads: {ctx_path}")
+    return int(dimension)
 
 
 def _check_joint_config(robot_config: dict[str, Any], policy_config: dict[str, Any], reporter: Reporter) -> None:
@@ -319,8 +214,8 @@ def _check_onnx(model_path: Path, obs_dim: int, ctx_dim: int, policy_config: dic
 def main() -> int:
     parser = argparse.ArgumentParser(description="No-actuation UFO policy/task/model preflight")
     parser.add_argument("--robot-config", default="config/robot/g1_real.yaml")
-    parser.add_argument("--policy-config", default="config/policy/g1_policy.yaml")
-    parser.add_argument("--task", default="config/exp/tracking/tracking.yaml")
+    parser.add_argument("--policy-config", help="Defaults to the model's .deploy.yaml")
+    parser.add_argument("--task", default="config/tasks/tracking.yaml")
     parser.add_argument("--model-path", default="model/g1_policy/exported/FBcprAuxModel.onnx")
     args = parser.parse_args()
 
@@ -328,14 +223,15 @@ def main() -> int:
     reporter.info("NO-ACTUATION: does not instantiate UFODeployPolicy, G1Interface, StateProcessor, or CommandSender")
 
     robot_config_path = ROOT / args.robot_config
-    policy_config_path = ROOT / args.policy_config
     task_path = ROOT / args.task
     model_path = ROOT / args.model_path
+    policy_config_path = ROOT / args.policy_config if args.policy_config else model_path.with_suffix(".deploy.yaml")
 
     try:
-        robot_config = _read_yaml(robot_config_path)
+        robot_config = load_robot_config(robot_config_path)
         policy_config = _read_yaml(policy_config_path)
         exp_config = _read_yaml(task_path)
+        validate_task_config(exp_config, robot_config["ROBOT_TYPE"])
     except Exception as exc:
         reporter.fail(f"failed to load config: {exc.__class__.__name__}: {exc}")
         reporter.info(f"summary: {reporter.failures} failure(s), {reporter.warnings} warning(s)")
@@ -350,6 +246,12 @@ def main() -> int:
         reporter.info(f"summary: {reporter.failures} failure(s), {reporter.warnings} warning(s)")
         return 1
     reporter.ok(f"policy model exists: {model_path}")
+
+    try:
+        validate_policy_config(model_path, policy_config)
+        reporter.ok("policy config matches exported training contract")
+    except (ValueError, KeyError, TypeError) as exc:
+        reporter.fail(str(exc))
 
     _check_joint_config(robot_config, policy_config, reporter)
     obs_dim = _compute_obs_dim(policy_config, reporter)

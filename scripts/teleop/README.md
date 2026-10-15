@@ -1,186 +1,31 @@
-# Teleop Bridge Setup Guide
+# PICO teleop
 
-This guide covers the PICO/XRoboToolkit canonical teleoperation bridge used by UFO-Deploy.
-It is written for two deployment modes:
+Teleop has two supported placements. All UFO processes run on the same host:
 
-- workstation teleop, where the PICO streams to an Ubuntu PC
-- G1 onboard teleop, where the PICO streams directly to the Unitree G1 onboard Jetson
+| Mode | PICO target | Retarget, z encoder and policy |
+|---|---|---|
+| sim2sim | Workstation IP | Workstation; MuJoCo also runs here |
+| sim2real | G1 onboard IP | G1 onboard computer |
 
-The PC-side teleop chain is already validated in UFO-Deploy. The onboard flow uses the
-same pose bridge, realtime `z` server, backward encoder, and UFO policy interfaces; only
-the teleop host moves from the workstation to the robot.
+The pose bridge reads XRoboToolkit, retargets to G1 using the vendored
+`motion_tracking_retarget`, and serves poses over local ZMQ. The encoder turns
+poses into z; `deploy.py --task teleop` feeds live z to the shared actor.
 
-## What This Folder Owns
+## Environment
 
-The scripts in this folder only do the PICO-to-G1-pose part of the stack:
-
-1. read live body, headset, and controller data from XRoboToolkit,
-2. retarget the human motion to Unitree G1 with UFO's vendored `motion_tracking_retarget`,
-3. publish retargeted G1 pose frames over ZMQ for `scripts/realtime/realtime_z_server.py`.
-
-They do not start the realtime latent `z` encoder and they do not start the UFO policy.
-The runtime split is:
-
-```text
-scripts/teleop/teleop_pose_50hz_onboard.sh:
-  PICO -> XRoboToolkit -> xrobotoolkit_sdk -> motion_tracking_retarget -> ZMQ pose server
-
-scripts/realtime/realtime_z_server.py:
-  ZMQ pose -> backward_encoder.onnx -> latent z
-
-run_g1_teleop_policy_onboard.sh:
-  latent z -> UFO policy inference -> G1 command
-```
-
-Included files:
-
-- `xrobot_teleop_to_pose_zmq_server.py`
-- `default_mimic_obs.py`
-- `teleop_pose_50hz.sh`
-- `teleop_pose_50hz_onboard.sh`
-- `check_teleop_env.py`
-
-## Runtime Modes
-
-### Workstation Teleop
-
-Use this mode for local teleop sim2sim and split workstation/robot debugging. The PICO
-connects to the PC, so the teleop host is the workstation.
-
-```text
-PICO
- |
- XRoboToolkit
- |
- PC
- |
- motion_tracking_retarget
- |
- xrobot_teleop_to_pose_zmq_server.py
- |
- realtime_z_server.py
- |
- UFO policy
-```
-
-Run the bridge with:
+Use Python 3.10 Conda on the workstation; use a Python 3.10 venv on G1.
+The onboard default is `/home/unitree/ufo_deploy_venv/bin/python`.
 
 ```bash
-cd "$UFO_ROOT"
-conda activate ufo-teleop
-scripts/teleop/teleop_pose_50hz.sh
-```
-
-### G1 Onboard Teleop
-
-Use this mode for direct PICO-to-robot teleop. The PICO connects to the G1 Jetson IP, so
-the teleop host moves from the PC to the G1 onboard computer.
-
-```text
-PICO XRoboToolkit client
- |
- WiFi / LAN target IP = <G1_JETSON_IP>
- |
- G1 Jetson / onboard computer
- |
- XRoboToolkit headless service
- |
- xrobotoolkit_sdk
- |
- motion_tracking_retarget
- |
- xrobot_teleop_to_pose_zmq_server.py
- |
- realtime_z_server.py
- |
- UFO policy
-```
-
-Run the pose bridge on the robot with:
-
-```bash
-cd /home/unitree/UFO-Deploy
-scripts/teleop/teleop_pose_50hz_onboard.sh
-```
-
-## Required Components
-
-Install these components on the machine that receives the PICO stream. For workstation
-teleop this is the Ubuntu PC. For onboard teleop this is the G1 Jetson.
-
-- XRoboToolkit PICO app, installed on the headset
-- XRoboToolkit PC Service on x86 Ubuntu, or XRoboToolkit headless service on G1 Jetson
-- `xrobotoolkit_sdk` Python binding
-- vendored `motion_tracking_retarget` code and G1 assets included in UFO-Deploy
-- `mink`, `mujoco`, `numpy`, `scipy`, `pyyaml`
-- `pyzmq`
-
-Important: `xrobotoolkit_sdk` is only the Python binding. It depends on the XRoboToolkit
-system service already running on the host. Installing the Python package alone does not
-start or replace the XRoboToolkit service.
-
-The upstream teleop dependencies are pinned in
-[requirements-lock.md](requirements-lock.md). Use those commits for release deployments so
-canonical retarget assets, XRoboToolkit SDK ABI, and `xrobotoolkit_sdk` APIs do not
-silently drift with upstream `main` or `master`. Users only need to clone UFO-Deploy; no
-runtime clone of `motion_tracking` is required.
-
-## Python Environment
-
-Create a Python 3.10 environment on the teleop host.
-
-On a workstation, the release-supported default is Conda:
-
-```bash
-conda create -n ufo-teleop python=3.10 -y
-conda activate ufo-teleop
-cd "$UFO_ROOT"
-python -m pip install -r requirements/teleop.txt
-```
-
-Use this `ufo-teleop` Conda environment for the workstation
-`scripts/teleop/teleop_pose_50hz.sh` bridge. Keep the main workstation
-`ufo-deploy` Conda environment for MuJoCo, realtime `z`, and policy inference.
-
-On the G1 onboard Jetson, the validated default is a Python 3.10 venv because
-native Unitree, XRoboToolkit, and CycloneDDS libraries depend on system ABI
-compatibility. Direct onboard PICO teleop can use the same deployment venv as
-policy and realtime `z`:
-
-```bash
-python3.10 -m venv /home/unitree/ufo_deploy_venv
-source /home/unitree/ufo_deploy_venv/bin/activate
-python -m pip install --upgrade pip
-cd /home/unitree/UFO-Deploy
-python -m pip install -r requirements/teleop.txt
-```
-
-`requirements/teleop.txt` inherits `requirements/runtime.txt` so a direct
-onboard teleop venv also has the realtime `z`, ONNX inference, policy, and G1
-runtime dependencies.
-
-If the XRoboToolkit binding ships a native `.so`, make sure its directory is in
-`LD_LIBRARY_PATH` before importing `xrobotoolkit_sdk`.
-
-Use a workspace for external XRoboToolkit service/source checkouts:
-
-```bash
+pip install -r requirements/teleop.txt
 export TELEOP_WORKSPACE=${TELEOP_WORKSPACE:-$HOME/teleop_ws}
 mkdir -p "$TELEOP_WORKSPACE"
 ```
 
-## Canonical Retarget Assets
-
-UFO-Deploy vendors the minimal motion_tracking retarget path under:
-
-```text
-scripts/teleop/motion_tracking_retarget/
-```
-
-This includes the canonical XRobot parser, G1 Mink IK retargeter, `xrobot_to_g1.json`,
-G1 XML, and required mesh assets. The canonical boundary is `PICO/XRobot raw body data ->
-G1 qpos`; UFO's realtime `z`, backward encoder, policy, and robot command path remain UFO
-code.
+This requirements set includes policy/runtime dependencies. Install the native
+XRoboToolkit service and `xrobotoolkit_sdk` separately below. The service must
+be running; importing the SDK alone does not start it. Pinned upstream commits
+and assets are recorded in [requirements-lock.md](requirements-lock.md).
 
 ## Install XRoboToolkit Service
 
@@ -359,332 +204,89 @@ python -m pip install .
 Remember that this step installs the Python binding only. The XRoboToolkit service must be
 installed and running separately.
 
-## Verify The Environment
+## Startup
 
-Run the automated preflight checker from the UFO-Deploy checkout:
-
-```bash
-cd "$UFO_ROOT"
-python scripts/teleop/check_teleop_env.py
-```
-
-Expected healthy preflight output includes lines like:
-
-```text
-[OK] mink installed
-[OK] mujoco installed
-[OK] numpy installed
-[OK] scipy installed
-[OK] pyyaml installed
-[OK] xrobotoolkit_sdk installed
-[OK] pyzmq installed
-[OK] motion_tracking_retarget package available
-[OK] canonical G1 XML loads with MuJoCo
-[OK] xrobot_to_g1.json required fields present
-[OK] canonical -> UFO joint permutation valid
-[OK] XRoboToolkit service running
-[OK] port 28701 available
-[OK] port 28702 available
-[OK] port 28703 available
-```
-
-Before starting the teleop bridge, ports `28701`, `28702`, and `28703` should normally be
-available. If a previous teleop process is still running, the checker will report the
-occupied port so you can stop the stale process.
-
-The canonical retarget check is more than an import check. It verifies the vendored
-24-joint XRobot names, G1 XML, `xrobot_to_g1.json`, toe bodies, canonical 29-joint order,
-UFO output joint order, qpos size, and joint-name permutation before
-`xrobot_teleop_to_pose_zmq_server.py` starts its retarget worker.
-
-To check the realtime `z` server port separately, use the realtime profile:
+Commands below run from the repository root. Set the actor export used by all
+three stages; the pose bridge reads its `.deploy.yaml` for joint order:
 
 ```bash
-python scripts/teleop/check_teleop_env.py --port-profile realtime
+export MODEL_PATH=/path/to/exported/FBcprAuxModel.onnx
+export BACKWARD_ONNX=/path/to/exported/backward_encoder.onnx
 ```
 
-This checks port `28711`, which belongs to `scripts/realtime/realtime_z_server.py`, not to
-the teleop bridge.
+The default model directory is `model/g1_policy`. Set these variables in each
+terminal when using another export. The actor and backward encoder must come
+from the same checkpoint.
 
-After the teleop bridge and realtime `z` server are already running, use:
-
-```bash
-python scripts/teleop/check_teleop_env.py --mode running --port-profile all
-```
-
-That mode expects the teleop and realtime ZMQ ports to be occupied by the running services.
-
-## Verify Python Imports
-
-The minimum import check is:
+For **sim2sim**, start MuJoCo and then the following three processes in separate
+workstation terminals with the appropriate Python environment activated:
 
 ```bash
-python - <<'PY'
-import mink
-import mujoco
-import numpy
-import scipy
-import yaml
-import xrobotoolkit_sdk
-import zmq
-import motion_tracking_retarget
-print("canonical teleop deps: OK")
-print("xrobotoolkit_sdk: OK")
-PY
-```
-
-If this fails, fix the Python environment before starting the PICO stream.
-
-## Verify XR Data
-
-Start the XRoboToolkit service, connect the PICO app to the host IP, calibrate trackers,
-and start body/controller streaming. Then run:
-
-```bash
-python scripts/teleop/check_teleop_env.py --xr-data
-```
-
-The checker attempts to verify:
-
-- body data
-- headset pose
-- left controller pose
-- right controller pose
-
-You can also run the direct SDK check:
-
-```bash
-python - <<'PY'
-import xrobotoolkit_sdk as xrt
-
-xrt.init()
-print("Body data available:", xrt.is_body_data_available())
-print("Headset pose:", xrt.get_headset_pose())
-print("Left controller pose:", xrt.get_left_controller_pose())
-print("Right controller pose:", xrt.get_right_controller_pose())
-if hasattr(xrt, "close"):
-    xrt.close()
-PY
-```
-
-If body data is not available, check that:
-
-- the PICO is connected to the correct host IP,
-- trackers/controllers are paired and calibrated,
-- full-body streaming is enabled in the PICO XRoboToolkit app,
-- firewalls, VPN/TUN interfaces, or proxy settings are not blocking the local connection.
-
-## ZMQ Ports
-
-UFO-Deploy uses these local ZMQ ports:
-
-| Port | Owner | Purpose |
-| --- | --- | --- |
-| 28701 | teleop bridge | pose request socket from `realtime_z_server.py` |
-| 28702 | teleop bridge | pose reply socket to `realtime_z_server.py` |
-| 28703 | teleop bridge | PICO button/control channel to `realtime_z_server.py` |
-| 28704 | teleop bridge | legacy/debug optional PICO button PUB channel to onboard policy |
-| 28711 | realtime `z` server | latent `z` PUB channel to policy |
-
-The preflight checker uses the `teleop` port profile by default, so it checks only
-`28701`, `28702`, and `28703`. Use `--port-profile realtime` to check `28711`, or
-`--port-profile all` to check both groups. Port `28704` is off by default. It is checked
-only when `CTRL_PUB_BIND_ADDR` is explicitly set. The onboard launchers require
-`ENABLE_PICO_POLICY_CONTROL=1` alongside that address before enabling legacy/debug PICO
-policy-control compatibility.
-
-## Run The Teleop Bridge
-
-### Workstation
-
-```bash
-cd "$UFO_ROOT"
-conda activate ufo-teleop
+# Terminal A
+python -m sim_env.simulator
+# Terminal B — PICO pose bridge
 scripts/teleop/teleop_pose_50hz.sh
+# Terminal C — live z (uses the active Python, or Z_PY)
+scripts/realtime/run_z_encoder.sh
+# Terminal D — policy
+python deploy.py --mode sim2sim --task teleop --model "$MODEL_PATH"
 ```
 
-### G1 Onboard
+For **sim2real**, run all three processes on the G1 after the
+[onboard setup](../onboard/README.md). Start the XRoboToolkit headless service
+and connect PICO to the robot IP first:
 
 ```bash
-cd /home/unitree/UFO-Deploy
-source /home/unitree/ufo_teleop_venv/bin/activate
-scripts/teleop/teleop_pose_50hz_onboard.sh
+# Terminal A — onboard pose bridge
+TELEOP_PY=/home/unitree/ufo_deploy_venv/bin/python scripts/teleop/teleop_pose_50hz_onboard.sh
+# Terminal B — live z
+Z_PY=/home/unitree/ufo_deploy_venv/bin/python scripts/realtime/run_z_encoder.sh
+# Terminal C — policy, with the deployment venv activated
+UFO_REAL_ROBOT_OK=1 G1_INTERFACE=eth0 scripts/onboard/run_policy.sh --task teleop
 ```
 
-Useful onboard environment variables:
+Use the actual robot DDS interface in place of `eth0`. The pose bridge uses
+localhost ports 28701–28703; live z uses localhost 28711. The real policy
+rejects a task config pointing to a remote z publisher.
+
+The G1 remote owns standing, activation and stopping. PICO right-hand A
+(`right_key_one`) follows/resumes the live reference; left-hand X
+(`left_key_one`) freezes it. The z encoder starts frozen and blends over 500 ms
+when resuming. PICO does not enable the robot policy in the default flow.
+The optional legacy PICO policy-control channel stays disabled by default.
+
+## Calibration and timing
+
+Keep whole-body trackers calibrated and stand neutrally for the first few
+frames. Startup foot-height alignment uses 10 frames; crouching or moving at
+startup changes the estimated height offset. The default operator height is
+1.75 m; set `ACTUAL_HUMAN_HEIGHT` to the operator's height when needed.
+
+Retarget settings live in `config/teleop/g1.yaml`: 50 Hz control, 50 ms pose
+lookback, 0.5 s pose buffer, and optional visualization. `ACTUAL_HUMAN_HEIGHT`,
+`LOOKBACK_MS`, `CTRL_FPS`, `RETARGET_BUFFER_WINDOW_S`, `LOG_INTERVAL_S` and
+`VIS_FPS` override their YAML values only when explicitly set. The encoder's
+additional lookback defaults to zero; its validity timeout defaults to 200 ms.
+
+`TELEOP_POLICY_CONFIG` overrides the pose bridge's joint-order config; otherwise
+it uses `POLICY_CONFIG`, then the actor's `.deploy.yaml`. Preserve the matching
+export's joint order, observation scales and metadata. `DEVICE=cpu` is the z
+encoder default. CUDA requires a compatible ONNX Runtime GPU installation.
+
+`WEB_VISUALIZE=1` enables the onboard retarget viewer on port 8080. The viewer's
+floor is for display and does not affect FK, retargeting or policy control.
+`START_XROBOT_SERVICE=1` is an optional service-start helper after the installed
+service has been verified; by default the service must already be running.
+
+## Diagnostics
 
 ```bash
-export UFO_ROOT=/home/unitree/UFO-Deploy
-export TELEOP_PY=/home/unitree/ufo_teleop_venv/bin/python
-export WEB_VISUALIZE=0
-export WEB_PORT=8080
+python scripts/teleop/check_teleop_env.py
+python scripts/onboard/check_xrobot_sdk.py --duration 3 --require-body
+python scripts/onboard/check_teleop_qpos.py --duration 3 --min-valid 1
+python scripts/onboard/check_z_stream.py --addr tcp://127.0.0.1:28711 --duration 3
 ```
 
-The onboard launcher automatically derives `UFO_ROOT` from its own path if `UFO_ROOT` is
-not set. It checks the Python executable, `mink`, `mujoco`, `numpy`, `scipy`, `pyyaml`,
-`pyzmq`, `xrobotoolkit_sdk`, the vendored canonical retarget assets, XRoboToolkit service,
-and required local ZMQ ports before starting `xrobot_teleop_to_pose_zmq_server.py`.
-Current deploy does not require the external `general_motion_retargeting`/GMR
-package. The legacy GMR architecture is no longer used by PICO teleop Sim2Real.
-Old GMR workspaces are not part of this deploy path.
-
-PICO teleop Sim2Real uses XRoboToolkit body joints, the vendored
-`scripts/teleop/motion_tracking_retarget/` package, and Mink IK. Torch is not a
-teleop retarget dependency. `qpsolvers` and `daqp` are Mink dependencies, not
-legacy GMR dependencies.
-The web viewer is off by default; enable it only for debugging:
-
-```bash
-WEB_VISUALIZE=1 scripts/teleop/teleop_pose_50hz_onboard.sh
-```
-
-It does not auto-start the XRoboToolkit service by default. Start the service manually
-first so version, library, and runtime failures are visible before real-robot bring-up.
-If you have already verified the installed service and want the launcher to start it for a
-debug session, run:
-
-```bash
-START_XROBOT_SERVICE=1 scripts/teleop/teleop_pose_50hz_onboard.sh
-```
-
-The teleop bridge defaults come from `config/teleop/g1.yaml`. The shell launchers only
-override values such as `ACTUAL_HUMAN_HEIGHT`, `LOOKBACK_MS`, `CTRL_FPS`,
-`RETARGET_BUFFER_WINDOW_S`, `LOG_INTERVAL_S`, and `VIS_FPS` when the corresponding
-environment variable is explicitly set. `TELEOP_POLICY_CONFIG` defaults to
-`POLICY_CONFIG` and then to `config/policy/g1_policy.yaml`; it is passed to the teleop
-server so the qpos joint permutation is checked against the same `policy_joint_names`
-used by policy inference. `server.visualize` in `config/teleop/g1.yaml` is the web viewer
-default, and `WEB_VISUALIZE=1` still enables it from the launcher.
-
-The release-supported onboard default is:
-
-```text
-/home/unitree/ufo_deploy_venv/bin/python
-```
-
-For compatibility/debugging, the launcher probes UFO-specific environments in
-this order when `TELEOP_PY` is not set:
-
-```text
-${UFO_ROOT}/.venv/bin/python
-${UFO_ROOT}/venv/bin/python
-/home/unitree/ufo_teleop_venv/bin/python
-/home/unitree/ufo_deploy_venv/bin/python
-/home/unitree/miniconda3/envs/ufo-teleop/bin/python
-/home/unitree/miniconda3/envs/ufo-deploy/bin/python
-```
-
-The launcher probes these candidates in order with
-`check_teleop_env.py --skip-service --skip-ports`. It selects the first Python that can
-import the canonical retarget dependencies, `xrobotoolkit_sdk`, and `zmq`, has a compatible
-`xrobotoolkit_sdk` API, and can load the vendored G1 XML/assets. A Python
-executable that exists but cannot run the teleop bridge is skipped so a later valid teleop
-environment can be used.
-
-If none of those candidates passes, set `TELEOP_PY` explicitly. The launcher refuses to
-fall back to system `python3` by default because the Jetson system Python usually does not
-contain `mink`, `mujoco`, `xrobotoolkit_sdk`, and `numpy`. Set `TELEOP_ALLOW_SYSTEM_PY=1`
-only for manual debugging; even with this flag, system Python must pass the same import
-probe.
-
-During the first few seconds after starting the bridge, stand in a stable neutral posture.
-The bridge uses startup foot height to align the z-axis offset; starting from a crouched or
-moving pose can affect gait quality.
-
-## Complete Onboard Startup Order
-
-Run these steps on the G1 Jetson:
-
-1. Start XRoboToolkit headless service.
-
-   ```bash
-   bash /opt/apps/roboticsservice/runService.sh
-   ```
-
-   This receives the PICO stream on the robot.
-   The teleop launcher expects this service to already be running. Automatic service start
-   is opt-in with `START_XROBOT_SERVICE=1` and should be used only after the installed
-   headless service has been verified.
-
-   In the PICO XRoboToolkit app, set the target IP to the G1 onboard computer IP reported
-   by `ip -br addr`. In onboard mode the PICO connects to the robot, not to the PC.
-
-2. Start the teleop pose bridge.
-
-   ```bash
-   cd /home/unitree/UFO-Deploy
-   scripts/teleop/teleop_pose_50hz_onboard.sh
-   ```
-
-   This converts PICO body/controller data into retargeted G1 poses on ZMQ ports
-   `28701`, `28702`, and `28703`. The legacy/debug `28704` PICO policy-control PUB channel
-   is disabled by default.
-
-3. Start the realtime latent `z` server.
-
-   ```bash
-   cd /home/unitree/UFO-Deploy
-   Z_PY=/home/unitree/ufo_deploy_venv/bin/python \
-     scripts/realtime/run_realtime_z_server_onboard.sh
-   ```
-
-   This requests poses from the teleop bridge, runs `backward_encoder.onnx`, and publishes
-   latent `z` on port `28711`. The wrapper verifies that the selected deployment Python
-   can import `numpy`, `mujoco`, `onnxruntime`, and `zmq` before starting. The onboard
-   default is `INITIAL_MODE=freeze`, so no live PICO reference is followed until PICO
-   right-hand A switches realtime `z` to follow mode.
-
-4. Start the G1 teleop policy.
-
-   ```bash
-   cd /home/unitree/UFO-Deploy
-   source /home/unitree/ufo_deploy_venv/bin/activate
-   G1_INTERFACE=<low-level-dds-interface> \
-   UFO_REAL_ROBOT_OK=1 VENV_PATH=/home/unitree/ufo_deploy_venv/bin/activate \
-     ./run_g1_teleop_policy_onboard.sh
-   ```
-
-   This subscribes to realtime `z` and runs UFO policy inference.
-   The G1 DDS interface must be explicit. The launcher validates the interface
-   and can generate a temporary robot-config overlay instead of committing a
-   machine-specific `INTERFACE` value.
-
-5. Use the G1 wireless remote to manage robot and policy state.
-
-   ```text
-   G1 A    interpolate to default standing pose
-   G1 R1   enable policy action
-   G1 B    start tracking
-   G1 X    reset tracking/reference
-   G1 R2   global stop latch
-   ```
-
-6. Use PICO only for the live motion reference stream.
-
-   ```text
-   PICO right_key_one / right-hand A   follow or resume live reference
-   PICO left_key_one / left-hand X     freeze current reference/z
-   ```
-
-   On freeze -> follow resume, realtime `z` resets its previous-pose velocity history.
-   The first live frame initializes history while holding the frozen `z`, then the server
-   blends from the old `z` to the new live `z` over `RESUME_RAMP_MS` milliseconds.
-
-   PICO buttons do not enable policy, clear R2, enter default pose, reset the real policy
-   state machine, or bypass the physical e-stop in the default flow.
-
-The G1 wireless remote controls robot and policy state. PICO controls only the
-live reference follow/freeze state for realtime `z`.
-
-Legacy/debug PICO policy-control compatibility is available only when both launchers are
-explicitly opted in:
-
-```bash
-ENABLE_PICO_POLICY_CONTROL=1 CTRL_PUB_BIND_ADDR=tcp://*:28704 \
-  scripts/teleop/teleop_pose_50hz_onboard.sh
-ENABLE_PICO_POLICY_CONTROL=1 CTRL_PUB_BIND_ADDR=tcp://*:28704 \
-  ./run_g1_teleop_policy_onboard.sh
-```
-
-Keep the robot on support for first bring-up and test the physical e-stop, wireless R2
-stop latch, stale-teleop watchdog, and PICO disconnect behavior before free walking.
+Missing or stale poses stop valid z publication; stale z stops policy action.
+These checks do not send joint commands. Test the real stop behavior with
+support before free-standing operation.

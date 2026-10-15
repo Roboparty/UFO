@@ -2,6 +2,8 @@ from pathlib import Path
 import sys
 
 import numpy as np
+from types import SimpleNamespace
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -13,6 +15,12 @@ from scripts.realtime.realtime_z_server import (  # noqa: E402
     _extract_latest_frame,
     _is_pose_stale,
     parse_args,
+    _quat_mul_xyzw,
+    _quat_to_ang_vel_xyzw,
+    _quat_rotate_xyzw,
+    _compute_humanoid_observations_max_np,
+    _quat_rotate_inverse_xyzw,
+    PoseFrame,
 )
 
 
@@ -26,6 +34,64 @@ def _valid_payload():
             }
         ]
     }
+
+
+def test_angular_velocity_world_privileged_and_local_state_agree():
+    previous = np.array([[0., 0., np.sin(np.pi/4), np.cos(np.pi/4)]])
+    current = _quat_mul_xyzw(previous, np.array([[np.sin(.01), 0., 0., np.cos(.01)]]))
+    world = _quat_to_ang_vel_xyzw(previous, current, .02, delta_frame='world')
+    local = _quat_to_ang_vel_xyzw(previous, current, .02, delta_frame='local')
+    np.testing.assert_allclose(_quat_rotate_xyzw(previous, local), world, atol=1e-6)
+    obs = _compute_humanoid_observations_max_np(np.zeros((1,1,3)), current[:,None,:], np.zeros((1,1,3)), world[:,None,:], True, False)
+    np.testing.assert_allclose(obs['local_body_ang_vel'], [[1,0,0]], atol=1e-6)
+    np.testing.assert_allclose(_quat_rotate_inverse_xyzw(current, world), [[1,0,0]], atol=1e-6)
+
+
+@pytest.mark.parametrize('frame', ['local', 'world'])
+def test_online_step_sends_training_coordinates_and_scales_to_encoder(frame):
+    inferer = OnlineZInferer.__new__(OnlineZInferer)
+    inferer.dt = .02
+    inferer.drop_first_n = 0
+    inferer.use_wall_clock_dt = False
+    inferer.freeze_z_on_static_pose = False
+    inferer.fix_quat_continuity = True
+    inferer.angvel_delta_frame = frame
+    inferer.root_height_obs = False
+    inferer.default_pose_29 = np.zeros(29)
+    inferer.obs_scales = {'dof_pos': 2., 'dof_vel': 3., 'projected_gravity': 1., 'base_ang_vel': .25, 'max_local_self': 2.}
+    inferer.quat_flip_total = inferer.quat_flip_step_total = 0
+    inferer.max_z_delta = 0
+    inferer.debug_z = False
+    inferer.last_z = np.ones(256, dtype=np.float32)
+    inferer.reset_history()
+    previous = np.array([[0., 0., np.sin(np.pi/4), np.cos(np.pi/4)]])
+    current = _quat_mul_xyzw(previous, np.array([[np.sin(.01), 0., 0., np.cos(.01)]]))
+    rotations = iter([previous, current])
+    inferer._fk_all_bodies = lambda *args: (np.zeros((1,3)), next(rotations))
+    feeds = []
+    inferer.session = SimpleNamespace(run=lambda outputs, feed: feeds.append(feed) or [np.ones((1,256), np.float32)])
+    inferer.session_input_names = {'state', 'privileged_state', 'last_action'}
+    inferer.session_output_name = 'z'
+    pose = PoseFrame(np.zeros(3), np.array([1.,0.,0.,0.]), np.ones(29))
+    inferer.step(pose)
+    inferer.step(pose)
+    assert len(feeds) == 1
+    np.testing.assert_allclose(feeds[0]['state'][0, -3:], [.25,0,0], atol=1e-6)
+    np.testing.assert_allclose(feeds[0]['privileged_state'][0, -3:], [2,0,0], atol=1e-6)
+    np.testing.assert_allclose(feeds[0]['state'][0, :29], 2)
+    np.testing.assert_array_equal(feeds[0]['last_action'], np.zeros((1,29)))
+
+    from scripts.realtime import realtime_z_server as runtime
+    from tools.check_realtime_z_obs_alignment import RealtimeObsBuilder, _run_encoder
+    inferer.base_body_names, inferer.extend_cfg = ['root'], []
+    rotations = iter([previous, current])
+    replay = RealtimeObsBuilder(runtime, inferer, .02).build_sequence(
+        np.zeros((2, 3)), np.tile([0., 0., 0., 1.], (2, 1)), np.ones((2, 29)),
+    )
+    for name in ['state', 'privileged_state', 'last_action']:
+        np.testing.assert_allclose(replay[name][1:2], feeds[0][name], atol=1e-6)
+    _run_encoder(inferer.session, inferer.session_input_names, 'z', replay['state'], replay['privileged_state'])
+    np.testing.assert_array_equal(feeds[-1]['last_action'], np.zeros((2, 29)))
 
 
 def test_pose_stale_check_blocks_publish_path():

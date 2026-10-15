@@ -4,7 +4,4 @@
 
 # Training/export dependencies.
 torch
-pynput
-ipdb
-pygame
 pytest

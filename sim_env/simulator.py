@@ -7,10 +7,11 @@ import os
 
 import sys
 sys.path.append(".")
+from utils.policy import load_robot_config
 from sim_env.utils.simulation_bridge import SimulationBridge
 from sim_env.utils.elastic_band import ElasticBand
 
-class BaseSimulator:
+class Simulator:
     def __init__(self, robot_config, scene_config):
         self.robot_config = robot_config
         self.scene_config = scene_config
@@ -21,10 +22,6 @@ class BaseSimulator:
         self.sim_bridge = SimulationBridge(
             self.mj_model, self.mj_data, self.robot_config, self.scene_config
         )
-
-        # for more scenes
-        self.init_subscriber()
-        self.init_publisher()
 
         self.sim_thread = Thread(target=self.SimulationThread)
 
@@ -47,12 +44,7 @@ class BaseSimulator:
         except:
             pass
 
-    def init_subscriber(self):
-        pass
 
-    def init_publisher(self):
-        pass
-    
     def init_scene(self):
         robot_scene = self.scene_config["ROBOT_SCENE"]
         self.mj_model = mujoco.MjModel.from_xml_path(robot_scene)
@@ -86,6 +78,7 @@ class BaseSimulator:
     def sim_step(self):
         self.sim_bridge.publish_low_state()
         if self.scene_config["ENABLE_ELASTIC_BAND"]:
+            self.mj_data.xfrc_applied[self.band_attached_link, :3] = 0.0
             if self.elastic_band.enable:
                 pos = self.mj_data.xpos[self.band_attached_link]
                 lin_vel = self.mj_data.cvel[self.band_attached_link, 3:6]
@@ -140,10 +133,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    with open(args.robot_config) as file:
-        robot_config = yaml.load(file, Loader=yaml.FullLoader)
+    robot_config = load_robot_config(args.robot_config)
     with open(args.scene_config) as file:
         scene_config = yaml.load(file, Loader=yaml.FullLoader)
 
-    simulation = BaseSimulator(robot_config, scene_config)
+    simulation = Simulator(robot_config, scene_config)
     simulation.sim_thread.start()

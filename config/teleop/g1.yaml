@@ -17,9 +17,9 @@ retarget:
     button: null
 
 server:
-  req_bind_addr: tcp://*:28701
-  rep_bind_addr: tcp://*:28702
-  ctrl_bind_addr: tcp://*:28703
+  req_bind_addr: tcp://127.0.0.1:28701
+  rep_bind_addr: tcp://127.0.0.1:28702
+  ctrl_bind_addr: tcp://127.0.0.1:28703
   ctrl_fps: 50
   vis_fps: 5
   lookback_ms: 50.0

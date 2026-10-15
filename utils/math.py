@@ -1,8 +1,5 @@
 import numpy as np
-from scipy.spatial.transform import Rotation as R
 
-def yaw_from_quat(quat):
-    return R.from_quat(quat, scalar_first=True).as_euler('xyz', degrees=False)[:, 2:3]
 
 def normalize(x: np.ndarray) -> np.ndarray:
     return x / np.linalg.norm(x, axis=-1, keepdims=True)
@@ -52,68 +49,6 @@ def quat_rotate_inverse_numpy(q: np.ndarray, v: np.ndarray) -> np.ndarray:
 
     return (a - b + c).reshape(shape)
 
-def quat_rotate_numpy(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-    shape = v.shape
-    assert q.shape[:-1] == v.shape[:-1], "q and v must have the same batch size"
-    q = q.reshape(-1, 4)
-    v = v.reshape(-1, 3)
-    # q_w corresponds to the scalar part of the quaternion
-    q_w = q[:, 0]
-    # q_vec corresponds to the vector part of the quaternion
-    q_vec = q[:, 1:]
-
-    # Calculate a
-    a = v * (2.0 * q_w**2 - 1.0)[:, np.newaxis]
-
-    # Calculate b
-    b = np.cross(q_vec, v) * q_w[:, np.newaxis] * 2.0
-
-    # Calculate c
-    dot_product = np.sum(q_vec * v, axis=1, keepdims=True)
-    c = q_vec * dot_product * 2.0
-
-    return (a + b + c).reshape(shape)
-
-def wrap_to_pi(angle):
-    return np.mod(angle + np.pi, 2 * np.pi) - np.pi
-
-def matrix_from_quat(quaternions: np.ndarray) -> np.ndarray:
-    """Convert rotations given as quaternions to rotation matrices.
-
-    Args:
-        quaternions: The quaternion orientation in (w, x, y, z). Shape is (..., 4).
-
-    Returns:
-        Rotation matrices. The shape is (..., 3, 3).
-
-    Reference:
-        https://github.com/facebookresearch/pytorch3d/blob/main/pytorch3d/transforms/rotation_conversions.py#L41-L70
-    """
-    # Reshape quaternions to (-1, 4) to handle arbitrary batch dimensions
-    original_shape = quaternions.shape[:-1]
-    quaternions = quaternions.reshape(-1, 4)
-    
-    # Unpack quaternion components
-    r, i, j, k = quaternions[:, 0], quaternions[:, 1], quaternions[:, 2], quaternions[:, 3]
-    
-    # Calculate two_s
-    two_s = 2.0 / np.sum(quaternions * quaternions, axis=-1)
-    
-    # Stack the matrix elements
-    o = np.stack([
-        1 - two_s * (j * j + k * k),
-        two_s * (i * j - k * r),
-        two_s * (i * k + j * r),
-        two_s * (i * j + k * r),
-        1 - two_s * (i * i + k * k),
-        two_s * (j * k - i * r),
-        two_s * (i * k - j * r),
-        two_s * (j * k + i * r),
-        1 - two_s * (i * i + j * j),
-    ], axis=-1)
-    
-    # Reshape to the final dimensions
-    return o.reshape(original_shape + (3, 3))
 
 def quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     """Multiply two quaternions together.

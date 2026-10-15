@@ -1,18 +1,3 @@
-# Compatibility superset.
-# For deployment use requirements/runtime.txt or requirements/teleop.txt.
-# This full requirements.txt contains training/debug dependencies.
-mujoco
-mink
-loguru
-pyyaml
-scipy
-torch
-onnxruntime
-pynput
-ipdb
-termcolor
-sshkeyboard
-pygame
-pyzmq
-joblib
-huggingface-hub
+# Full workstation/debug set. For deployment use requirements/runtime.txt.
+-r requirements/teleop.txt
+-r requirements/training.txt

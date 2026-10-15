@@ -25,27 +25,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-class Reporter:
-    def __init__(self) -> None:
-        self.failures = 0
-        self.warnings = 0
-
-    def ok(self, message: str) -> None:
-        print(f"[OK] {message}")
-
-    def info(self, message: str) -> None:
-        print(f"[INFO] {message}")
-
-    def warn(self, message: str) -> None:
-        self.warnings += 1
-        print(f"[WARN] {message}")
-
-    def fail(self, message: str) -> None:
-        self.failures += 1
-        print(f"[FAIL] {message}")
-
-    def skip(self, message: str) -> None:
-        print(f"[SKIP] {message}")
+from utils.policy import load_yaml as _read_yaml, load_robot_config
+from scripts.onboard.deploy_helpers import Reporter, check_xrobot_api
 
 
 PROFILE_CHOICES = ("ordinary", "teleop", "diagnostic", "all")
@@ -64,16 +45,6 @@ RUNTIME_IMPORTS = (
     ("zmq", "pyzmq"),
 )
 G1_INTERFACE_EXT = "g1_interface.cpython-310-aarch64-linux-gnu.so"
-
-
-def _read_yaml(path: Path) -> dict[str, Any]:
-    import yaml
-
-    with path.open("r", encoding="utf-8") as f:
-        data = yaml.load(f, Loader=yaml.FullLoader)
-    if not isinstance(data, dict):
-        raise TypeError(f"{path} did not load as a mapping")
-    return data
 
 
 def _run_text(args: list[str]) -> str:
@@ -303,6 +274,7 @@ def _check_g1_import(sdk_lib: Path, openssl11_lib: Path, reporter: Reporter) -> 
         "import sys; "
         f"sys.path.insert(0, {str(sdk_lib)!r}); "
         "import g1_interface; "
+        "assert hasattr(g1_interface.LowState(), 'tick'), 'Run scripts/onboard/patch_g1_sdk.py and rebuild g1_interface'; "
         "print(getattr(g1_interface, 'G1_NUM_MOTOR', None)); "
         "print(getattr(g1_interface, '__file__', ''))"
     )
@@ -359,25 +331,7 @@ def _check_xrobotoolkit_sdk(reporter: Reporter) -> None:
     if xrt is None:
         return
 
-    if hasattr(xrt, "init"):
-        reporter.ok("xrobotoolkit_sdk has init()")
-    else:
-        reporter.fail("xrobotoolkit_sdk missing init()")
-
-    callback_api = all(
-        hasattr(xrt, name)
-        for name in ("register_frame_callback", "clear_frame_callback", "has_frame_callback")
-    )
-    polling_api = all(
-        hasattr(xrt, name)
-        for name in ("is_body_data_available", "get_body_joints_pose", "get_body_timestamp_ns")
-    )
-    if callback_api:
-        reporter.ok("xrobotoolkit_sdk callback API available")
-    if polling_api:
-        reporter.ok("xrobotoolkit_sdk polling API available")
-    if not callback_api and not polling_api:
-        reporter.fail("xrobotoolkit_sdk has neither callback nor polling API")
+    check_xrobot_api(xrt, reporter)
 
 
 def _check_motion_tracking_retarget(reporter: Reporter) -> None:
@@ -501,7 +455,7 @@ def main() -> int:
         policy_config: dict[str, Any] = {}
         if ok_files[0]:
             try:
-                robot_config = _read_yaml(robot_config_path)
+                robot_config = load_robot_config(robot_config_path)
                 reporter.ok(f"robot config loads: ROBOT_TYPE={robot_config.get('ROBOT_TYPE')!r}")
             except Exception as exc:
                 reporter.fail(f"robot config load failed: {exc.__class__.__name__}: {exc}")

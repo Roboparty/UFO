@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import pickle
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,24 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 
-class Reporter:
-    def __init__(self) -> None:
-        self.failures = 0
-        self.warnings = 0
-
-    def ok(self, message: str) -> None:
-        print(f"[OK] {message}")
-
-    def info(self, message: str) -> None:
-        print(f"[INFO] {message}")
-
-    def warn(self, message: str) -> None:
-        self.warnings += 1
-        print(f"[WARN] {message}")
-
-    def fail(self, message: str) -> None:
-        self.failures += 1
-        print(f"[FAIL] {message}")
+from scripts.onboard.deploy_helpers import Reporter
+from utils.policy import load_context, validate_context, validate_policy_config
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -103,33 +86,19 @@ def _check_onnx(path: Path, artifact: dict[str, Any], reporter: Reporter) -> Non
             reporter.ok(f"{path} output {name!r} shape matches {expected}")
 
 
-def _load_context(path: Path) -> np.ndarray:
-    try:
-        import joblib
-
-        obj = joblib.load(path)
-    except Exception:
-        with path.open("rb") as f:
-            obj = pickle.load(f)
-    return np.asarray(obj)
-
-
 def _check_context(path: Path, artifact: dict[str, Any], reporter: Reporter) -> int | None:
     try:
-        arr = _load_context(path)
+        dimension = validate_context(load_context(path))
     except Exception as exc:
         reporter.fail(f"context load failed for {path}: {exc.__class__.__name__}: {exc}")
         return None
-    if arr.ndim < 2 or not np.all(np.isfinite(arr[:1])):
-        reporter.fail(f"context has invalid shape/value: {arr.shape}")
-        return None
     expected_last_dim = artifact.get("expected_last_dim")
-    if expected_last_dim is not None and int(arr.shape[-1]) != int(expected_last_dim):
-        reporter.fail(f"context last dim {arr.shape[-1]} != expected {expected_last_dim}")
+    if expected_last_dim is not None and int(dimension) != int(expected_last_dim):
+        reporter.fail(f"context last dim {dimension} != expected {expected_last_dim}")
     else:
         reporter.ok(f"context loads: {path}")
-        reporter.info(f"context shape: {arr.shape}")
-    return int(arr.shape[-1])
+        reporter.info(f"context dimension: {dimension}")
+    return int(dimension)
 
 
 def _check_obs_plus_context(policy_onnx: Path, context_dim: int | None, reporter: Reporter) -> None:
@@ -141,7 +110,12 @@ def _check_obs_plus_context(policy_onnx: Path, context_dim: int | None, reporter
     except Exception as exc:
         reporter.warn(f"could not import policy preflight helpers: {exc.__class__.__name__}: {exc}")
         return
-    policy_config = _read_yaml(ROOT / "config/policy/g1_policy.yaml")
+    try:
+        policy_config = _read_yaml(policy_onnx.with_suffix(".deploy.yaml"))
+        validate_policy_config(policy_onnx, policy_config)
+    except Exception as exc:
+        reporter.fail(f"invalid policy deployment config: {exc.__class__.__name__}: {exc}")
+        return
     obs_dim = _compute_obs_dim(policy_config, reporter)
     if obs_dim is None:
         return

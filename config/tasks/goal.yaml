@@ -1,5 +1,4 @@
 type: goal
-ctx_dir: goal_inference_mjlab
 ctx_path: goal_reaching.pkl
 selected_goals: [
     'walk3_subject3_9044',

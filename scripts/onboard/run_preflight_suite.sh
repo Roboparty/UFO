@@ -133,11 +133,11 @@ fi
 
 if [[ "${run_control_checks}" == "1" ]]; then
   "${ONBOARD_PY}" scripts/onboard/check_deploy_artifacts.py
-  "${ONBOARD_PY}" scripts/onboard/check_policy_preflight.py --task config/exp/tracking/tracking.yaml
+  "${ONBOARD_PY}" scripts/onboard/check_policy_preflight.py --task config/tasks/tracking.yaml
 fi
 
 if [[ "${run_teleop_checks}" == "1" ]]; then
-  "${ONBOARD_PY}" scripts/onboard/check_policy_preflight.py --task config/exp/tracking/teleop.yaml
+  "${ONBOARD_PY}" scripts/onboard/check_policy_preflight.py --task config/tasks/teleop.yaml
 
   xrobot_args=(--duration "${DURATION}")
   if [[ "${REQUIRE_BODY}" == "1" ]]; then
@@ -148,7 +148,7 @@ fi
 
 if [[ "${run_control_checks}" == "1" ]]; then
   log "checking real policy launcher safety gates"
-  if UFO_REAL_ROBOT_OK=0 VENV_PATH=/dev/null ./run_g1_teleop_policy_onboard.sh >/tmp/ufo-launcher-refusal.log 2>&1; then
+  if UFO_REAL_ROBOT_OK=0 VENV_PATH=/dev/null ./scripts/onboard/run_policy.sh >/tmp/ufo-launcher-refusal.log 2>&1; then
     fail "launcher did not refuse without UFO_REAL_ROBOT_OK=1"
   else
     rc=$?
@@ -161,12 +161,18 @@ if [[ "${run_control_checks}" == "1" ]]; then
   fi
 
   if [[ -n "${G1_INTERFACE:-}" ]]; then
+    interface_args=(--interface "${G1_INTERFACE}")
+    if [[ "${ALLOW_DEFAULT_ROUTE_INTERFACE:-0}" == "1" ]]; then
+      interface_args+=(--allow-default-route-interface)
+    fi
+    "${ONBOARD_PY}" scripts/onboard/interface_config.py "${interface_args[@]}" || \
+      fail "DDS interface preflight failed"
     launcher_venv="${VENV_PATH:-${ONBOARD_PY%/bin/python}/bin/activate}"
     [[ -f "${launcher_venv}" ]] || fail "launcher venv activate not found: ${launcher_venv}"
     UFO_REAL_ROBOT_OK=1 \
     VENV_PATH="${launcher_venv}" \
     G1_INTERFACE="${G1_INTERFACE}" \
-    ./run_g1_teleop_policy_onboard.sh --help >/tmp/ufo-launcher-help.log 2>&1 || {
+    ./scripts/onboard/run_policy.sh --help >/tmp/ufo-launcher-help.log 2>&1 || {
       cat /tmp/ufo-launcher-help.log || true
       fail "launcher --help preflight failed"
     }

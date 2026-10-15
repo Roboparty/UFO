@@ -3,8 +3,7 @@ start: 0
 end: 200000
 stop: 0
 
-# Local sim2sim default. For robot teleop, change this to:
-#   tcp://<WORKSTATION_IP>:28711
+# All teleop processes run on this host: workstation for sim, robot for real.
 ctx_source: zmq
 ctx_zmq_addr: tcp://127.0.0.1:28711
 ctx_norm_ref: 16.0

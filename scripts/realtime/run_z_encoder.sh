@@ -2,11 +2,11 @@
 set -euo pipefail
 
 log() {
-  echo "[run_realtime_z_server_onboard] $*"
+  echo "[run_z_encoder] $*"
 }
 
 fail() {
-  echo "[run_realtime_z_server_onboard] ERROR: $*" >&2
+  echo "[run_z_encoder] ERROR: $*" >&2
   exit 1
 }
 
@@ -50,6 +50,7 @@ PY
 
 if [[ -z "${Z_PY}" ]]; then
   for candidate in \
+    "$(command -v python || true)" \
     "/home/unitree/ufo_deploy_venv/bin/python" \
     "${UFO_ROOT}/.venv/bin/python" \
     "${UFO_ROOT}/venv/bin/python" \
@@ -66,7 +67,7 @@ if [[ -z "${Z_PY}" ]]; then
 fi
 
 if [[ -z "${Z_PY}" ]]; then
-  fail "no valid deployment Python found. Create /home/unitree/ufo_deploy_venv, ${UFO_ROOT}/.venv, or set Z_PY=/path/to/python."
+  fail "no valid deployment Python found. Activate the deployment environment or set Z_PY=/path/to/python."
 fi
 if ! command -v "${Z_PY}" >/dev/null 2>&1 && [[ ! -x "${Z_PY}" ]]; then
   fail "python not found or not executable: ${Z_PY}"
@@ -104,7 +105,7 @@ cmd=(
   --teleop_req tcp://127.0.0.1:28701
   --teleop_rep tcp://127.0.0.1:28702
   --teleop_ctrl tcp://127.0.0.1:28703
-  --z_bind tcp://*:28711
+  --z_bind tcp://127.0.0.1:28711
   --hz 50
   --backward_onnx "${BACKWARD_ONNX}"
   --mujoco_xml "${MUJOCO_XML}"

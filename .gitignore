@@ -2,6 +2,10 @@ pyvicon-datatstream-module/
 unitree_sdk2_python/
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+MUJOCO_LOG.TXT
 .cache/
 .debug/
 outputs/

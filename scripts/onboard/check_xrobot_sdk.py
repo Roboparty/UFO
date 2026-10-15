@@ -19,24 +19,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.onboard.deploy_helpers import ldd_missing_libraries  # noqa: E402
 
 
-class Reporter:
-    def __init__(self) -> None:
-        self.failures = 0
-        self.warnings = 0
-
-    def ok(self, message: str) -> None:
-        print(f"[OK] {message}")
-
-    def info(self, message: str) -> None:
-        print(f"[INFO] {message}")
-
-    def warn(self, message: str) -> None:
-        self.warnings += 1
-        print(f"[WARN] {message}")
-
-    def fail(self, message: str) -> None:
-        self.failures += 1
-        print(f"[FAIL] {message}")
+from scripts.onboard.deploy_helpers import Reporter, check_xrobot_api
 
 
 def _run(args: list[str]) -> str:
@@ -113,22 +96,7 @@ def main() -> int:
     else:
         reporter.warn(f"libPXREARobotSDK.so not found at {lib_path}")
 
-    polling_names = [
-        "is_body_data_available",
-        "get_body_joints_pose",
-        "get_body_timestamp_ns",
-        "get_A_button",
-        "get_B_button",
-        "get_X_button",
-        "get_Y_button",
-    ]
-    callback_names = ["register_frame_callback", "clear_frame_callback", "has_frame_callback"]
-    if hasattr(xrt, "init"):
-        reporter.ok("xrobotoolkit_sdk has init()")
-    else:
-        reporter.fail("xrobotoolkit_sdk missing init()")
-    reporter.info(f"polling_api: {all(hasattr(xrt, name) for name in polling_names)}")
-    reporter.info(f"callback_api: {all(hasattr(xrt, name) for name in callback_names)}")
+    check_xrobot_api(xrt, reporter)
 
     if args.no_init or reporter.failures:
         reporter.info(f"summary: {reporter.failures} failure(s), {reporter.warnings} warning(s)")

@@ -15,7 +15,7 @@ import zmq
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Z latent publisher (test utility)")
-    p.add_argument("--bind", type=str, default="tcp://*:28711", help="ZMQ bind address")
+    p.add_argument("--bind", type=str, default="tcp://127.0.0.1:28711", help="ZMQ bind address")
     p.add_argument("--hz", type=float, default=50.0, help="Publish rate")
     p.add_argument(
         "--mode",
