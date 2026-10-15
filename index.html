@@ -47,7 +47,7 @@
       position: relative;
       min-height: 82vh;
       border-bottom: 1px solid var(--border);
-      padding: 64px 0 52px;
+      padding: 64px 0 100px;
       overflow: hidden;
       display: flex;
       align-items: center;
@@ -156,6 +156,38 @@
       background: rgba(248, 250, 252, 0.18);
       border-color: rgba(255, 255, 255, 0.9);
       transform: translateY(-1px);
+    }
+
+    .hero-video-switch {
+      position: absolute;
+      bottom: 20px;
+      left: 0;
+      right: 0;
+      z-index: 61;
+      pointer-events: none;
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    .hero-video-switch button {
+      pointer-events: auto;
+      font: inherit;
+      font-weight: 600;
+      min-height: 44px;
+      cursor: pointer;
+      background: rgba(15, 23, 42, 0.72);
+    }
+
+    .hero-video-switch button[aria-pressed="true"] {
+      background: #00eaff;
+      border-color: #00eaff;
+      color: #0f172a;
+    }
+
+    .hero-video-switch button:focus-visible {
+      outline: 2px solid #fff;
+      outline-offset: 4px;
     }
 
     .logo-wrap {
@@ -1447,8 +1479,8 @@
     </div>
   </nav>
   <header class="hero">
-    <video class="hero-video" autoplay muted loop playsinline preload="metadata">
-      <source src="./videos/head.mp4" type="video/mp4">
+    <video id="hero-video" class="hero-video" autoplay muted loop playsinline preload="metadata">
+      <source src="./videos/dynamic-demo.mp4" type="video/mp4">
     </video>
     <div class="hero-overlay" aria-hidden="true"></div>
     <div class="container">
@@ -1461,6 +1493,10 @@
       <div class="logo-wrap">
         <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB">
       </div>
+    </div>
+    <div id="hero-video-switch" class="hero-video-switch" role="group" aria-label="Background video">
+      <button id="hero-video-dynamic" class="hero-link" type="button" data-src="./videos/dynamic-demo.mp4" aria-controls="hero-video" aria-pressed="true">Roboparty RP1</button>
+      <button id="hero-video-original" class="hero-link" type="button" data-src="./videos/head.mp4" aria-controls="hero-video" aria-pressed="false">G1</button>
     </div>
   </header>
 
@@ -2184,6 +2220,25 @@
         videos.forEach((video) => observer.observe(video));
       }
 
+      function initHeroVideoSwitch() {
+        const video = document.getElementById("hero-video");
+        const source = video.querySelector("source");
+        const buttons = document.querySelectorAll(".hero-video-switch button");
+
+        buttons.forEach((button) => {
+          button.addEventListener("click", () => {
+            if (button.getAttribute("aria-pressed") !== "true") {
+              source.src = button.dataset.src;
+              video.load();
+              buttons.forEach((item) => {
+                item.setAttribute("aria-pressed", String(item === button));
+              });
+            }
+            video.play().catch(() => {});
+          });
+        });
+      }
+
       function initLanguageSwitch() {
         const switchBtn = document.getElementById("lang-switch");
         if (!switchBtn) return;
@@ -2201,6 +2256,7 @@
             heroCode: "Code",
             heroVideo: "Video",
             heroPdf: "PDF",
+            heroBackground: "Background video",
             teaserVideoTitle: "Teaser Video",
             abstractTitle: "Motivation",
             abstractLead: "<strong class=\"abstract-key\">Tracking-based control</strong> remains the dominant paradigm for humanoid robots, while <strong class=\"abstract-key\">unsupervised RL</strong> offers a complementary path toward general skill acquisition, with strong potential in <span class=\"abstract-item-1\">disturbance robustness</span>, <span class=\"abstract-item-2\">data efficiency</span>, <span class=\"abstract-item-3\">skill generalization</span>, and <span class=\"abstract-item-4\">behavior composition</span>.<br><br>Yet progress has been slowed by <strong class=\"abstract-key\">high training complexity</strong>, <strong class=\"abstract-key\">substantial engineering overhead</strong>, and the <strong class=\"abstract-key\">absence of unified infrastructure</strong>, which has limited broader follow-up work. <strong class=\"abstract-key\">UFO aims to lower this barrier</strong>, enabling wider exploration of unsupervised RL and accelerating the development of humanoid behavioral foundation models.",
@@ -2250,6 +2306,7 @@
             heroCode: "代码",
             heroVideo: "视频",
             heroPdf: "论文",
+            heroBackground: "背景视频",
             teaserVideoTitle: "先导视频",
             abstractTitle: "动机",
             abstractLead: "<strong class=\"abstract-key\">基于跟踪的控制</strong>仍是当前人形机器人最主流的范式，而<strong class=\"abstract-key\">无监督强化学习</strong>为通用技能学习提供了互补路径，在<span class=\"abstract-item-1\">抗扰动能力</span>、<span class=\"abstract-item-2\">数据效率</span>、<span class=\"abstract-item-3\">技能泛化</span>与<span class=\"abstract-item-4\">行为组合</span>方面展现出独特潜力。<br><br>但这一方向长期受限于<strong class=\"abstract-key\">训练复杂度高</strong>、<strong class=\"abstract-key\">工程实现成本大</strong>以及<strong class=\"abstract-key\">缺乏统一基础设施</strong>，导致后续研究推进缓慢。<strong class=\"abstract-key\">UFO 的目标是降低这一门槛</strong>，推动无监督强化学习的更广泛探索，并加速人形行为基础模型的发展。",
@@ -2314,6 +2371,7 @@
           setText("hero-link-code", t.heroCode);
           setText("hero-link-video", t.heroVideo);
           setText("hero-link-pdf", t.heroPdf);
+          document.getElementById("hero-video-switch").setAttribute("aria-label", t.heroBackground);
           setText("teaser-video-title", t.teaserVideoTitle);
           setText("abstract-title", t.abstractTitle);
           setText("abstract-lead", t.abstractLead, true);
@@ -2363,6 +2421,7 @@
         });
       }
 
+      initHeroVideoSwitch();
       initLanguageSwitch();
       initHighlight1ChartOnScroll();
       initGalleryMouseDrag();
