@@ -1,33 +1,68 @@
 version: 1
 artifacts:
-  - path: model/g1_policy/exported/FBcprAuxModel.onnx
-    type: policy_onnx
-    required: true
-    sha256: e0a67a6e7d40e6bb50253da4f4e25451556de2dba6446ebaa05f424aee118067
-    expected_inputs:
-      actor_obs: [1, 721]
-    expected_outputs:
-      action: [1, 29]
-
-  - path: model/g1_policy/exported/backward_encoder.onnx
-    type: backward_onnx
-    required: true
-    sha256: d420fe09720a4d549f501d2e72e946e9cd8adc554617e787a1adebdbac2899f3
-    expected_inputs:
-      state: [batch, 64]
-      privileged_state: [batch, 463]
-    expected_outputs:
-      z: [batch, 256]
-
-  - path: model/g1_policy/exported/metadata.json
-    type: metadata
-    required: false
-    sha256: null
-    note: "Optional metadata file; no authoritative hash was available during onboard deployment."
-
-  - path: model/g1_policy/tracking_inference_mjlab/zs_7.pkl
-    type: tracking_context
-    required: true
-    sha256: null
-    expected_last_dim: 256
-    note: "Required tracking context. No authoritative hash was available during onboard deployment."
+- path: model/g1_policy/exported/FBcprAuxModel.deploy.yaml
+  required: true
+  sha256: c227e1e88420b4469182ad3dfd2ceb06c5b3fbf24bcfef7c4b689f3cf3f8b789
+  type: metadata
+- path: model/g1_policy/exported/FBcprAuxModel.meta.json
+  required: true
+  sha256: 41bef75f8644ea8127563023a41d1f1e2c9e3b03fa27485178bb8f7f57b1d971
+  type: metadata
+- path: model/g1_policy/exported/FBcprAuxModel.onnx
+  required: true
+  sha256: fe58bf17427679a0f0a22ad5f05d7579373a365936154770f31e815e8f0e4ad7
+  type: policy_onnx
+  expected_inputs:
+    actor_obs:
+    - batch
+    - 721
+  expected_outputs:
+    action:
+    - batch
+    - 29
+- path: model/g1_policy/exported/backward_encoder.meta.json
+  required: true
+  sha256: 83cc1fa7d73762165f9ee8c568bb99da43e3c31d29d7b0fa4ea410f6816c9149
+  type: metadata
+- path: model/g1_policy/exported/backward_encoder.onnx
+  required: true
+  sha256: 4333441ba4a393f9493545f5c8a706fa912e8ec358dae1c05c09e31aaae00d4b
+  type: backward_onnx
+  expected_inputs:
+    state:
+    - batch
+    - 64
+    privileged_state:
+    - batch
+    - 463
+  expected_outputs:
+    z:
+    - batch
+    - 256
+- path: model/g1_policy/goal_inference/goal_reaching.pkl
+  required: true
+  sha256: 6eaab9f41eec47a1388336e3daa7856839358130ad85f494a2d01e052a241a87
+  type: tracking_context
+  expected_last_dim: 256
+- path: model/g1_policy/reward_inference/reward_locomotion.pkl
+  required: true
+  sha256: f6c413c3983ca90f7fb037eccb7d3922287253acdab344422a030ef89ad00c67
+  type: tracking_context
+  expected_last_dim: 256
+- path: model/g1_policy/tasks/goal.yaml
+  required: true
+  sha256: 76513b1796b2bf281125d0addc0ae6fdce91d6a99385281e3547a0dbc3d46603
+  type: metadata
+- path: model/g1_policy/tasks/reward.yaml
+  required: true
+  sha256: be55c0f53128c70aa75c74134d7c077675b7d8ab9a03364d3c63ddba4b3a5f53
+  type: metadata
+- path: model/g1_policy/tasks/tracking.yaml
+  required: true
+  sha256: 31ffc6c7e885aa1153a72cb86d6466fe06719d70d2391a4e410e61d973bbd3f4
+  type: metadata
+- path: model/g1_policy/tracking_inference/zs_7.pkl
+  required: true
+  sha256: db8344442f54c052c2d19c689c3747a230c261481fa8ddf1eaa9830b856ec365
+  type: tracking_context
+  expected_last_dim: 256

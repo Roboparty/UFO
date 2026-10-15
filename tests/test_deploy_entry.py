@@ -17,9 +17,35 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import deploy
+import download_hf_model
 from rl_policy import ufo_policy
 from scripts.onboard import interface_config
 from utils.policy import validate_task_config
+
+
+def test_public_model_download_selects_matching_deployment_files(monkeypatch, tmp_path):
+    captured = {}
+
+    def download(**kwargs):
+        captured.update(kwargs)
+        return kwargs["local_dir"]
+
+    monkeypatch.setattr(download_hf_model, "snapshot_download", download)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    download_hf_model.main(["--output-dir", str(tmp_path), "--revision", "test-release"])
+    assert captured["repo_id"] == "xuewang/ufo-g1-policy"
+    assert captured["revision"] == "test-release"
+    assert captured["local_dir"] == str(tmp_path)
+    from fnmatch import fnmatch
+
+    patterns = captured["allow_patterns"]
+    for name in ("exported/FBcprAuxModel.onnx", "exported/FBcprAuxModel.meta.json",
+                 "exported/FBcprAuxModel.deploy.yaml", "tasks/reward.yaml",
+                 "tracking_inference/zs_7.pkl", "goal_inference/goal_reaching.pkl",
+                 "reward_inference/reward_locomotion.pkl"):
+        assert any(fnmatch(f"g1_policy/{name}", pattern) for pattern in patterns)
+    for name in ("checkpoint/model/model.safetensors", "tracking_inference/tracking_7.mp4"):
+        assert not any(fnmatch(f"g1_policy/{name}", pattern) for pattern in patterns)
 
 
 @pytest.fixture

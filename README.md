@@ -2,6 +2,8 @@
 
 Run a UFO policy on **Unitree G1 29-DoF** in MuJoCo or on the robot.
 
+For **RP1** UFO deployment, see [Roboparty/roboparty_deploy](https://github.com/Roboparty/roboparty_deploy).
+
 | Task | `sim2sim` | `sim2real` | Reference |
 |---|---|---|---|
 | `tracking` | Workstation | Onboard | Exported motion z sequence |
@@ -42,7 +44,15 @@ inference from a replay buffer runs in this deployment repository.
 
 ## Model and task files
 
-Copy the ONNX and its matching export sidecars together:
+Download the [G1 FB policy tested on hardware](https://huggingface.co/xuewang/ufo-g1-policy), with matching ONNX sidecars, task configurations and z:
+
+```bash
+python download_hf_model.py
+```
+
+This public download needs no token. It contains the approximately 192M-step model used for `dance1_subject2`, goal reaching and forward walking at 0.7 m/s. The task defaults in this branch match that release. The downloader skips the training checkpoint and preview videos; those remain available in the model repository.
+
+For your own exports, copy the ONNX and its matching sidecars together:
 
 ```text
 model/g1_policy/
