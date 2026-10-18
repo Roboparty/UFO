@@ -102,9 +102,22 @@
     }
 
     .hero h1,
-    .hero .subtitle {
+    .hero .subtitle,
+    .hero-authors {
       color: #f8fafc;
       text-shadow: 0 2px 16px rgba(0, 0, 0, 0.45);
+    }
+
+    .hero-authors {
+      max-width: 900px;
+      margin: 18px auto 0;
+      text-align: center;
+      font-size: clamp(0.95rem, 1.4vw, 1.125rem);
+      line-height: 1.8;
+    }
+
+    .hero-authors span {
+      white-space: nowrap;
     }
 
     .hero-links {
@@ -1485,6 +1498,12 @@
     <div class="hero-overlay" aria-hidden="true"></div>
     <div class="container">
       <h1 id="hero-title"><img class="title-icon" src="./assets/UFO.png" alt="UFO logo"><span class="acronym-letter">UFO</span>: A General <span class="acronym-letter">U</span>nsupervised Reinforcement<br>Learning <span class="acronym-letter">F</span>ramework for Humanoid C<span class="acronym-letter">O</span>ntrol</h1>
+      <p class="hero-authors">
+        <span>Yitang Li</span>, <span>Xue Wang</span>, <span>Yaojie Shen</span>,
+        <span>Zhihao Liu</span>, <span>Siqin Wang</span>, <span>Yiming Zhang</span>,
+        <span>Haoyang Weng</span>, <span>Jia Li</span>, <span>Lei Ye</span>,
+        <span>Yongqi Zhang</span>, <span>Ziqi Han</span>, <span>Hao Zhao</span>
+      </p>
       <div class="hero-links" aria-label="Project links">
         <a id="hero-link-code" class="hero-link" href="https://github.com/Roboparty/UFO">Code</a>
         <a id="hero-link-video" class="hero-link" href="https://youtu.be/uJPcLdn9sNA" target="_blank" rel="noopener noreferrer">Video</a>
