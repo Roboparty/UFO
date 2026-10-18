@@ -103,21 +103,43 @@
 
     .hero h1,
     .hero .subtitle,
-    .hero-authors {
+    .hero-authors,
+    .hero-author-notes {
       color: #f8fafc;
       text-shadow: 0 2px 16px rgba(0, 0, 0, 0.45);
     }
 
-    .hero-authors {
-      max-width: 900px;
-      margin: 18px auto 0;
+    .hero-authors,
+    .hero-author-notes {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px 24px;
       text-align: center;
-      font-size: clamp(0.95rem, 1.4vw, 1.125rem);
+    }
+
+    .hero-authors {
+      max-width: 980px;
+      margin: 18px auto 0;
+      font-size: clamp(1rem, 1.6vw, 1.25rem);
+      font-weight: 700;
       line-height: 1.8;
     }
 
-    .hero-authors span {
+    .hero-author-notes {
+      margin: 12px auto 0;
+      font-size: 0.9rem;
+    }
+
+    .hero-authors > span,
+    .hero-author-notes > span {
       white-space: nowrap;
+    }
+
+    .hero-authors sup,
+    .hero-author-notes sup {
+      font-size: 0.7em;
+      line-height: 0;
     }
 
     .hero-links {
@@ -1499,10 +1521,14 @@
     <div class="container">
       <h1 id="hero-title"><img class="title-icon" src="./assets/UFO.png" alt="UFO logo"><span class="acronym-letter">UFO</span>: A General <span class="acronym-letter">U</span>nsupervised Reinforcement<br>Learning <span class="acronym-letter">F</span>ramework for Humanoid C<span class="acronym-letter">O</span>ntrol</h1>
       <p class="hero-authors">
-        <span>Yitang Li</span>, <span>Xue Wang</span>, <span>Yaojie Shen</span>,
-        <span>Zhihao Liu</span>, <span>Siqin Wang</span>, <span>Yiming Zhang</span>,
-        <span>Haoyang Weng</span>, <span>Jia Li</span>, <span>Lei Ye</span>,
-        <span>Yongqi Zhang</span>, <span>Ziqi Han</span>, <span>Hao Zhao</span>
+        <span>Yitang Li<sup>*</sup></span> <span>Xue Wang<sup>*</sup></span> <span>Yaojie Shen</span>
+        <span>Zhihao Liu</span> <span>Siqin Wang</span> <span>Yiming Zhang</span>
+        <span>Haoyang Weng</span> <span>Jia Li</span> <span>Lei Ye</span>
+        <span>Yongqi Zhang</span> <span>Ziqi Han</span> <span>Hao Zhao<sup>†</sup></span>
+      </p>
+      <p class="hero-author-notes">
+        <span><sup>*</sup> <span id="author-equal-note">Equal contribution</span></span>
+        <span><sup>†</sup> <span id="author-corresponding-note">Corresponding author</span></span>
       </p>
       <div class="hero-links" aria-label="Project links">
         <a id="hero-link-code" class="hero-link" href="https://github.com/Roboparty/UFO">Code</a>
@@ -2276,6 +2302,8 @@
             heroVideo: "Video",
             heroPdf: "PDF",
             heroBackground: "Background video",
+            authorEqual: "Equal contribution",
+            authorCorresponding: "Corresponding author",
             teaserVideoTitle: "Teaser Video",
             abstractTitle: "Motivation",
             abstractLead: "<strong class=\"abstract-key\">Tracking-based control</strong> remains the dominant paradigm for humanoid robots, while <strong class=\"abstract-key\">unsupervised RL</strong> offers a complementary path toward general skill acquisition, with strong potential in <span class=\"abstract-item-1\">disturbance robustness</span>, <span class=\"abstract-item-2\">data efficiency</span>, <span class=\"abstract-item-3\">skill generalization</span>, and <span class=\"abstract-item-4\">behavior composition</span>.<br><br>Yet progress has been slowed by <strong class=\"abstract-key\">high training complexity</strong>, <strong class=\"abstract-key\">substantial engineering overhead</strong>, and the <strong class=\"abstract-key\">absence of unified infrastructure</strong>, which has limited broader follow-up work. <strong class=\"abstract-key\">UFO aims to lower this barrier</strong>, enabling wider exploration of unsupervised RL and accelerating the development of humanoid behavioral foundation models.",
@@ -2326,6 +2354,8 @@
             heroVideo: "视频",
             heroPdf: "论文",
             heroBackground: "背景视频",
+            authorEqual: "共同第一作者",
+            authorCorresponding: "通讯作者",
             teaserVideoTitle: "先导视频",
             abstractTitle: "动机",
             abstractLead: "<strong class=\"abstract-key\">基于跟踪的控制</strong>仍是当前人形机器人最主流的范式，而<strong class=\"abstract-key\">无监督强化学习</strong>为通用技能学习提供了互补路径，在<span class=\"abstract-item-1\">抗扰动能力</span>、<span class=\"abstract-item-2\">数据效率</span>、<span class=\"abstract-item-3\">技能泛化</span>与<span class=\"abstract-item-4\">行为组合</span>方面展现出独特潜力。<br><br>但这一方向长期受限于<strong class=\"abstract-key\">训练复杂度高</strong>、<strong class=\"abstract-key\">工程实现成本大</strong>以及<strong class=\"abstract-key\">缺乏统一基础设施</strong>，导致后续研究推进缓慢。<strong class=\"abstract-key\">UFO 的目标是降低这一门槛</strong>，推动无监督强化学习的更广泛探索，并加速人形行为基础模型的发展。",
@@ -2390,6 +2420,8 @@
           setText("hero-link-code", t.heroCode);
           setText("hero-link-video", t.heroVideo);
           setText("hero-link-pdf", t.heroPdf);
+          setText("author-equal-note", t.authorEqual);
+          setText("author-corresponding-note", t.authorCorresponding);
           document.getElementById("hero-video-switch").setAttribute("aria-label", t.heroBackground);
           setText("teaser-video-title", t.teaserVideoTitle);
           setText("abstract-title", t.abstractTitle);
