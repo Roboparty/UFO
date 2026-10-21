@@ -1629,7 +1629,7 @@
       <div class="container">
         <h2 id="training-update-title">News</h2>
         <p class="training-update-date"><time datetime="2026-10-15">2026-10-15</time> — Training Performance and Multi-Robot Update · <a href="https://github.com/Roboparty/UFO/blob/main/README.md#news" target="_blank" rel="noopener noreferrer">README News</a></p>
-        <p><strong>192M-step FB / mjlab training:</strong> all runs below use <strong>8 × NVIDIA H20</strong>, <strong>BF16 mixed precision</strong>, and <strong>1024-wide networks with shared critics</strong>.</p>
+        <p>We unified and streamlined FB/mjlab training across G1 and RP1, enabling high-throughput experiments and consistent tracking evaluation across both robots.</p>
         <div class="training-table-wrap" role="region" aria-label="Training experiment results" tabindex="0">
           <table class="training-table">
             <thead>
@@ -1642,17 +1642,11 @@
             </thead>
             <tbody>
               <tr><td>G1: original DR + original reward</td><td><strong>12,440</strong></td><td>0.6655</td><td>4 h 45 min</td></tr>
-              <tr><td>G1: extended DR + original reward</td><td><strong>12,467</strong></td><td>0.7406</td><td>≈4 h 51 min</td></tr>
-              <tr><td>G1: extended DR + updated reward</td><td><strong>12,217</strong></td><td>0.7554</td><td>4 h 55 min</td></tr>
               <tr><td>RP1: baseline</td><td><strong>12,485</strong></td><td>0.7139</td><td>4 h 48 min</td></tr>
             </tbody>
           </table>
         </div>
         <h3><a href="https://github.com/Roboparty/UFO/blob/main/README.md#news" target="_blank" rel="noopener noreferrer">Measurement settings and scope</a></h3>
-        <p>All runs use 1,024 environments and batch size 1,024 per GPU, six residual layers, and 16 agent updates per rollout step. FPS counts environment transitions across all eight GPUs and is the median of the last 20 logged intervals, not whole-job throughput.</p>
-        <p>All three G1 runs use LaFAN-40 and 30% lying-down initialization. The original-DR run predates the reset-boundary fix; the extended-DR/original-reward run includes it. These historical runs span code changes and are not a controlled DR/reward ablation. The updated reward replaces the undesired-contact penalty with a body-impact penalty, sets the slip penalty weight to -4, and adds a foot-stumble penalty with weight -2. RP1 uses common LaFAN-40 and no lying-down initialization. BF16 is an experiment override for G1; the current G1 FB default remains FP32 + TF32, while RP1 FB defaults to BF16.</p>
-        <p>EMD is the mean over the last periodic tracking evaluation: all three G1 runs at 188,981,248 steps (862 clips), RP1 at 190,054,400 steps (902 clips), rather than a new evaluation of the final checkpoint. Wall time includes startup, evaluation and checkpoint saving. Times use launcher start/end records, except for G1 extended DR + original reward: its time is estimated from launch to the completed final save because that launcher completion timestamp is unavailable. All runs completed 191,995,904 steps under the nominal 192M budget.</p>
-        <p>The release also replaces the legacy <code>humanoidverse</code> layout with <code>ufo</code>, unifies G1 / RP1 and FB / TeCH commands, fixes reset-boundary observations and contact-force direction, and provides robot-aware ONNX exports, RP1 data and a G1 policy tested on hardware. See <a href="https://github.com/Roboparty/UFO/blob/main/docs/ARCHITECTURE.md" target="_blank" rel="noopener noreferrer">architecture</a> and <a href="https://github.com/Roboparty/UFO/blob/main/docs/TRAIN_INFERENCE.md" target="_blank" rel="noopener noreferrer">training/inference</a>.</p>
       </div>
     </section>
     <section id="abstract">
