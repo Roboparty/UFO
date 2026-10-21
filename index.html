@@ -122,8 +122,20 @@
       max-width: 980px;
       margin: 18px auto 0;
       font-size: clamp(1rem, 1.6vw, 1.25rem);
-      font-weight: 700;
+      font-weight: 400;
       line-height: 1.8;
+    }
+
+    .hero-authors a {
+      color: inherit;
+      font-weight: inherit;
+      text-decoration: none;
+    }
+
+    .hero-authors a:hover,
+    .hero-authors a:focus-visible {
+      text-decoration: underline;
+      text-underline-offset: 0.16em;
     }
 
     .hero-author-notes {
@@ -1521,10 +1533,10 @@
     <div class="container">
       <h1 id="hero-title"><img class="title-icon" src="./assets/UFO.png" alt="UFO logo"><span class="acronym-letter">UFO</span>: A General <span class="acronym-letter">U</span>nsupervised Reinforcement<br>Learning <span class="acronym-letter">F</span>ramework for Humanoid C<span class="acronym-letter">O</span>ntrol</h1>
       <p class="hero-authors">
-        <span>Yitang Li<sup>*</sup></span> <span>Xue Wang<sup>*</sup></span> <span>Yaojie Shen</span>
-        <span>Zhihao Liu</span> <span>Siqin Wang</span> <span>Yiming Zhang</span>
+        <span><a href="https://liyitang22.github.io/" target="_blank" rel="noopener noreferrer">Yitang Li</a><sup>*</sup></span> <span>Xue Wang<sup>*</sup></span> <span><a href="https://yaojie-shen.github.io/" target="_blank" rel="noopener noreferrer">Yaojie Shen</a></span>
+        <span>Zhihao Liu</span> <span>Siqin Wang</span> <span><a href="https://github.com/zerojuhao" target="_blank" rel="noopener noreferrer">Yiming Zhang</a></span>
         <span>Haoyang Weng</span> <span>Jia Li</span> <span>Lei Ye</span>
-        <span>Yongqi Zhang</span> <span>Ziqi Han</span> <span>Hao Zhao<sup>†</sup></span>
+        <span>Yongqi Zhang</span> <span>Ziqi Han</span> <span><a href="https://sites.google.com/view/fromandto/home" target="_blank" rel="noopener noreferrer">Hao Zhao</a><sup>†</sup></span>
       </p>
       <p class="hero-author-notes">
         <span><sup>*</sup> <span id="author-equal-note">Equal contribution</span></span>
