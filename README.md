@@ -22,7 +22,7 @@ UFO is an unsupervised reinforcement learning framework for humanoid control, bu
 
 **The RP1 TeCH policy has not been tested on the physical robot.**
 
-**[G1 / RP1 / RPO training data](https://huggingface.co/datasets/xuewang/UFO-MotionData) and the [G1 FB policy tested on hardware](https://huggingface.co/xuewang/ufo-g1-policy) are available.**
+**[G1 / RP1 / RPO training data](https://huggingface.co/datasets/xuewang/UFO-MotionData), the [G1 FB policy tested on hardware](https://huggingface.co/xuewang/ufo-g1-policy), and the [RPO FB policy](https://huggingface.co/xuewang/ufo-rpo-policy) are available.**
 
 ## News
 
@@ -128,6 +128,16 @@ uv run hf download xuewang/ufo-g1-policy --local-dir model
 ```
 
 The download includes model weights, but no optimizer state or replay buffer. Computing new reward z requires your own saved replay; the provided reward z is ready for deployment.
+
+The [released RPO FB model](https://huggingface.co/xuewang/ufo-rpo-policy) includes its 768M-step checkpoint and matching policy/backward-encoder ONNX exports. It has been validated in simulation, but not on the physical RPO robot:
+
+```bash
+uv run hf download xuewang/ufo-rpo-policy --local-dir model
+./run_inference.sh tracking --model-folder model/rpo_policy --robot rpo \
+  --data-path ufo/data/rpo_23dof_lafan_grounded.pkl --motion-list 0 --save-mp4
+```
+
+The RPO package also omits optimizer state and replay. Computing a new reward-conditioned z requires a compatible saved replay buffer.
 
 ## Documentation
 

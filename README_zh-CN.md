@@ -22,7 +22,7 @@ UFO 是基于 **mjlab** 的人形机器人无监督强化学习框架，支持 *
 
 **RP1 的 TeCH 策略尚未进行真机测试。**
 
-**[G1／RP1／RPO 训练数据](https://huggingface.co/datasets/xuewang/UFO-MotionData)和[已完成真机测试的 G1 FB policy](https://huggingface.co/xuewang/ufo-g1-policy)已发布。**
+**[G1／RP1／RPO 训练数据](https://huggingface.co/datasets/xuewang/UFO-MotionData)、[已完成真机测试的 G1 FB policy](https://huggingface.co/xuewang/ufo-g1-policy)和 [RPO FB policy](https://huggingface.co/xuewang/ufo-rpo-policy)已发布。**
 
 ## News
 
@@ -128,6 +128,16 @@ uv run hf download xuewang/ufo-g1-policy --local-dir model
 ```
 
 发布包包含模型权重，不含优化器状态和 replay buffer。重新计算其他 reward z 需要自行保存的 replay；包内 reward z 可直接用于部署。
+
+[已发布的 RPO FB 模型](https://huggingface.co/xuewang/ufo-rpo-policy)包含 7.68 亿步 checkpoint，以及匹配的 policy／backward-encoder ONNX。该模型已通过仿真验证，但尚未在 RPO 真机上测试：
+
+```bash
+uv run hf download xuewang/ufo-rpo-policy --local-dir model
+./run_inference.sh tracking --model-folder model/rpo_policy --robot rpo \
+  --data-path ufo/data/rpo_23dof_lafan_grounded.pkl --motion-list 0 --save-mp4
+```
+
+RPO 发布包同样不含优化器和 replay；重新计算 reward z 需要兼容的 replay buffer。
 
 ## 更多文档
 
