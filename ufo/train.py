@@ -360,7 +360,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--work-dir", default=None, help="Run directory; defaults to runs/<robot>_<agent>.")
     robot_args = parser.add_mutually_exclusive_group()
-    robot_args.add_argument("--robot", choices=tuple(BUILTIN_ROBOTS), help="Built-in robot: g1 or rp1 (default: g1).")
+    robot_args.add_argument("--robot", choices=tuple(BUILTIN_ROBOTS), help="Built-in robot: g1, rp1 or rpo (default: g1).")
     robot_args.add_argument(
         "--robot-config",
         type=Path,

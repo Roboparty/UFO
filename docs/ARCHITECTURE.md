@@ -46,7 +46,7 @@ ufo/
         storage.py               # transition storage, serialization and latent ZBuffer
   envs/
     config.py                    # task/robot resolution, MJLabEnvConfig and physics scene
-    actuators.py                 # G1 calibration, YAML motor parameters and RP1 command delay
+    actuators.py                 # G1 calibration and YAML motor parameters/delay
     core.py                      # task state, motion sampling, reset and action mapping
     observations.py              # history buffers, coordinate transforms and policy inputs
     rewards.py                   # auxiliary reward kernels and weighted environment reward
@@ -69,12 +69,14 @@ ufo/
     evaluate_mae.py              # tracking/goal joint-position MAE
     robot_setup.py               # compose robot draft and data preparation
     rp1_motion_import.py          # convert RP1 BeyondMimic NPZ to UFO
+    rpo_motion_import.py          # convert the RPO NPZ dataset to UFO
     export_onnx.py                # policy and backward encoder export
   data/                          # robot assets and local motion data
     robots/g1/
       g1_29dof.xml                # G1 physics and visual model
       goal_frames_lafan29dof.json # default G1 goal-frame selections
       meshes/                    # 35 STL files referenced by the model
+    robots/rpo/                  # RPO MJCF, meshes and hardware license
 ```
 
 `training/config.py` declares the supported `AgentConfig` union. `train.py` calls
@@ -89,7 +91,7 @@ Each agent's `optimizers` mapping supplies checkpoint save/load and distributed
 state broadcast; no separate optimizer-name list is maintained.
 Actor and Forward/critic networks use residual layers; Forward/critic ensembles
 use the batched path.
-G1/RP1 FB defaults to a shared critic trunk; `--no-shared-critic` selects independent critics. TeCH retains its
+G1/RP1/RPO FB defaults to a shared critic trunk; `--no-shared-critic` selects independent critics. TeCH retains its
 separate auxiliary critic. The FB-only shared critic lives in
 `agents/fb_cpr_aux/model.py`. Numerical hyperparameters remain configurable.
 
@@ -158,7 +160,7 @@ G1 GPU execution uses FP32 parameters/data with TF32 permitted
 (`torch.set_float32_matmul_precision("high")`), compiled network forwards,
 fused Adam and manual asynchronous 128 MiB gradient buckets. Losses and
 discriminator gradient penalties remain eager. CPU validation uses native
-Adam and eager forwards. RP1 FB enables BF16 autocast through its robot baseline;
+Adam and eager forwards. RP1 and RPO FB enable BF16 autocast through their robot baselines;
 parameters remain FP32. See the [precision defaults](TRAIN_INFERENCE.md#fixed-training-execution).
 
 Policy, simulator and replay exchange device tensors. Replay owns copied
@@ -487,15 +489,20 @@ checkpoint time separately from steady-state FPS. Short numerical checks do
 not establish long-run learning-curve equivalence. This layout cleanup makes
 no throughput claim. Third-party copyright and license notices remain applicable.
 
-## RP1 alongside G1
+## RP1 and RPO alongside G1
 
-`configs/robots/rp1_3.yaml` owns the RP1 physical task and original FB baseline. `training.fb_agent_overrides` is validated against the native FB config; `training.train_overrides` sets the baseline seed, run length and schedules. CLI run lengths, seed and critic choices take precedence. There is no second training loop.
+`configs/robots/rp1_3.yaml` and `configs/robots/rpo.yaml` own their physical tasks
+and FB baselines. `training.fb_agent_overrides` is validated against the native
+FB config; `training.train_overrides` sets seed, run length and schedules. CLI
+run lengths, seed and critic choices take precedence. There is no robot-specific
+training loop.
 
 - `envs/actuators.py` owns G1 motor calibration and YAML parameter expansion;
-  RP1 reuses mjlab's DC motor law and samples command delay once per reset.
+  RP1 and RPO use the RoboParty DC motor envelope and sample command delay once per reset.
 - `envs/contact.py` uses MuJoCo Warp contact forces to sum the normal component of every contact, with a three-substep history. G1 keeps its native net-force sensor.
-- `envs/rewards.py` holds both tasks' reward kernels; only RP1 allocates jerk/momentum history.
+- `envs/rewards.py` holds the shared reward kernels; RP1 and RPO allocate jerk/momentum history.
 - `tools/rp1_motion_import.py` checks the existing BeyondMimic NPZ dataset and emits standard UFO PKL files. Explicit derivative fields are optional; old G1 data follows the existing derivative path.
+- `tools/rpo_motion_import.py` validates the original RPO NPZ manifest, FK and stored velocities before emitting the same UFO PKL format.
 
 The RP1 GPU physics checks are opt-in:
 
@@ -507,7 +514,7 @@ CUDA_VISIBLE_DEVICES=0 UFO_TEST_RP1_MOTION_FILE=ufo/data/rp1_24dof_lafan_v7_10s-
 
 ## User entrypoints and robot selection
 
-`--robot g1|rp1` resolves built-in robot YAML and training data through
+`--robot g1|rp1|rpo` resolves built-in robot YAML and training data through
 `tools/robot_config.py`; custom robots retain `--robot-config` and explicit data.
 `inference/__main__.py` dispatches the three existing parsers without duplicating
 rollout logic. Inference validates robot identity against `RUN/config.json` and

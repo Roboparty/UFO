@@ -513,6 +513,7 @@ def assert_robot_configs_compatible(cli_config: str | Path, manifest_config: str
 BUILTIN_ROBOTS = {
     "g1": ("configs/robots/g1_29dof.yaml", "ufo/data/lafan_29dof_10s-clipped.pkl"),
     "rp1": ("configs/robots/rp1_3.yaml", "ufo/data/rp1_24dof_lafan_v7_10s-clipped.pkl"),
+    "rpo": ("configs/robots/rpo.yaml", "ufo/data/rpo_23dof_lafan_grounded_10s-clipped.pkl"),
 }
 
 

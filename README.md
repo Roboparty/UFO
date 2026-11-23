@@ -18,11 +18,11 @@
   <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" height="72" style="vertical-align: middle;" />
 </p>
 
-UFO is an unsupervised reinforcement learning framework for humanoid control, built on **mjlab**. It supports **Unitree G1 / RoboParty RP1.3**, **FB-CPR-Aux / TeCH**, multi-GPU training, and tracking, reward and goal inference.
+UFO is an unsupervised reinforcement learning framework for humanoid control, built on **mjlab**. It supports **Unitree G1 / RoboParty RP1.3 / RPO**, multi-GPU training, and tracking, reward and goal inference. G1 and RP1 support **FB-CPR-Aux / TeCH**; the released RPO baseline uses FB-CPR-Aux.
 
 **The RP1 TeCH policy has not been tested on the physical robot.**
 
-**[G1 / RP1 training data](https://huggingface.co/datasets/xuewang/UFO-MotionData) and the [G1 FB policy tested on hardware](https://huggingface.co/xuewang/ufo-g1-policy) are available.**
+**[G1 / RP1 / RPO training data](https://huggingface.co/datasets/xuewang/UFO-MotionData) and the [G1 FB policy tested on hardware](https://huggingface.co/xuewang/ufo-g1-policy) are available.**
 
 ## News
 
@@ -71,11 +71,12 @@ Download matching full motions and training clips; the script verifies SHA256:
 ```bash
 bash scripts/download_data.sh g1_lafan
 bash scripts/download_data.sh rp1_lafan
+bash scripts/download_data.sh rpo_lafan
 ```
 
-G1 contains 40 motions. RP1 contains 55 motions at 50 Hz, converted for its 24 controlled joints, with 1,166 training clips. Each robot requires matching data; G1 data cannot be used directly for RP1.
+G1 contains 40 motions. RP1 contains 55 motions and 1,166 training clips; RPO contains 56 motions and 1,168 training clips. RP1 and RPO data are 50 Hz and use their robot-specific joint layouts. Motion data cannot be shared directly between robots.
 
-For local files, see [data paths](docs/ROBOT_ADAPTATION.md#use-converted-data). To convert your own RP1 NPZ files, see [RP1 data import](docs/ROBOT_ADAPTATION.md#rp1-data-import).
+For local files, including RPO data, see [data paths](docs/ROBOT_ADAPTATION.md#use-converted-data). To convert your own source files, see the [RP1](docs/ROBOT_ADAPTATION.md#rp1-data-import) and [RPO](docs/ROBOT_ADAPTATION.md#rpo-data-import) import instructions.
 
 ## Train
 
@@ -84,9 +85,12 @@ After preparing data, choose one command:
 ```bash
 ./run_train.sh --robot g1  --agent fb   --gpu-ids all
 ./run_train.sh --robot rp1 --agent fb   --gpu-ids all
+./run_train.sh --robot rpo --agent fb   --gpu-ids all
 ./run_train.sh --robot g1  --agent tech --gpu-ids all
 ./run_train.sh --robot rp1 --agent tech --gpu-ids all
 ```
+
+RPO TeCH has not been validated and is not part of the released RPO baseline.
 
 `--gpu-ids all` uses all visible GPUs; use `CUDA_VISIBLE_DEVICES` to select them. `--gpu-ids single --smoke` checks startup and sampling only; it does not update weights. See [a short training check with updates](docs/TRAIN_INFERENCE.md#short-training-check).
 
@@ -109,9 +113,9 @@ Inference reads robot settings from the saved run. Use a checkpoint trained for 
   --data-path ufo/data/lafan_29dof.pkl --save-mp4
 ```
 
-- **Tracking:** FB and TeCH, G1 and RP1. Add `--data-path` to select motion data; videos and z are saved under the run directory.
-- **Reward:** FB only; requires saved rank-0 replay. RP1 currently supports root/locomotion tasks.
-- **Goal:** FB and TeCH, G1 and RP1. Use full-motion data for the bundled G1 goals. For RP1 commands and a goal JSON example, see [goal inference](docs/TRAIN_INFERENCE.md#goal-inference).
+- **Tracking:** FB and TeCH for G1/RP1, and FB for RPO. Add `--data-path` to select motion data; videos and z are saved under the run directory.
+- **Reward:** FB only; requires saved rank-0 replay. RP1 and RPO currently support root/locomotion tasks.
+- **Goal:** FB and TeCH for G1/RP1, and FB for RPO. Use full-motion data and a goal JSON matching the selected robot. See [goal inference](docs/TRAIN_INFERENCE.md#goal-inference).
 
 See `./run_inference.sh <tracking|reward|goal> --help` for options.
 
@@ -151,3 +155,4 @@ The download includes model weights, but no optimizer state or replay buffer. Co
 </details>
 
 UFO is released under [CC BY-NC 4.0](LICENSE) for non-commercial research use.
+The RPO model and meshes retain their [CERN-OHL-W-2.0 license](ufo/data/robots/rpo/LICENSE).
