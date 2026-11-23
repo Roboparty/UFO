@@ -18,12 +18,13 @@ EXPECTED_SHA256S=(
 
 usage() {
   cat <<USAGE
-Usage: bash scripts/download_data.sh [g1_lafan|rp1_lafan]
+Usage: bash scripts/download_data.sh [g1_lafan|rp1_lafan|rpo_lafan]
 
 Downloads full motions and 10-second training clips from Hugging Face:
   https://huggingface.co/datasets/${DATASET_REPO}
   g1_lafan:  G1 29-DoF, 40 motions
   rp1_lafan: RP1.3 24-DoF, 55 motions
+  rpo_lafan: RPO 23-DoF, 56 motions
 
 Environment overrides:
   UFO_DATASET_REPO=${DATASET_REPO}
@@ -46,6 +47,20 @@ case "${1:-g1_lafan}" in
     EXPECTED_SHA256S=(
       "5cf6c98c298ad148b9182dc8dda5701a73224653325beee7e5ccb38f7eb0b75c"
       "c6587383d5888782f0dc8ff55b2ce2fd28e22008cd69fd8534e826a38aa4bc1b"
+    )
+    ;;
+  rpo_lafan|rpo)
+    DATASET_FILES=(
+      "rpo/rpo_23dof_lafan_grounded.pkl"
+      "rpo/rpo_23dof_lafan_grounded_10s-clipped.pkl"
+    )
+    DESTS=(
+      "ufo/data/rpo_23dof_lafan_grounded.pkl"
+      "ufo/data/rpo_23dof_lafan_grounded_10s-clipped.pkl"
+    )
+    EXPECTED_SHA256S=(
+      "debf689bf1c555f0a1ba5d14c5b49589c96408cb8d690ca18b617bbe7d83466d"
+      "a3e4c3a0a80c4079c6aa4929eb95de6440ebdbd9f065ae7bdf68abfff5ce87e7"
     )
     ;;
   -h|--help|help)

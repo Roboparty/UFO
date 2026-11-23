@@ -18,11 +18,11 @@
   <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" height="72" style="vertical-align: middle;" />
 </p>
 
-UFO 是基于 **mjlab** 的人形机器人无监督强化学习框架，支持 **Unitree G1 / RoboParty RP1.3**、**FB-CPR-Aux / TeCH**、多卡训练，以及 tracking、reward、goal 三种推理。
+UFO 是基于 **mjlab** 的人形机器人无监督强化学习框架，支持 **Unitree G1 / RoboParty RP1.3 / RPO**、多卡训练，以及 tracking、reward、goal 三种推理。G1 和 RP1 支持 **FB-CPR-Aux / TeCH**，RPO 发布基线使用 FB-CPR-Aux。
 
 **RP1 的 TeCH 策略尚未进行真机测试。**
 
-**[G1／RP1 训练数据](https://huggingface.co/datasets/xuewang/UFO-MotionData)和[已完成真机测试的 G1 FB policy](https://huggingface.co/xuewang/ufo-g1-policy)已发布。**
+**[G1／RP1／RPO 训练数据](https://huggingface.co/datasets/xuewang/UFO-MotionData)和[已完成真机测试的 G1 FB policy](https://huggingface.co/xuewang/ufo-g1-policy)已发布。**
 
 ## News
 
@@ -71,11 +71,12 @@ uv sync --locked
 ```bash
 bash scripts/download_data.sh g1_lafan
 bash scripts/download_data.sh rp1_lafan
+bash scripts/download_data.sh rpo_lafan
 ```
 
-G1 包含 40 条动作；RP1 包含 55 条动作，50 Hz、24 个关节，切分为 1,166 个训练片段。每个机器人需要匹配的动作数据，G1 数据不能直接用于 RP1。
+G1 包含 40 条动作；RP1 包含 55 条动作和 1,166 个训练片段；RPO 包含 56 条动作和 1,168 个训练片段。RP1 和 RPO 数据均为 50 Hz，使用各自的关节布局。不同机器人的数据不能直接混用。
 
-已有文件时，见[本地数据放置说明](docs/ROBOT_ADAPTATION.md#use-converted-data)。自行转换 RP1 NPZ 文件时，见 [RP1 数据导入说明](docs/ROBOT_ADAPTATION.md#rp1-data-import)。
+已有文件（包括 RPO 数据）时，见[本地数据放置说明](docs/ROBOT_ADAPTATION.md#use-converted-data)。自行转换源数据时，见 [RP1](docs/ROBOT_ADAPTATION.md#rp1-data-import) 和 [RPO](docs/ROBOT_ADAPTATION.md#rpo-data-import) 数据导入说明。
 
 ## 训练
 
@@ -84,9 +85,12 @@ G1 包含 40 条动作；RP1 包含 55 条动作，50 Hz、24 个关节，切分
 ```bash
 ./run_train.sh --robot g1  --agent fb   --gpu-ids all
 ./run_train.sh --robot rp1 --agent fb   --gpu-ids all
+./run_train.sh --robot rpo --agent fb   --gpu-ids all
 ./run_train.sh --robot g1  --agent tech --gpu-ids all
 ./run_train.sh --robot rp1 --agent tech --gpu-ids all
 ```
+
+RPO TeCH 尚未验证，不属于当前发布的 RPO 基线。
 
 `--gpu-ids all` 使用所有可见 GPU，通过 `CUDA_VISIBLE_DEVICES` 选择显卡。`--gpu-ids single --smoke` 只检查启动和采样，不更新权重；需要验证参数更新时，使用[短训练检查](docs/TRAIN_INFERENCE.md#short-training-check)。
 
@@ -109,9 +113,9 @@ WANDB_PROJECT=UFO ./run_train.sh --robot g1 --agent fb --gpu-ids all \
   --data-path ufo/data/lafan_29dof.pkl --save-mp4
 ```
 
-- **Tracking**：FB、TeCH 均支持 G1 和 RP1；可用 `--data-path` 指定动作数据，视频和 z 保存到实验目录。
-- **Reward**：仅支持 FB，需要保存的 rank-0 replay；RP1 当前支持根节点运动与移动类任务。
-- **Goal**：FB、TeCH 均支持 G1 和 RP1；内置 G1 目标对应完整动作文件。RP1 命令和目标 JSON 示例见 [Goal 推理](docs/TRAIN_INFERENCE.md#goal-inference)。
+- **Tracking**：G1／RP1 支持 FB 和 TeCH，RPO 支持 FB；可用 `--data-path` 指定动作数据。
+- **Reward**：仅支持 FB，需要保存的 rank-0 replay；RP1 和 RPO 当前支持根节点运动与移动类任务。
+- **Goal**：G1／RP1 支持 FB 和 TeCH，RPO 支持 FB；需要使用与机器人匹配的完整动作数据和目标 JSON。命令见 [Goal 推理](docs/TRAIN_INFERENCE.md#goal-inference)。
 
 完整参数见 `./run_inference.sh <tracking|reward|goal> --help`。
 
@@ -151,3 +155,4 @@ uv run hf download xuewang/ufo-g1-policy --local-dir model
 </details>
 
 UFO 采用 [CC BY-NC 4.0](LICENSE) 许可，用于非商业研究。
+RPO 模型和网格保留其 [CERN-OHL-W-2.0 许可](ufo/data/robots/rpo/LICENSE)。

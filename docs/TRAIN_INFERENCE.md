@@ -19,16 +19,16 @@ export WANDB_API_KEY=your_wandb_api_key
 
 ## Defaults
 
-| FB default | G1 | RP1 |
-|---|---|---|
-| Robot configuration | `configs/robots/g1_29dof.yaml` | `configs/robots/rp1_3.yaml` |
-| Controlled joints | 29 | 24 |
-| Actor / Forward / critic width | 1024 | 1024 |
-| Critic structure | Shared trunk | Shared trunk |
-| Update precision | FP32 with TF32 allowed | BF16 mixed precision; FP32 parameters and losses |
-| Global training steps | 192,000,000 | 384,000,000 |
-| Seed | 4728 | 52 |
-| Model save interval, global steps | 3,200,000 | 16,384,000 |
+| FB default | G1 | RP1 | RPO |
+|---|---|---|---|
+| Robot configuration | `configs/robots/g1_29dof.yaml` | `configs/robots/rp1_3.yaml` | `configs/robots/rpo.yaml` |
+| Controlled joints | 29 | 24 | 23 |
+| Actor / Forward / critic width | 1024 | 1024 | 1024 |
+| Critic structure | Shared trunk | Shared trunk | Shared trunk |
+| Update precision | FP32 with TF32 allowed | BF16 mixed precision; FP32 parameters and losses | BF16 mixed precision; FP32 parameters and losses |
+| Global training steps | 192,000,000 | 384,000,000 | 768,000,000 |
+| Seed | 4728 | 52 | 52 |
+| Model save interval, global steps | 3,200,000 | 16,384,000 | 16,384,000 |
 
 The RP1 FB baseline follows the original IsaacLab `model_45989` configuration;
 migration between simulators does not guarantee matching results. Each robot
@@ -36,8 +36,9 @@ retains its control parameters, auxiliary rewards and domain randomization.
 Both flat-ground slip penalties use horizontal foot velocity, with different
 contact gates; both angular-velocity observation scales are `1.0`.
 
-The CLI defaults below describe G1. RP1 overrides the training budget, seed,
-model-save interval and FB precision in `configs/robots/rp1_3.yaml`.
+The CLI defaults below describe G1. RP1 and RPO override the training budget,
+seed, model-save interval and FB precision in their robot YAML files. RPO TeCH
+has not been validated.
 
 The entrypoint builds defaults from `ufo/train.py`, `ufo/training/config.py` and the selected algorithm config:
 
@@ -97,7 +98,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 UFO_TEST_DISTRIBUTED_BACKEND=nccl \
 ## FB Training
 
 FB defaults to width 1024 and six hidden layers with a shared critic trunk,
-including for custom robots. G1 and RP1 inherit these algorithm defaults. Use
+including for custom robots. G1, RP1 and RPO inherit these algorithm defaults. Use
 `--network-width 2048` to override actor, Forward and critic width, or
 `--no-shared-critic` for independent critics. See [critic topology](ARCHITECTURE.md#fb-critic-topology)
 for the training implications. Use a separate `--work-dir` for each experiment.
@@ -221,6 +222,10 @@ Frames are zero-based indices in that motion. For TeCH, replace the run folder
 with `runs/rp1_tech` (or `runs/g1_tech` for G1). RP1 tracking and FB reward use
 the same commands as G1 with `--model-folder runs/rp1_fb`.
 
+RPO FB uses the same commands with `runs/rpo_fb` and
+`ufo/data/rpo_23dof_lafan_grounded.pkl`; use `--list-motions` before creating an
+RPO-specific goal JSON.
+
 ## Short training check
 
 `--smoke` runs at most 2048 steps, below the 10240-step warmup, so it checks
@@ -234,8 +239,8 @@ CUDA_VISIBLE_DEVICES=0,1 ./run_train.sh --robot g1 --agent fb --gpu-ids all \
   --work-dir runs/g1_fb_check
 ```
 
-Replace `g1` with `rp1` or `fb` with `tech` and use a fresh run folder for each
-combination. This validation command skips tracking evaluation/prioritization
+Replace `g1` with `rp1` or `rpo`, or `fb` with `tech` for the validated G1/RP1
+combinations, and use a fresh run folder for each experiment. This validation command skips tracking evaluation/prioritization
 and produces short-test weights. Check `checkpoint/train_status.json` for
 `optimizer_steps > 0` and `checkpoint/distributed_sync.json` for synchronized
 model state; it is not a training-quality or FPS benchmark.
@@ -336,7 +341,7 @@ this table to interpret their evaluation rows or `--motion-list` values.
 
 ## Unified entrypoints and goal identity
 
-Use `./run_train.sh --robot g1|rp1 --agent fb|tech` and
+Use `./run_train.sh --robot g1|rp1|rpo --agent fb|tech` and
 `./run_inference.sh tracking|reward|goal --model-folder RUN`.
 Robot YAML remains available through `--robot-config` for custom robots.
 Tracking accepts `--list-motions`, `--motion-name NAME ...` and `--motion-list ID ...`.

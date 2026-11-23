@@ -1,7 +1,8 @@
 # Robot adaptation and motion data
 
-G1 and RP1 share the mjlab environment, FB/TeCH algorithms and inference entrypoints.
-Select them with `--robot g1|rp1`. Custom robots use `--robot-config` and motion
+G1, RP1 and RPO share the mjlab environment and inference entrypoints.
+G1/RP1 support FB and TeCH; the released RPO baseline uses FB.
+Select them with `--robot g1|rp1|rpo`. Custom robots use `--robot-config` and motion
 data already retargeted to that robot. The tools generate drafts and convert
 motion formats; they do not perform retargeting or hardware calibration.
 
@@ -128,19 +129,19 @@ The default commands look for these files relative to the repository root:
 |---|---|---|
 | G1 | `ufo/data/lafan_29dof_10s-clipped.pkl` | `ufo/data/lafan_29dof.pkl` |
 | RP1 | `ufo/data/rp1_24dof_lafan_v7_10s-clipped.pkl` | `ufo/data/rp1_24dof_lafan_v7.pkl` |
+| RPO | `ufo/data/rpo_23dof_lafan_grounded_10s-clipped.pkl` | `ufo/data/rpo_23dof_lafan_grounded.pkl` |
 
 Copy or symlink your matching files to these paths. Alternatively, pass their
 actual paths with `--data-path` when training or running inference. Keep full
 motions for goal definitions: motion IDs and frame indices differ from clips.
-Run `bash scripts/download_data.sh g1_lafan` or
-`bash scripts/download_data.sh rp1_lafan` to download the released files from
+Run `bash scripts/download_data.sh g1_lafan`, `rp1_lafan` or `rpo_lafan` to download the released files from
 [UFO-MotionData](https://huggingface.co/datasets/xuewang/UFO-MotionData).
 The downloader verifies existing files by SHA256 and skips downloading
 verified copies. If Hugging Face is unreachable, obtain the same files on a
 machine with access and copy them here; the downloader cannot bypass a network
-block. The RP1 release contains 55 full motions and 1,166 training clips at
-50 Hz. The optional import command below is for converting your own original
-NPZ dataset and manifest.
+block. RP1 contains 55 full motions and 1,166 training clips; RPO contains 56
+full motions and 1,168 training clips. Both are 50 Hz. The optional import
+commands below convert your own original NPZ datasets and manifests.
 
 ## RP1 data import
 
@@ -159,6 +160,24 @@ The importer checks hashes, joint/body order and FK, preserves joint velocities,
 and converts body COM velocities to link-origin velocities. Use `--output` for
 full-motion inference and `--train-output` for training. Motion IDs depend on the
 loaded dataset; full sequences and training clips have different indices.
+
+## RPO data import
+
+The RPO importer accepts the manifest and NPZ files produced by the original
+RPO conversion pipeline:
+
+```bash
+uv run python -m ufo.tools.rpo_motion_import \
+  --manifest /path/to/rpo_lafan/manifest.json \
+  --robot-config configs/robots/rpo.yaml \
+  --output ufo/data/rpo_23dof_lafan_grounded.pkl \
+  --train-output ufo/data/rpo_23dof_lafan_grounded_10s-clipped.pkl \
+  --report /tmp/rpo_import.json
+```
+
+It verifies hashes, joint/body order, finite-difference velocities and sampled
+FK before preserving the source 50 Hz motion states. Output paths must not
+already exist.
 
 ## Validate training and inference
 
